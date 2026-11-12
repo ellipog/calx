@@ -7015,7 +7015,7 @@ $dropall    m->len = 0;
                 }
                 case BMethod::find: case BMethod::find_last: {
                     std::string o = ctype(e->type), r = tmp();
-                    std::string fn = e->bmethod == BMethod::find ? "cx_str_find(" : "cx_str_find_last(";
+                    std::string fn = e->bmethod == BMethod::find ? "cx_text_find(" : "cx_str_find_last(";
                     return view + "cx_usize " + r + " = " + fn + p + ", " + text_arg(0) + "); (" + o + "){ .v = " + r + ", .has = " + r +
                            " != CX_NOT_FOUND }; })";
                 }
@@ -7025,6 +7025,12 @@ $dropall    m->len = 0;
                 case BMethod::trim_suffix:
                     return owned ? keep_part(e, part_view(e)) : part_view(e);
                 case BMethod::split:
+                    // Only as far as the parts the list's indexes reach, when that's all it's used
+                    // for (CLX-309).
+                    if (e->split_first)
+                        return string_list(view + "cx_text_split_first(" + p + ", " + text_arg(0) + ", " + std::to_string(e->split_first) +
+                                               ", " + (e->view_parts ? "1" : "0") + "); })",
+                                           e->type);
                     return string_list(view + "cx_text_split(" + p + ", " + text_arg(0) + ", " + (e->view_parts ? "1" : "0") + "); })",
                                        e->type);
                 case BMethod::split_whitespace:
@@ -7033,7 +7039,7 @@ $dropall    m->len = 0;
                 case BMethod::split_once: {
                     std::string o = ctype(e->type), pair = ctype(e->type->elem), sep = tmp(), k = tmp();
                     std::string rest = "(cx_str){" + p + ".ptr + " + k + " + " + sep + ".len, " + p + ".len - " + k + " - " + sep + ".len}";
-                    return view + "cx_str " + sep + " = " + text_arg(0) + "; cx_usize " + k + " = cx_str_find(" + p + ", " + sep + "); " +
+                    return view + "cx_str " + sep + " = " + text_arg(0) + "; cx_usize " + k + " = cx_text_find(" + p + ", " + sep + "); " +
                            k + " == CX_NOT_FOUND ? (" + o + "){ .has = 0 } : (" + o + "){ .has = 1, .v = (" + pair + "){ .f0 = " +
                            keep_part(e, "(cx_str){" + p + ".ptr, " + k + "}") + ", .f1 = " + keep_part(e, rest) + " } }; })";
                 }

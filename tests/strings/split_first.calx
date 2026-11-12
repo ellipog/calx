@@ -1,0 +1,64 @@
+// A `split` whose list is only indexed by literals stops after the last part those reach
+// (CLX-309): its parts are the whole list's, on random text with separators of one byte, several
+// and not ASCII, at the ends and next to each other, and a list used any other way is whole.
+import std.random.{Random}
+
+// The first three parts, from a list only indexed by literals.
+fn first_three(text: String, sep: String) -> String {
+    let parts = text.split(sep)
+    return "{parts[0]}|{parts[1]}|{parts[2]}"
+}
+
+// The second part, from a list of runes only indexed by a literal.
+fn second_rune(text: String) -> String {
+    let runes = text.split("")
+    return runes[1].copy()
+}
+
+fn main() {
+    var r = Random.new(309)
+    let alphabet: List<String> = ["a", "b", ",", ",", "ab", "é", " ", "x", "--", "-", "0123456789"]
+    let seps: List<String> = [",", " ", "-", "--", "é", "ab", "0123456789"]
+    var same = 0
+    var tried = 0
+    for round in 0usize..400 {
+        var text = String()
+        let len = if round < 20 { round } else { r.index(40) }
+        for _ in 0usize..len {
+            text.push_str(alphabet[r.index(alphabet.len())])
+        }
+        for sep in seps {
+            let whole = text.split(sep)
+            if whole.len() >= 3 {
+                tried += 1
+                if first_three(text, sep) == "{whole[0]}|{whole[1]}|{whole[2]}" {
+                    same += 1
+                } else {
+                    println("{sep} differs on {text}")
+                }
+            }
+        }
+    }
+    println("{same == tried} {tried > 500}")    // out: true true
+
+    let request = "GET /api/users/483?page=2 HTTP/1.1"
+    let parts = request.split(" ")
+    println("{parts[0]} {parts[1]}")    // out: GET /api/users/483?page=2
+    let tail = " 200 49326 \"-\" \"Mozilla/5.0 (Windows NT 10.0; Win64; x64)\""
+    let fields = tail.trim().split(" ")
+    println("{i32.parse(fields[0]) ?? 0} {i64.parse(fields[1]) ?? 0}")    // out: 200 49326
+    let dashed = "a--b--c".split("--")
+    println(dashed[1])    // out: b
+    println(second_rune("héllo"))    // out: é
+
+    // Used whole as well: its length is the whole list's.
+    let counted = "a,b,c,d".split(",")
+    println("{counted.len()} {counted[1]}")    // out: 4 b
+    // Captured by a closure, which its own pass looks at: whole too.
+    let captured = "x,y,z".split(",")
+    println(call(|| captured[2].copy()))    // out: z
+}
+
+fn call(f: Fn() -> String) -> String {
+    return f()
+}

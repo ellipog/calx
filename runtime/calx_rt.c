@@ -1626,12 +1626,21 @@ cx_usize cx_bytes_below(const cx_u8* p, cx_usize n, cx_u8 limit) {
 cx_bool cx_utf8_valid(const cx_u8* p, cx_usize n) {
     cx_usize i = 0;
     while (i < n) {
-        /* Eight ASCII bytes at a time. */
+        /* Eight ASCII bytes at a time, and after eight, 64 at a time while they last, as eight
+         * words or'd together, which clang makes two AVX2 or four SSE2 loads and one test. Most
+         * text read is ASCII, and eight bytes a step took 8% of reading and taking apart an
+         * access log (CLX-309). Text that's mostly not ASCII only tries the eight. */
         if (n - i >= 8) {
             cx_u64 w;
             memcpy(&w, p + i, 8);
             if (!(w & 0x8080808080808080ull)) {
                 i += 8;
+                while (n - i >= 64) {
+                    cx_u64 b[8];
+                    memcpy(b, p + i, 64);
+                    if ((b[0] | b[1] | b[2] | b[3] | b[4] | b[5] | b[6] | b[7]) & 0x8080808080808080ull) break;
+                    i += 64;
+                }
                 continue;
             }
         }

@@ -164,12 +164,21 @@ static inline void copy_part(cx_u8* q, const cx_u8* p, cx_usize n) {
     }
 }
 
-/* Adds the `n` bytes at `p` to `l`. With `view`, the part is a view of them, a `String` that
+/* The parts a split has found so far: the first 16 here, on the stack, and then all of them in a
+ * list grown as any is. A line split into a few fields gets one allocation, of the size it needs,
+ * where a list grown from empty took two or three, at 4, 8 and 16 (CLX-309). */
+#define FEW_PARTS 16
+typedef struct {
+    cx_String few[FEW_PARTS];
+    cx_usize n;
+    cx_StringList more;
+} parts;
+
+/* Adds the `n` bytes at `p` to `b`. With `view`, the part is a view of them, a `String` that
  * doesn't own its bytes, for a list the compiler saw is only looked at while the text it's from
  * stays as it is (CLX-293). Otherwise it's a copy, in a buffer of its own of 16 bytes at least, as
  * `cx_string_grow_to` would make it, but without a call to grow an empty string first. */
-static void list_push(cx_StringList* l, const cx_u8* p, cx_usize n, int view) {
-    l->ptr = (cx_String*)cx_grow(l->ptr, &l->cap, l->len, 1, sizeof(cx_String));
+static void parts_push(parts* b, const cx_u8* p, cx_usize n, int view) {
     cx_String part = {0, 0, 0};
     if (view) {
         part.ptr = (cx_u8*)p;
@@ -182,73 +191,111 @@ static void list_push(cx_StringList* l, const cx_u8* p, cx_usize n, int view) {
         part.len = n;
         part.cap = cap;
     }
+    if (b->n < FEW_PARTS) {
+        b->few[b->n++] = part;
+        return;
+    }
+    cx_StringList* l = &b->more;
+    if (l->len == 0) {
+        l->ptr = (cx_String*)cx_alloc(2 * FEW_PARTS * sizeof(cx_String));
+        l->cap = 2 * FEW_PARTS;
+        memcpy(l->ptr, b->few, FEW_PARTS * sizeof(cx_String));
+        l->len = FEW_PARTS;
+    }
+    l->ptr = (cx_String*)cx_grow(l->ptr, &l->cap, l->len, 1, sizeof(cx_String));
     l->ptr[l->len++] = part;
+}
+
+/* The list of the parts in `b`. */
+static cx_StringList parts_list(parts* b) {
+    if (b->more.len) return b->more;
+    cx_StringList l = {0, 0, 0};
+    if (b->n) {
+        l.ptr = (cx_String*)cx_alloc(b->n * sizeof(cx_String));
+        memcpy(l.ptr, b->few, b->n * sizeof(cx_String));
+        l.len = l.cap = b->n;
+    }
+    return l;
 }
 
 /* The parts of `s` between each `sep`, empty ones too, so there's one more part than there are
  * separators. An empty `sep` gives each rune as a part of its own. A one-byte `sep` is looked
  * for as `cx_text_split_next` does, and a longer one's rarest bytes are worked out once, not for
- * each part (CLX-300). With `view`, the parts are views of `s` (`list_push`). */
-cx_StringList cx_text_split(cx_str s, cx_str sep, int view) {
-    cx_StringList l = {0, 0, 0};
+ * each part (CLX-300). With `view`, the parts are views of `s` (`parts_push`). It stops after
+ * `limit` parts, each as it would be in the whole list. */
+static cx_StringList split_upto(cx_str s, cx_str sep, cx_usize limit, int view) {
+    parts b;
+    b.n = 0;
+    b.more = (cx_StringList){0, 0, 0};
     if (sep.len == 0) {
         cx_usize i = 0;
-        while (i < s.len) {
+        for (cx_usize found = 0; i < s.len && found < limit; found++) {
             cx_usize j = i;
             cx_utf8_next(s.ptr, &j);
-            list_push(&l, s.ptr + i, j - i, view);
+            parts_push(&b, s.ptr + i, j - i, view);
             i = j;
         }
-        return l;
+        return parts_list(&b);
     }
     if (sep.len == 1) {
         const cx_u8* p = s.ptr;
         const cx_u8* end = s.ptr + s.len;
-        for (;;) {
+        for (cx_usize found = 1;; found++) {
             const cx_u8* e = cx_find2(p, end, sep.ptr[0], sep.ptr[0]);
-            list_push(&l, p, (cx_usize)(e - p), view);
-            if (e == end) return l;
+            parts_push(&b, p, (cx_usize)(e - p), view);
+            if (e == end || found == limit) return parts_list(&b);
             p = e + 1;
         }
     }
     cx_usize rare = cx_bytes_rare(sep.ptr, sep.len);
     cx_usize i = 0;
-    for (;;) {
+    for (cx_usize found = 1;; found++) {
         cx_usize k = cx_bytes_find_rare(s.ptr + i, s.len - i, sep.ptr, sep.len, rare);
         if (k == CX_NOT_FOUND) break;
-        list_push(&l, s.ptr + i, k, view);
+        parts_push(&b, s.ptr + i, k, view);
+        if (found == limit) return parts_list(&b);
         i += k + sep.len;
     }
-    list_push(&l, s.ptr + i, s.len - i, view);
-    return l;
+    parts_push(&b, s.ptr + i, s.len - i, view);
+    return parts_list(&b);
 }
+
+cx_StringList cx_text_split(cx_str s, cx_str sep, int view) { return split_upto(s, sep, (cx_usize)-1, view); }
+
+/* Stopping there, a line split into fields of which a program looks at the first few doesn't
+ * look for the ends of the rest (CLX-309). */
+cx_StringList cx_text_split_first(cx_str s, cx_str sep, cx_usize n, int view) { return split_upto(s, sep, n, view); }
 
 /* The words of `s`: the parts between runs of whitespace, none of them empty. */
 cx_StringList cx_text_split_whitespace(cx_str s, int view) {
-    cx_StringList l = {0, 0, 0};
+    parts b;
+    b.n = 0;
+    b.more = (cx_StringList){0, 0, 0};
     cx_usize i = 0, k;
     while (i < s.len) {
         while (i < s.len && space_at(s, i, &k)) i = k;
         if (i == s.len) break;
         cx_usize start = i;
         while (i < s.len && !space_at(s, i, &k)) i = k;
-        list_push(&l, s.ptr + start, i - start, view);
+        parts_push(&b, s.ptr + start, i - start, view);
     }
-    return l;
+    return parts_list(&b);
 }
 
 /* The lines of `s`, each without the `\n`, `\r\n` or `\r` that ends it, as `std.io.Lines` reads
  * them. A last line needn't end with one, and an ending at the very end doesn't start another. */
 cx_StringList cx_text_lines(cx_str s, int view) {
-    cx_StringList l = {0, 0, 0};
+    parts b;
+    b.n = 0;
+    b.more = (cx_StringList){0, 0, 0};
     cx_usize i = 0;
     while (i < s.len) {
         cx_usize j = (cx_usize)(cx_find2(s.ptr + i, s.ptr + s.len, '\n', '\r') - s.ptr);
-        list_push(&l, s.ptr + i, j - i, view);
+        parts_push(&b, s.ptr + i, j - i, view);
         if (j < s.len && s.ptr[j] == '\r' && j + 1 < s.len && s.ptr[j + 1] == '\n') j++;
         i = j + 1;
     }
-    return l;
+    return parts_list(&b);
 }
 
 /* The parts, with `sep` between each two. */

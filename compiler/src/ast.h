@@ -323,6 +323,9 @@ struct Expr {
     // or `if let` keeps: they're views of the text, not copies, since nothing moves them and the
     // text stays as it is while they're in scope (CLX-293).
     bool view_parts = false;
+    // split: when a `let` keeps the list and its only uses are indexes by literals to look at a
+    // part, how many parts those reach, where the split stops; 0 for all of them (CLX-309).
+    std::uint32_t split_first = 0;
     Local* hidden = nullptr;     // match, if let: the new value matched, held for the arms
     bool drop_hidden = false;    // match, if let: `hidden` is dropped when it ends
     bool let_consumes = false;   // if let: the first branch takes the value apart

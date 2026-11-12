@@ -1,0 +1,7 @@
+// A `split` only indexed by literals stops after the last part they reach (CLX-309), but an index
+// past the parts there are fails as it would on the whole list, with its length.
+fn main() {
+    let parts = "a b".split(" ")
+    println(parts[0])    // out: a
+    println(parts[3])    // panic: index 3 is out of bounds for length 2
+}

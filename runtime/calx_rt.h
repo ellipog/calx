@@ -753,6 +753,9 @@ CX_FN(cx_String, cx_text_pad, (cx_str s, cx_usize width, cx_rune fill, cx_bool s
 /* `split`, `split_whitespace` and `lines` as lists: with `view` 1, of views of the text, for a
  * list the compiler saw is only looked at while the text stays as it is (CLX-293). */
 CX_FN(cx_StringList, cx_text_split, (cx_str s, cx_str sep, int view));
+/* The first `n` parts `split` would give, or all of them when there are fewer, for a list a
+ * program only indexes by literals, the highest `n - 1` (CLX-309). */
+CX_FN(cx_StringList, cx_text_split_first, (cx_str s, cx_str sep, cx_usize n, int view));
 CX_FN(cx_StringList, cx_text_split_whitespace, (cx_str s, int view));
 CX_FN(cx_StringList, cx_text_lines, (cx_str s, int view));
 CX_FN(cx_String, cx_text_join, (const cx_String* parts, cx_usize n, cx_str sep, const char* at));
@@ -1227,6 +1230,22 @@ CX_INLINE const cx_u8* cx_find2(const cx_u8* p, const cx_u8* end, cx_u8 a, cx_u8
 #endif
     while (p < end && *p != a && *p != b) p++;
     return p;
+}
+/* `find` and `split_once`: where `needle` first is in `hay`. A one-byte needle, as most are, a
+ * space, a quote or a colon, is looked for here over the first 64 bytes, where the end of a field
+ * mostly is, and past them by `cx_str_find`, whose memchr is quicker over long runs. Four calls
+ * deep to memchr for a field of a few bytes cost a line of an access log more than its search
+ * did (CLX-309). */
+CX_INLINE cx_usize cx_text_find(cx_str hay, cx_str needle) {
+    if (needle.len == 1) {
+        cx_usize n = hay.len < 64 ? hay.len : 64;
+        const cx_u8* e = cx_find2(hay.ptr, hay.ptr + n, needle.ptr[0], needle.ptr[0]);
+        if (e < hay.ptr + n) return (cx_usize)(e - hay.ptr);
+        if (n == hay.len) return CX_NOT_FOUND;
+        cx_usize k = cx_str_find((cx_str){hay.ptr + n, hay.len - n}, needle);
+        return k == CX_NOT_FOUND ? k : k + n;
+    }
+    return cx_str_find(hay, needle);
 }
 /* A loop over `s.split(sep)`: the next part from `*at`, and where the one after starts, or
  * CX_NOT_FOUND after the last. 0 when there are no more. */

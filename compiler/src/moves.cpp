@@ -589,7 +589,10 @@ private:
             if (s->local) {
                 s->local->owns = true;
                 declare(s->local);
-                if (!scan_) keep_parts(s->value, p, s->local);
+                if (!scan_) {
+                    keep_parts(s->value, p, s->local);
+                    split_first(s->value, s->local);
+                }
                 // An arena list holds its arena until its scope ends (D114).
                 Expr* v = s->value;
                 if (s->local->type->arena_list && v->kind == ExprKind::call && v->bmethod == BMethod::arena_list && !scan_) {
@@ -758,6 +761,18 @@ private:
         if (!root && !lasting) return;
         made->view_parts = true;
         if (root) scope_views_.push_back({made, root, scopes_.size()});
+    }
+
+    // A plain `let` of `text.split(sep)` to `l`, whose list the function only indexes by literals,
+    // to look at parts: the split stops after the last part those reach (CLX-309). Its list is
+    // the whole one's first parts, or all of it when there are fewer, so an index past the end
+    // fails as it did, with the same length.
+    void split_first(Expr* v, const Local* l) {
+        if (v->kind != ExprKind::call || v->call != CallKind::builtin_method || v->bmethod != BMethod::split) return;
+        v->split_first = 0;
+        if (l->is_var || whole_.count(l) || touched(l)) return;
+        auto it = indexed_.find(l);
+        if (it != indexed_.end()) v->split_first = it->second;
     }
 
     // A part of text, `e`, kept in a temporary for the statement: a view, unless its text's local
@@ -1169,6 +1184,9 @@ private:
             case ExprKind::closure:
                 if (e->item) {
                     for (Local* l : e->item->captures) {
+                        // Its own pass sees how it uses them, so a list it captures is needed
+                        // whole (CLX-309).
+                        if (scan_) whole_.insert(l);
                         if (!scan_) use(e, l);
                         borrows_.push_back({l, nullptr, e->span, nullptr, {}, false, false, true});
                     }
@@ -1248,6 +1266,16 @@ private:
             // Moving or changing any of it: text in it can't have parts a `let` keeps as views,
             // and a name that keeps parts can't be one (CLX-293).
             if (keep || u == Use::change) touched_.insert(l);
+            // A list looked at only as `l[0]`, `l[1]` and so on: how many elements those reach,
+            // for a `split` to stop at; any other use needs the whole list (CLX-309).
+            if (!keep && u != Use::change && e->kind == ExprKind::index && is_local_name(e->lhs) && e->lhs->local == l &&
+                e->rhs->kind == ExprKind::int_lit && !e->rhs->literal.overflow && e->rhs->literal.int_value < 64) {
+                std::uint32_t reach = static_cast<std::uint32_t>(e->rhs->literal.int_value) + 1;
+                std::uint32_t& r = indexed_[l];
+                if (reach > r) r = reach;
+            } else {
+                whole_.insert(l);
+            }
             return;
         }
         use(e, l, w.path);
@@ -1617,6 +1645,10 @@ private:
     // scope keep, down to the scope `depth`, and those the statements being walked keep in
     // temporaries; and the locals changed since the outermost of those statements started.
     std::unordered_set<const Local*> touched_;
+    // From the scan: how many elements a list's indexes by literals reach, and the lists used in
+    // any other way, which `split_first` needs whole (CLX-309).
+    std::unordered_map<const Local*, std::uint32_t> indexed_;
+    std::unordered_set<const Local*> whole_;
     struct LiveView {
         Expr* parts;
         Local* root;
