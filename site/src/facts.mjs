@@ -39,7 +39,7 @@ export function isDocsFile(entry) {
 }
 
 // When each file in docs/ was first committed and last changed, from one `git log` over the folder.
-// Vercel's clone has only recent history, so the build fetches the rest first, from the public
+// A shallow clone has only recent history, so the build fetches the rest first, from the public
 // repo, which takes a few seconds. If it can't, a clone with only recent history doesn't know the
 // dates before it begins: a file whose oldest commit there is where the history is cut off has no
 // known first date, and one last changed there has no known last date either, so neither is guessed.

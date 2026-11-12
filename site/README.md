@@ -33,7 +33,7 @@ The site has one environment variable, `PUBLIC_ACTA_ROADMAP_KEY`, the roadmap's 
 
 ## Search engines
 
-Every page's links for search engines and link previews use the site's address, https://calxlang.com, set once as `SITE` in [`astro.config.mjs`](astro.config.mjs). Every build uses it, including previews and local builds, so no page names another address.
+Every page's links for search engines and link previews use the site's address, https://calxlang.com, set once as `SITE` in [`astro.config.mjs`](astro.config.mjs). Every build uses it, local ones too, so no page names another address.
 
 - **Each page** has a title and description from its front matter, a canonical link to its own address, and the `og:` tags that link previews read, with `social.png` as the picture.
 - **Titles say which Calx.** "Calx" is also a word in chemistry and anatomy, so a page's `<title>` ends with the part of the site it's in: "Lists | Calx language reference", "std.zlib | Calx standard library", and "Install Calx | The Calx programming language" for the rest. [`src/seo.mjs`](src/seo.mjs) has the rule, and [`src/route-data.mjs`](src/route-data.mjs) applies it to the docs pages, as Starlight's route middleware. The page itself shows the front matter's title as it is.
@@ -46,8 +46,6 @@ Every page's links for search engines and link previews use the site's address, 
 - **Structured data** (schema.org, as JSON-LD, from [`src/seo.mjs`](src/seo.mjs)):
   - the home page names the site Calx (`WebSite`, which Google reads for a result's site name), the language (`ComputerLanguage`, the same as the GitHub repo), and Aaen Studios, by the `@id` aaenz.no gives it, so both sites name one organization;
   - each docs page is a `TechArticle` with its dates and `article:` tags, and gives its crumbs as a `BreadcrumbList`, so a search result can show "Reference › Parallel loops" in place of the address.
-
-Previews aren't indexed: Vercel serves them with `X-Robots-Tag: noindex`.
 
 The pages' furniture for search results and browsers is in every page's head (`HEAD` in [`src/seo.mjs`](src/seo.mjs)): the SVG favicon, with `favicon.ico` beside it for what asks for that file whatever the page says, `apple-touch-icon.png` for a phone's home screen, and `theme-color`, each theme's paper.
 
@@ -107,7 +105,7 @@ Where it reads the board ([`src/roadmap/acta.mjs`](src/roadmap/acta.mjs)):
 - **The build** reads Acta's keyless feed, `/api/public/aaen-studios/clx`, and renders the board as it is, so the page works without JavaScript and search engines read it. If Acta can't be reached, the build still finishes, and the page loads the board in the browser.
 - **The browser** ([`src/scripts/roadmap.js`](src/scripts/roadmap.js)) reads it again when the page opens, and every minute while it's in view. With a roadmap key it reads Acta's roadmap API, `/api/roadmap/v1`, as this visitor, so it knows what they voted for, and they can vote and send ideas. Without one, or if the key is refused, it reads the feed, and the board is read only.
 
-The key is `PUBLIC_ACTA_ROADMAP_KEY`, set in Vercel's project settings, or in `site/.env` to try it locally. It's made in Acta, under the board's public roadmap → Customize → API, and it's publishable: it reaches only what the public page shows, so it's in the page for anyone to read. Acta lets it work only from the sites listed with it, `https://calxlang.com` and, for `npm run dev`, `http://localhost:4321`. Votes and ideas are counted per visitor, a random id the browser keeps in localStorage (`calx-roadmap-visitor`); Acta keeps only a hash of it with the board's id. The ideas a visitor sent are kept there too (`calx-roadmap-mine`), to mark them.
+The key is `PUBLIC_ACTA_ROADMAP_KEY`, set where the VPS builds the site, or in `site/.env` to try it locally. It's made in Acta, under the board's public roadmap → Customize → API, and it's publishable: it reaches only what the public page shows, so it's in the page for anyone to read. Acta lets it work only from the sites listed with it, `https://calxlang.com` and, for `npm run dev`, `http://localhost:4321`. Votes and ideas are counted per visitor, a random id the browser keeps in localStorage (`calx-roadmap-visitor`); Acta keeps only a hash of it with the board's id. The ideas a visitor sent are kept there too (`calx-roadmap-mine`), to mark them.
 
 What it does:
 
