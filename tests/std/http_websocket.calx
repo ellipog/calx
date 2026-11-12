@@ -1,0 +1,352 @@
+// std.http.websocket against a WebSocket server of the test's own, written on std.net: the
+// handshake with a header and a subprotocol, a frame in the same packet as the handshake's
+// answer, text and binary both ways, a fragmented message with a ping between its frames, each
+// form of a frame's length, closes from either side, a dropped connection, what breaks the
+// protocol, a message past the limit, a refusal, and messages sent while it opens (CLX-320). The
+// server says what it saw of each close, so the codes the client sends are checked too.
+import std.bytes.{base64}
+import std.hash.{sha1}
+import std.http.{Header}
+import std.http.websocket.{Message, WebSocket, connect, open}
+import std.net.{Conn, Event, Net}
+import std.thread.{Task}
+
+struct Serving {
+    port: Sender<u16>
+    log: Sender<String>
+}
+
+// A frame from the server, which RFC 6455 leaves unmasked; `masked` breaks that rule.
+fn frame(op: u8, payload: List<u8>, fin: bool, masked: bool) -> List<u8> {
+    var out = List<u8>()
+    out.push(if fin { 0x80 | op } else { op })
+    let n = payload.len()
+    let mask_bit: u8 = if masked { 0x80 } else { 0 }
+    if n < 126 {
+        out.push(mask_bit | u8.wrap(n))
+    } else if n < 65536 {
+        out.push(mask_bit | 126)
+        out.push(u8.wrap(n >> 8))
+        out.push(u8.wrap(n))
+    } else {
+        out.push(mask_bit | 127)
+        for k in 0usize..8 {
+            out.push(u8.wrap(n >> (56 - 8 * k)))
+        }
+    }
+    if masked {
+        let key: List<u8> = [1, 2, 3, 4]
+        out.extend(key)
+        for i in 0..n {
+            out.push(payload[i] ^ key[i % 4])
+        }
+    } else {
+        out.extend(payload)
+    }
+    return out
+}
+
+fn text_frame(s: String) -> List<u8> {
+    return frame(1, s.to_bytes(), true, false)
+}
+
+fn close_frame(code: u16, reason: String) -> List<u8> {
+    var p = List<u8>()
+    p.push(u8.wrap(u32(code) >> 8))
+    p.push(u8.wrap(code))
+    p.extend(reason.to_bytes())
+    return frame(8, p, true, false)
+}
+
+fn pattern(n: usize) -> List<u8> {
+    var out = List<u8>()
+    for i in 0..n {
+        out.push(u8.wrap(i * 7 + i / 256))
+    }
+    return out
+}
+
+// Answers the handshake whose head is `head`: true if the connection is a WebSocket now.
+fn handshake(net: Net, c: Conn, head: String) -> bool {
+    let lines = head.split("\r\n")
+    let words = lines[0].split(" ")
+    let path = if words.len() > 1 { words[1].copy() } else { String() }
+    var key = String()
+    var greeting = String()
+    var protocols = String()
+    for line in lines {
+        if let (name, value) = line.split_once(":") {
+            let lower = name.to_lower_root()
+            if lower == "sec-websocket-key" {
+                key = value.trim().copy()
+            } else if lower == "x-greeting" {
+                greeting = value.trim().copy()
+            } else if lower == "sec-websocket-protocol" {
+                protocols = value.trim().copy()
+            }
+        }
+    }
+    if path == "/nope" {
+        net.write(c, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_bytes())
+        net.close(c)
+        return false
+    }
+    let accept = if path == "/badaccept" { String("dGhlIHNhbXBsZSBub25jZQ==") } else { base64(sha1("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11".to_bytes())) }
+    var answer = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n"
+    if protocols.contains("chat") {
+        answer.push_str("Sec-WebSocket-Protocol: chat\r\n")
+    }
+    answer.push_str("\r\n")
+    var bytes = answer.to_bytes()
+    if path == "/hello" {
+        // A frame right behind the head, in the same write.
+        bytes.extend(text_frame("hello {greeting}"))
+    }
+    net.write(c, bytes)
+    return true
+}
+
+// What the server does with a text message.
+fn act(net: Net, c: Conn, s: String, closing: mut Set<u32>) {
+    if s.starts_with("echo:") {
+        net.write(c, text_frame(s))
+    } else if s == "fragments" {
+        var out = frame(1, "fr".to_bytes(), false, false)
+        out.extend(frame(9, "p".to_bytes(), true, false))
+        out.extend(frame(0, "ag".to_bytes(), false, false))
+        out.extend(frame(0, "ments".to_bytes(), true, false))
+        net.write(c, out)
+    } else if s == "big" {
+        var out = frame(2, pattern(70000), true, false)
+        out.extend(text_frame("x".repeat(300)))
+        net.write(c, out)
+    } else if s == "close" {
+        closing.insert(c.id())
+        net.write(c, close_frame(4000, "bye"))
+    } else if s == "drop" {
+        net.close(c)
+    } else if s == "badutf8" {
+        net.write(c, frame(1, [0xC3, 0x28], true, false))
+    } else if s == "masked" {
+        net.write(c, frame(1, "hi".to_bytes(), true, true))
+    } else if s == "toolong" {
+        net.write(c, frame(2, pattern(200), true, false))
+    }
+}
+
+// Each whole frame at the start of `buf`, taken off it.
+fn frames(net: Net, c: Conn, buf: mut List<u8>, closing: mut Set<u32>, log: mut Sender<String>) {
+    var start: usize = 0
+    loop {
+        let avail = buf.len() - start
+        if avail < 2 {
+            break
+        }
+        let op = buf[start] & 0x0F
+        let masked = (buf[start + 1] & 0x80) != 0
+        var n = usize(buf[start + 1] & 0x7F)
+        var at: usize = 2
+        if n == 126 {
+            if avail < 4 {
+                break
+            }
+            n = (usize(buf[start + 2]) << 8) | usize(buf[start + 3])
+            at = 4
+        } else if n == 127 {
+            if avail < 10 {
+                break
+            }
+            n = 0
+            for k in 0usize..8 {
+                n = (n << 8) | usize(buf[start + 2 + k])
+            }
+            at = 10
+        }
+        let key_at = at
+        if masked {
+            at += 4
+        }
+        if avail < at + n {
+            break
+        }
+        var payload = List<u8>()
+        for i in 0..n {
+            let b = buf[start + at + i]
+            payload.push(if masked { b ^ buf[start + key_at + i % 4] } else { b })
+        }
+        start += at + n
+        if not masked {
+            log.send(String("a frame from the client wasn't masked"))
+        }
+        if op == 1 {
+            act(net, c, String.from_utf8(payload) ?? String(), mut closing)
+        } else if op == 2 {
+            net.write(c, frame(2, payload, true, false))
+        } else if op == 10 {
+            net.write(c, text_frame("pong:{String.from_utf8(payload) ?? String()}"))
+        } else if op == 8 {
+            let code = if payload.len() >= 2 { (u32(payload[0]) << 8) | u32(payload[1]) } else { 1005 }
+            let reason = if payload.len() > 2 { String.from_utf8(payload[2..].copy()) ?? String() } else { String() }
+            if closing.contains(c.id()) {
+                log.send("the client answered the close with {code}")
+            } else {
+                log.send(if reason.is_empty() { "the client closed with {code}" } else { "the client closed with {code} {reason}" })
+                net.write(c, close_frame(u16.wrap(code), ""))
+            }
+            net.close(c)
+        }
+    }
+    if start > 0 {
+        let rest = buf[start..].copy()
+        buf = rest
+    }
+}
+
+impl Task for Serving {
+    fn run(own self) {
+        let net = Net.new()!
+        self.port.send(net.listen("127.0.0.1", 0)!)
+        var bufs = Map<u32, List<u8>>()
+        var upgraded = Set<u32>()
+        var closing = Set<u32>()
+        var events = List<Event>()
+        loop {
+            net.poll(-1, mut events)
+            for e in events {
+                match e {
+                    Accepted(c) => bufs.insert(c.id(), List<u8>()),
+                    Received(c) => {
+                        var buf = bufs.remove(c.id()) ?? List<u8>()
+                        _ = net.read(c, mut buf)
+                        if not upgraded.contains(c.id()) {
+                            let text = String.from_utf8(buf.copy()) ?? String()
+                            if let end = text.find("\r\n\r\n") {
+                                if handshake(net, c, text[..end].copy()) {
+                                    upgraded.insert(c.id())
+                                }
+                                let rest = buf[end + 4..].copy()
+                                buf = rest
+                            }
+                        }
+                        if upgraded.contains(c.id()) {
+                            frames(net, c, mut buf, mut closing, mut self.log)
+                        }
+                        bufs.insert(c.id(), buf)
+                    },
+                    Closed(c) => {
+                        _ = bufs.remove(c.id())
+                        upgraded.remove(c.id())
+                        closing.remove(c.id())
+                    },
+                    _ => {},
+                }
+            }
+        }
+    }
+}
+
+// The next message, as a line.
+fn next(ws: WebSocket) -> String {
+    return match ws.receive(10000) {
+        ok(some(Message.Text(t))) => if t.len() > 40 { "text of {t.len()} bytes" } else { "text {t}" },
+        ok(some(Message.Binary(b))) => if b.len() > 16 { "binary of {b.len()} bytes, {if b == pattern(b.len()) { "as sent" } else { "changed" }}" } else { "binary {b}" },
+        ok(none) => String("nothing"),
+        err(e) => "error: {e}",
+    }
+}
+
+fn main() {
+    var ports = Receiver<u16>()
+    var log = Receiver<String>()
+    _ = unsafe { Thread.spawn(Serving { port: ports.sender(), log: log.sender() }) }
+    let port = ports.wait()!
+    let base = "ws://127.0.0.1:{port}"
+
+    // The handshake, with a header and two subprotocols offered, and a frame behind its answer.
+    let ws = connect("{base}/hello", [Header { name: "X-Greeting", value: "hi" }, Header { name: "Sec-WebSocket-Protocol", value: "chat, superchat" }])!
+    println("{ws.is_open()} {ws.protocol()}")    // out: true some(chat)
+    println(next(ws))    // out: text hello hi
+    ws.send_text("echo:héllo ✓")!
+    println(next(ws))    // out: text echo:héllo ✓
+    ws.send_binary([0, 1, 2, 255])!
+    println(next(ws))    // out: binary [0, 1, 2, 255]
+    // Three frames with a ping between them are one message, and the ping is answered.
+    ws.send_text("fragments")!
+    println(next(ws))    // out: text fragments
+    println(next(ws))    // out: text pong:p
+    // 64-bit and 16-bit lengths.
+    ws.send_text("big")!
+    println(next(ws))    // out: binary of 70000 bytes, as sent
+    println(next(ws))    // out: text of 300 bytes
+    ws.send_binary(pattern(100000))!
+    println(next(ws))    // out: binary of 100000 bytes, as sent
+    println("{ws.receive(0)!}")    // out: none
+    ws.close(1000, "done")
+    println(log.wait()!)    // out: the client closed with 1000 done
+
+    // The server closes.
+    let closed = connect("{base}/")!
+    closed.send_text("close")!
+    println(next(closed))    // out: error: closed: 4000 bye
+    println(log.wait()!)    // out: the client answered the close with 4000
+    match closed.send_text("more") {
+        ok => println("sent"),
+        err(e) => println("{e}"),    // out: closed: 4000 bye
+    }
+    println(next(closed))    // out: error: closed: 4000 bye
+    closed.close()
+
+    // The connection ends without a close.
+    let dropped = connect("{base}/")!
+    dropped.send_text("drop")!
+    println(next(dropped))    // out: error: closed: 1006
+    dropped.close()
+
+    // What breaks the protocol closes the connection with the code that says why.
+    let bad = connect("{base}/")!
+    bad.send_text("badutf8")!
+    println(next(bad))    // out: error: the server broke the WebSocket protocol
+    println(log.wait()!)    // out: the client closed with 1007
+    bad.close()
+    let masked = connect("{base}/")!
+    masked.send_text("masked")!
+    println(next(masked))    // out: error: the server broke the WebSocket protocol
+    println(log.wait()!)    // out: the client closed with 1002
+    masked.close()
+    let small = connect("{base}/", limit: 100)!
+    small.send_text("toolong")!
+    println(next(small))    // out: error: a message is longer than the limit
+    println(log.wait()!)    // out: the client closed with 1009
+    small.close()
+
+    // Opening, while the program goes on: what's sent goes once it's open.
+    let early = open("{base}/")
+    early.send_text("echo:early")!
+    println(next(early))    // out: text echo:early
+    println("{early.is_open()}")    // out: true
+    early.close(4001, "a reason long enough that it has to be cut: ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé")
+    // "the client closed with 4001 " and 122 bytes of reason: one more é would end at byte 124.
+    println("{log.wait()!.len()}")    // out: 150
+
+    // What can't open.
+    let failures = ["{base}/nope", "{base}/badaccept", String("http://127.0.0.1/"), String("ws://127.0.0.1:1/")]
+    for url in failures {
+        match connect(url, timeout_ms: 5000) {
+            ok(w) => {
+                println("opened")
+                w.close()
+            },
+            err(e) => println("{e}"),
+        }
+    }
+    // out: refused with status 404
+    // out: the server broke the WebSocket protocol
+    // out: not a valid WebSocket URL
+    // out: can't connect: nothing answered at the host and port
+    let never = open("ws://127.0.0.1:1/")
+    match never.receive(5000) {
+        ok(_) => println("a message"),
+        err(e) => println("{e}"),    // out: can't connect: nothing answered at the host and port
+    }
+    never.close()
+}

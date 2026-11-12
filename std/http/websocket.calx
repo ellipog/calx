@@ -1,0 +1,276 @@
+/// A WebSocket client (RFC 6455), for talking to a server that pushes messages as they happen:
+/// `ws://` and `wss://` URLs, as Python's `websockets` and `websocket-client` connect to them, on
+/// the system's own HTTP client, so TLS certificates are checked as `std.http`'s are. Each
+/// connection runs on a thread of its own, which answers pings and the server's close by itself,
+/// and keeps the messages that come until the program takes them.
+module std.http.websocket
+
+import std.http.{Header}
+
+extern "C" {
+    fn cx_http_ws_open(url: *const u8, url_len: usize, head: *const u8, head_len: usize, timeout_ms: u32, limit: usize) -> u64
+    fn cx_http_ws_state(h: u64) -> i32
+    fn cx_http_ws_wait_open(h: u64) -> i32
+    fn cx_http_ws_send(h: u64, op: u32, p: *const u8, n: usize) -> i32
+    fn cx_http_ws_receive(h: u64, timeout_ms: u32) -> i32
+    fn cx_http_ws_taken_len(h: u64) -> usize
+    fn cx_http_ws_taken(h: u64, out: *u8)
+    fn cx_http_ws_code(h: u64) -> i32
+    fn cx_http_ws_text_len(h: u64, which: u32) -> usize
+    fn cx_http_ws_text(h: u64, which: u32, out: *u8)
+    fn cx_http_ws_close(h: u64, code: u32, reason: *const u8, reason_len: usize)
+}
+
+/// A message, as the server sent it whole: its frames joined.
+pub enum Message {
+    /// A text message, which the connection has checked is UTF-8.
+    Text(String)
+    Binary(List<u8>)
+}
+
+/// Why a WebSocket didn't open, or what it ended with.
+pub enum Error {
+    /// The URL isn't `ws://` or `wss://`, a host, and an optional port and path, in printable
+    /// ASCII.
+    BadUrl
+    /// No name server knows the host.
+    Resolve
+    /// Nothing answered at the host and port.
+    Connect
+    /// The TLS handshake failed, or the system doesn't trust the server's certificate.
+    Tls
+    /// It didn't open within the time, or the server didn't answer `close` in time.
+    Timeout
+    /// The server answered with this status rather than switching to a WebSocket, as `404` for a
+    /// path it has none at, or `403` for an origin it turns away.
+    Refused(u32)
+    /// The server broke the WebSocket protocol: its answer to the handshake, or a frame, isn't
+    /// what RFC 6455 allows, or text it sent isn't UTF-8. The connection is closed, and the
+    /// server was told why.
+    Protocol
+    /// A message is longer than the limit. The connection is closed, with the code that says so.
+    TooLong
+    /// The connection is closed, with the code and reason of the server's close: 1000 when it
+    /// closed normally, 1001 when it's going away, or 1006 when the connection ended without a
+    /// close, as when the server or the network went down.
+    Closed(u16, String)
+    /// There's no HTTP client on the system: on Linux, libcurl isn't installed.
+    Unavailable
+    /// Something else, with the system's error code.
+    Os(i32)
+}
+
+/// What went wrong, in words: `refused with status 404`, or `closed: 1000 bye`.
+impl Display for Error {
+    fn show(self) {
+        match self {
+            BadUrl => print("not a valid WebSocket URL"),
+            Resolve => print("can't find the host"),
+            Connect => print("can't connect: nothing answered at the host and port"),
+            Tls => print("the TLS handshake failed"),
+            Timeout => print("timed out"),
+            Refused(status) => print("refused with status {status}"),
+            Protocol => print("the server broke the WebSocket protocol"),
+            TooLong => print("a message is longer than the limit"),
+            Closed(code, reason) => print(if reason.is_empty() { "closed: {code}" } else { "closed: {code} {reason}" }),
+            Unavailable => print("there's no HTTP client on this system; on Linux, install libcurl"),
+            Os(code) => print("system error {code}"),
+        }
+    }
+}
+
+/// A WebSocket connection: opening, open, or closed and keeping what it ended with. It's a
+/// handle, so it can't be copied. It's open until `close`, the server closes it, or the program
+/// ends.
+@handle
+pub struct WebSocket {
+    handle: u64
+}
+
+// Whether the byte can be in a header's name: RFC 9110's token.
+fn token_byte(b: u8) -> bool {
+    if (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) {
+        return true
+    }
+    let marks = "!#$%&'*+-.^_`|~"
+    for i in 0..marks.len() {
+        if marks.byte_at(i) == b {
+            return true
+        }
+    }
+    return false
+}
+
+@track_caller
+fn header_lines(headers: List<Header>) -> String {
+    var s = String()
+    for h in headers {
+        if h.name.is_empty() {
+            panic("a header's name is empty")
+        }
+        for i in 0..h.name.len() {
+            if not token_byte(h.name.byte_at(i)) {
+                panic("the header name {h.name} has a byte HTTP doesn't allow in names")
+            }
+        }
+        let lower = h.name.to_lower_root()
+        if lower == "host" or lower == "connection" or lower == "upgrade" or lower == "content-length" or
+            lower == "transfer-encoding" or lower == "sec-websocket-key" or lower == "sec-websocket-version" or
+            lower == "sec-websocket-extensions" {
+            panic("std.http.websocket sets the {h.name} header itself")
+        }
+        for i in 0..h.value.len() {
+            let b = h.value.byte_at(i)
+            if b == 13 or b == 10 or b == 0 {
+                panic("the value of the header {h.name} has a line break or a zero byte")
+            }
+        }
+        s.push_str(h.name)
+        s.push_str(": ")
+        s.push_str(h.value)
+        s.push_str("\r\n")
+    }
+    return s
+}
+
+fn error_of(h: u64, kind: i32) -> Error {
+    let code = unsafe { cx_http_ws_code(h) }
+    return match kind {
+        1 => Error.BadUrl,
+        2 => Error.Resolve,
+        3 => Error.Connect,
+        4 => Error.Tls,
+        5 => Error.Timeout,
+        6 => Error.Protocol,
+        7 => Error.TooLong,
+        8 => Error.Unavailable,
+        10 => Error.Refused(u32.wrap(code)),
+        11 => Error.Closed(u16.wrap(code), text_of(h, 0)),
+        _ => Error.Os(code),
+    }
+}
+
+fn text_of(h: u64, which: u32) -> String {
+    var bytes = List<u8>()
+    unsafe {
+        let n = cx_http_ws_text_len(h, which)
+        bytes.reserve(n)
+        cx_http_ws_text(h, which, bytes.as_mut_ptr())
+        bytes.set_len(n)
+    }
+    return String.from_utf8(bytes) ?? String()
+}
+
+/// Starts opening a WebSocket to `url`, `ws://` or `wss://`, with the header lines, and gives it
+/// at once, while it opens on its own thread, for a program with a loop of its own, as
+/// `std.http.get` gives a request: messages sent while it opens go once it's open, and `receive`
+/// gives none until then. Opening may take `timeout_ms` milliseconds, and a message from the
+/// server may be `limit` bytes long. If it can't open, `receive`, `send_text` and `wait_open`
+/// fail with why.
+///
+/// The headers go with the handshake, such as `Authorization`, `Origin` or
+/// `Sec-WebSocket-Protocol`. It panics if the timeout is 0, or a header's name isn't a token, its
+/// value has a line break, or it's one the handshake sets itself: Host, Connection, Upgrade,
+/// Content-Length, Transfer-Encoding, or Sec-WebSocket-Key, -Version or -Extensions.
+@track_caller
+pub fn open(url: String, headers: List<Header> = [], timeout_ms: u32 = 30000, limit: usize = 67108864) -> WebSocket {
+    if timeout_ms == 0 {
+        panic("a WebSocket's timeout is at least 1 ms")
+    }
+    let head = header_lines(headers)
+    let h = unsafe { cx_http_ws_open(url.as_ptr(), url.len(), head.as_ptr(), head.len(), timeout_ms, limit) }
+    return WebSocket { handle: h }
+}
+
+/// Opens a WebSocket to `url` and waits until it's open, as a script wants it, as Python's
+/// `websockets.connect` does: `open`, then `wait_open`. Messages may be 64 MiB long unless
+/// `limit` says.
+@track_caller
+pub fn connect(url: String, headers: List<Header> = [], timeout_ms: u32 = 30000, limit: usize = 67108864) -> WebSocket ! Error {
+    let ws = open(url, headers, timeout_ms, limit)
+    try ws.wait_open()
+    return ws
+}
+
+impl WebSocket {
+    /// Whether it's open: the handshake is done and it hasn't closed.
+    pub fn is_open(self) -> bool {
+        return unsafe { cx_http_ws_state(self.handle) } == 1
+    }
+
+    /// Waits while it opens, and fails with why if it didn't, or with what it ended with if it
+    /// has closed since.
+    pub fn wait_open(self) ! Error {
+        let kind = unsafe { cx_http_ws_wait_open(self.handle) }
+        if kind != 0 {
+            fail error_of(self.handle, kind)
+        }
+    }
+
+    /// Sends `text` as a text message, or queues it while the connection opens. Fails with what
+    /// the connection ended with, if it has.
+    pub fn send_text(self, text: String) ! Error {
+        let kind = unsafe { cx_http_ws_send(self.handle, 1, text.as_ptr(), text.len()) }
+        if kind != 0 {
+            fail error_of(self.handle, kind)
+        }
+    }
+
+    /// Sends `bytes` as a binary message, as `send_text` sends text.
+    pub fn send_binary(self, bytes: List<u8>) ! Error {
+        let kind = unsafe { cx_http_ws_send(self.handle, 2, bytes.as_ptr(), bytes.len()) }
+        if kind != 0 {
+            fail error_of(self.handle, kind)
+        }
+    }
+
+    /// The next message from the server, waiting up to `timeout_ms` milliseconds for one, or
+    /// `none` if none came in that time. With 0 it doesn't wait, for a loop that does other work.
+    /// Messages that came before the connection ended are given first; after them it fails with
+    /// what the connection ended with: `Closed` with the server's code and reason, or why it
+    /// didn't open.
+    pub fn receive(self, timeout_ms: u32) -> Message? ! Error {
+        let kind = unsafe { cx_http_ws_receive(self.handle, timeout_ms) }
+        if kind == 0 {
+            return none
+        }
+        if kind < 0 {
+            fail error_of(self.handle, -kind)
+        }
+        var bytes = List<u8>()
+        unsafe {
+            let n = cx_http_ws_taken_len(self.handle)
+            bytes.reserve(n)
+            cx_http_ws_taken(self.handle, bytes.as_mut_ptr())
+            bytes.set_len(n)
+        }
+        if kind == 1 {
+            return some(Message.Text(String.from_utf8(bytes) ?? String()))
+        }
+        return some(Message.Binary(bytes))
+    }
+
+    /// The subprotocol the server chose from those the `Sec-WebSocket-Protocol` header offered,
+    /// or `none`: known once it's open.
+    pub fn protocol(self) -> String? {
+        let p = text_of(self.handle, 1)
+        if p.is_empty() {
+            return none
+        }
+        return some(p)
+    }
+
+    /// Closes it with `code` and `reason`, as Python's `close()` does: 1000, a normal close,
+    /// unless it says. It waits for the server to answer, for as long as the timeout it was opened
+    /// with, up to 10 seconds, then lets the connection go. A close has room for 123 bytes of
+    /// reason, so a longer one is cut at the last whole rune that fits.
+    pub fn close(own self, code: u16 = 1000, reason: String = "") {
+        var n = reason.len().min(123)
+        while n > 0 and n < reason.len() and (reason.byte_at(n) & 0xC0) == 0x80 {
+            n -= 1
+        }
+        unsafe {
+            cx_http_ws_close(self.handle, u32(code), reason.as_ptr(), n)
+        }
+    }
+}

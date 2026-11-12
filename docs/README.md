@@ -132,6 +132,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 60. [std.unicode.names](std/unicode-names.md): Unicode 16's character names, a rune's name and the runes a name or alias stands for, as Python's `unicodedata.name` and `lookup` give them, and as Java's `Character.getName` and `codePointOf` do
 61. [std.nbt](std/nbt.md): Minecraft's NBT read and written as vanilla 26.3's `NbtIo` does it, files gzipped, zlib-compressed or plain, tags changed in place, SNBT read, shown and laid out, and NBT paths, as vanilla does, and FTB's SNBT as FTB Library does
 62. [std.nbt.region](std/nbt-region.md): Minecraft's region files read and written as vanilla 26.3's `RegionFile` reads and writes them, chunks in each compression, chunks in files of their own, and broken chunks, read as vanilla reads them
+63. [std.http.websocket](std/http-websocket.md): a WebSocket client, `ws://` and `wss://` on the system's own HTTP client, text and binary messages sent and received, with pings and closes answered on a thread of its own, as Python's `websockets` connects
 
 ### Java compatibility
 
