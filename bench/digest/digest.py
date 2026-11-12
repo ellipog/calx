@@ -3,6 +3,7 @@
 # generator, which pure Python would take half a minute over; these speeds don't depend on what
 # the bytes are. Python has no CRC-64 or AES, so those rows are Calx's alone.
 import hashlib
+import platform
 import random
 import ssl
 import sys
@@ -28,7 +29,7 @@ for _ in range(ROUNDS):
         t0 = time.perf_counter_ns()
         total += step()
         best[k] = min(best[k], time.perf_counter_ns() - t0)
-print(f"python {sys.version.split()[0]}, {ssl.OPENSSL_VERSION}, zlib {zlib.ZLIB_RUNTIME_VERSION}")
+print(f"python {sys.version.split()[0]} on {platform.machine()}, {ssl.OPENSSL_VERSION}, zlib {zlib.ZLIB_RUNTIME_VERSION}")
 for k, (name, _) in enumerate(steps):
     print(f"{name}: {SIZE / (1 << 20) / (best[k] / 1e9):.0f} MiB/s")
 print(f"total {total}")

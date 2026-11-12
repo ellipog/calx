@@ -113,6 +113,15 @@ The checksums, from [bench/digest](../../bench/README.md#hashes-checksums-and-ae
 
 The tables alone did CRC-32 at 2,600 MiB/s, before it was folded with PCLMUL (CLX-281).
 
+On GitHub's Arm runners, from the [bench workflow](../../.github/workflows/bench.yml) with the nightly of 2026-11-12 (5847f42): the better of two rounds. They're shared virtual machines, so the numbers are rough.
+
+| | Calx, Neoverse N2 | zlib 1.3 | Calx, Apple M1 | Apple's zlib 1.2.12 |
+| --- | --- | --- | --- | --- |
+| CRC-32 | 16,200 MiB/s | 3,800 MiB/s | 24,200 MiB/s | 29,600 MiB/s |
+| Adler-32 | 16,500 MiB/s | 3,000 MiB/s | 32,100 MiB/s | 15,800 MiB/s |
+
+The N2 is Azure's Cobalt 100, under Ubuntu 24.04, whose Python 3.12 links Ubuntu's zlib 1.3. Windows on the same processor gave Calx the same numbers, within 5%. Apple's zlib folds CRC-32 faster than these four lanes do: CLX-288.
+
 Minecraft's region files, compressed again: 2,000 of the chunks vanilla 26.3 saved, 68.9 MB inflated, each deflated as a zlib stream on one P-core, best of five runs for Calx and of up to three for Java 25's `Deflater`. Java's level 6 gives back vanilla's own bytes exactly.
 
 | Level | Calx, µs a chunk | Java, µs a chunk | Calx's bytes, of Java's |

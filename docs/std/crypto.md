@@ -92,9 +92,9 @@ fn main() {
 | Part | How |
 | --- | --- |
 | Random bytes | `BCryptGenRandom` on Windows, `getrandom` on Linux |
-| AES | AES-NI where the processor has it, which `cpuid` tells when a `Cfb8` is made. Otherwise a byte-at-a-time version, with the S-box worked out from its definition |
+| AES | AES-NI where the processor has it, which `cpuid` tells when a `Cfb8` is made, or Arm64's AES instructions, which the system tells. Otherwise a byte-at-a-time version, with the S-box worked out from its definition |
 | CFB8 encrypting | One AES block for each byte, since each byte's input is the one before it. That's 16 times the work of the block modes, and it's why this mode is slow everywhere |
-| CFB8 decrypting | The inputs are the ciphertext, which is all there already, so it runs 16 blocks at once through AES-NI's pipeline |
+| CFB8 decrypting | The inputs are the ciphertext, which is all there already, so it runs 16 blocks at once through the AES instructions' pipeline |
 | RSA numbers | 64-bit limbs, and Montgomery multiplication with a final subtraction that takes the same time whether it's needed or not |
 | RSA private key | Decrypting and signing use the Chinese remainder theorem: two exponents of half the length. Exponents go four bits a step from a table that's read whole each time, so neither the time nor the memory touched depends on the key's bits |
 | RSA public key | Read once, with what Montgomery multiplication needs worked out then: R^2 mod n, as 2^k R doubled up from the top power of 2 below n and squared 6 times, so about 64 doublings where 1 doubled 128 times a limb takes 4096 for 2048 bits. The exponent isn't secret, so it goes a bit at a time, a squaring each and a multiply for each that's set: 65537 takes 17 |
@@ -111,5 +111,7 @@ On our benchmark, an i9-13900K. The decrypt and verify rows are the best of 60 r
 | A 2048-bit `SHA256withRSA` verify, of 32 bytes | 18.5 µs | 21 µs |
 
 The ciphers run for every byte a player sends or gets, so they're what counts. RSA runs once for each login, and a verify once for each signed chat message. Java's best rounds come after its JIT has warmed up. Interleaving the multiply's two carry chains with ADX would make RSA about twice as fast again.
+
+On GitHub's Arm runners, with Arm64's AES instructions, from the [bench workflow](../../.github/workflows/bench.yml) with the nightly of 2026-11-12 (5847f42), rough: CFB8 encrypted at 101 MiB/s and decrypted at 463 MiB/s on a Neoverse N2, Azure's Cobalt 100, on Linux and on Windows alike. A virtual Apple M1 did 69 and 893 MiB/s. In the units of the table above, 101 MiB/s is 106 MB/s.
 
 `std.crypto` is written in Calx over those runtime calls: [std/crypto.calx](../../std/crypto.calx).
