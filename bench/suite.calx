@@ -1324,6 +1324,12 @@ fn main() {
         return
     }
     let calx = compiler(root.copy())
+    if env.os() == "linux" and calx.starts_with("/mnt/") {
+        // Starting it from there takes about 6 ms, and each file of its runtime and library a
+        // build checks takes about 1 more, against 1.0 to 1.6 ms for a whole no-op build from
+        // an installed copy (CLX-302).
+        eprintln("suite: the compiler is on the Windows drive, which WSL reads through a file share, so every build pays for that; for the dx group's numbers, copy build/compiler/linux/calx into a bin/ folder in the Linux file system, with runtime/ and std/ beside that bin/, as an installed Calx is, and run this with the copy")
+    }
     let python = find_python()
     var all_langs: List<String> = []
     for l in LANGS {
