@@ -4,8 +4,17 @@ name: bench
 # i9-13900K the rest were measured on (CLX-281): the newest nightly, installed as a user installs
 # it, against the runner's Python, whose hashlib is OpenSSL's. Shared virtual machines, so the
 # numbers are rough. Run it by hand: `gh workflow run bench`.
+#
+# With `-f checkout=true` it also builds bench/digest with the nightly's compiler but this commit's
+# runtime and std, through CALX_HOME, and times the two in turn on the same runner: a change to the
+# runtime's C measured in minutes, before a nightly has it (CLX-288). The `total` lines must match.
 on:
   workflow_dispatch:
+    inputs:
+      checkout:
+        description: Also time this commit's runtime and std, against the nightly's
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -31,6 +40,8 @@ jobs:
           fi
       - name: Time
         shell: bash
+        env:
+          CHECKOUT: ${{ inputs.checkout }}
         run: |
           exe=""
           if [[ "$RUNNER_OS" == Windows ]]; then exe=".exe"; fi
@@ -47,10 +58,23 @@ jobs:
             esac
             "$calx" version
             "$calx" build --release bench/digest/digest.calx -o build/digest$exe
-            # Two rounds, Calx and Python taking turns.
-            for round in 1 2; do
+            rounds="1 2"
+            if [[ "$CHECKOUT" == true ]]; then
+              home="$PWD"
+              cache="$PWD/build/cache-checkout"
+              if [[ "$RUNNER_OS" == Windows ]]; then home="$(cygpath -w "$home")"; cache="$(cygpath -w "$cache")"; fi
+              CALX_HOME="$home" CALX_CACHE="$cache" "$calx" build --release bench/digest/digest.calx -o build/digest_checkout$exe
+              echo "checkout: $(git rev-parse --short HEAD)"
+              rounds="1 2 3"
+            fi
+            # The builds and Python taking turns.
+            for round in $rounds; do
               echo "calx, round $round"
               "build/digest$exe"
+              if [[ "$CHECKOUT" == true ]]; then
+                echo "calx with the checkout's runtime, round $round"
+                "build/digest_checkout$exe"
+              fi
               echo "python, round $round"
               "$py" -I bench/digest/digest.py
             done
