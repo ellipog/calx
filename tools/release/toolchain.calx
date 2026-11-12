@@ -3,6 +3,7 @@
 //
 //     calx run tools/release/toolchain.calx -- windows MINGW LLVM OUT NAME
 //     calx run tools/release/toolchain.calx -- linux LLVM OUT NAME
+//     calx run tools/release/toolchain.calx -- macos LLVM OUT NAME
 //
 // LLVM is LLVM's own release for the system and processor this runs on, and MINGW llvm-mingw's
 // UCRT release of the same LLVM version, unpacked; OUT is the folder to make. NAME, such as
@@ -21,6 +22,11 @@
 // On Linux, programs use the system's C library, its headers and start files, which libc6-dev or
 // glibc-devel has, and compiler-rt's builtins and start files rather than GCC's, so GCC needn't
 // be installed. clang and lld are stripped of their symbols, a fifth of clang and a third of lld.
+//
+// On macOS, programs use the SDK from Apple's Command Line Tools, libSystem's headers and stubs,
+// which Apple's license keeps from being carried. The toolchain has clang, lld as ld64.lld, and
+// dsymutil for stack traces' lines (CLX-278), stripped and signed again ad hoc, since Apple
+// Silicon runs only signed code, and compiler-rt's builtins for macOS.
 
 import std.env.{arch, args}
 import std.fs.{Entry, Kind, copy, is_file, make_dir_all, metadata, walk, write_text}
@@ -38,11 +44,54 @@ fn run(a: List<String>) ! String {
         try windows(a[1], a[2], a[3], a[4])
     } else if a.len() == 4 and a[0] == "linux" {
         try linux(a[1], a[2], a[3])
+    } else if a.len() == 4 and a[0] == "macos" {
+        try macos(a[1], a[2], a[3])
     } else {
         eprintln("usage: calx run tools/release/toolchain.calx -- windows MINGW LLVM OUT NAME")
         eprintln("       calx run tools/release/toolchain.calx -- linux LLVM OUT NAME")
+        eprintln("       calx run tools/release/toolchain.calx -- macos LLVM OUT NAME")
         exit(2)
     }
+}
+
+// clang-<major> in LLVM's bin/, the program bin/clang links to.
+fn clang_driver(llvm: String) -> String ! String {
+    for e in try entries("{llvm}/bin") {
+        let n = e.path[llvm.len() + 5..e.path.len()]
+        if e.kind == Kind.File and n.starts_with("clang-") and digits(n[6..n.len()]) {
+            return e.path.copy()
+        }
+    }
+    fail "no clang-<major> in {llvm}/bin"
+}
+
+// Runs a tool of the toolchain's making, failing with what it said.
+fn tool(what: String, c: Command) ! String {
+    match c.output() {
+        ok(o) => {
+            if not o.status.success() {
+                fail "{what} failed: {o.error_text()}"
+            }
+        },
+        err(e) => fail "can't run {what}: {e}",
+    }
+}
+
+fn macos(llvm: String, out: String, name: String) ! String {
+    var kept = Kept { files: 0 }
+    try put(mut kept, try clang_driver(llvm.copy()), "{out}/bin/clang")
+    // lld picks how to link from the name it's started by: ld64.lld links as Apple's ld64.
+    try put(mut kept, "{llvm}/bin/lld", "{out}/bin/ld64.lld")
+    let dsym = if is_file("{llvm}/bin/dsymutil") { "{llvm}/bin/dsymutil" } else { "{llvm}/bin/llvm-dsymutil" }
+    try put(mut kept, dsym, "{out}/bin/dsymutil")
+    let programs: List<String> = ["{out}/bin/clang", "{out}/bin/ld64.lld", "{out}/bin/dsymutil"]
+    try tool("llvm-strip", Command.new("{llvm}/bin/llvm-strip").arg("--strip-all").args(programs.copy()))
+    // Stripping breaks each program's signature, so they're signed again, ad hoc, as the linker
+    // signs what it links.
+    try tool("codesign", Command.new("codesign").args(["--force", "--sign", "-"]).args(programs))
+    try put(mut kept, "{llvm}/include/llvm/Support/LICENSE.TXT", "{out}/LICENSE.TXT")
+    try tree(mut kept, llvm, out, "lib/clang", |rel: String| { rel.contains("/include/") or rel.ends_with("/lib/darwin/libclang_rt.osx.a") })
+    try finish(out, name, kept)
 }
 
 fn windows(mingw: String, llvm: String, out: String, name: String) ! String {
@@ -73,28 +122,10 @@ fn windows(mingw: String, llvm: String, out: String, name: String) ! String {
 fn linux(llvm: String, out: String, name: String) ! String {
     var kept = Kept { files: 0 }
     // bin/clang is a link to clang-<major>, the program.
-    var driver = String()
-    for e in try entries("{llvm}/bin") {
-        let n = e.path[llvm.len() + 5..e.path.len()]
-        if e.kind == Kind.File and n.starts_with("clang-") and digits(n[6..n.len()]) {
-            driver = e.path.copy()
-        }
-    }
-    if driver.is_empty() {
-        fail "no clang-<major> in {llvm}/bin"
-    }
-    try put(mut kept, driver, "{out}/bin/clang")
+    try put(mut kept, try clang_driver(llvm.copy()), "{out}/bin/clang")
     // lld picks how to link from the name it's started by.
     try put(mut kept, "{llvm}/bin/lld", "{out}/bin/ld.lld")
-    let strip = Command.new("{llvm}/bin/llvm-strip").args(["--strip-all", "{out}/bin/clang", "{out}/bin/ld.lld"])
-    match strip.output() {
-        ok(o) => {
-            if not o.status.success() {
-                fail "llvm-strip failed: {o.error_text()}"
-            }
-        },
-        err(e) => fail "can't run {llvm}/bin/llvm-strip: {e}",
-    }
+    try tool("llvm-strip", Command.new("{llvm}/bin/llvm-strip").args(["--strip-all", "{out}/bin/clang", "{out}/bin/ld.lld"]))
     // What clang loads for the target it was made for: compiler-rt's builtins and start files, no
     // unwinder, which C needs none of, and lld. The runtime's stack traces use glibc's backtrace,
     // which loads the system's libgcc_s by itself.

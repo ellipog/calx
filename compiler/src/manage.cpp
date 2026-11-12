@@ -204,7 +204,8 @@ std::vector<std::string> remove_from_path(const fs::path& bin) {
         fs::path real = fs::weakly_canonical(p, pec);
         return !pec && real == real_bin;
     };
-    for (const char* name : {".profile", ".bashrc", ".zshrc"}) {
+    // Linux's, then macOS's, where the install script uses .zprofile and .bash_profile.
+    for (const char* name : {".profile", ".bashrc", ".zshrc", ".zprofile", ".bash_profile"}) {
         fs::path rc = fs::path(home) / name;
         std::string text;
         if (!read_file(rc.string(), text)) continue;

@@ -2,14 +2,15 @@
 //
 //     calx run tools/release/package.calx -- VERSION OS CALX UPDATER OUT [TOOLCHAIN]
 //
-// OS is `windows` or `linux`. CALX and UPDATER are the built compiler and calx-update. TOOLCHAIN
-// is the folder tools/release/toolchain.calx made, with clang, lld and what they build with, which
-// an installation keeps as toolchain/, so nothing else needs installing (CLX-110). The processor
-// is the one this runs on, which CI builds each release on: CPU, `x64` or `arm64` (D612). It
-// writes to the folder OUT:
+// OS is `windows`, `linux` or `macos`. CALX and UPDATER are the built compiler and calx-update.
+// TOOLCHAIN is the folder tools/release/toolchain.calx made, with clang, lld and what they build
+// with, which an installation keeps as toolchain/, so nothing else needs installing (CLX-110). The
+// processor is the one this runs on, which CI builds each release on: CPU, `x64` or `arm64`
+// (D612). It writes to the folder OUT:
 //
-// - calx-VERSION-windows-CPU.zip, or calx-VERSION-linux-CPU.tar.gz, holding calx/ with bin/calx
-//   and bin/calx-update, runtime/, std/, LICENSE, VERSION, and with a toolchain, toolchain.txt;
+// - calx-VERSION-windows-CPU.zip, or calx-VERSION-OS-CPU.tar.gz on Linux and macOS, holding
+//   calx/ with bin/calx and bin/calx-update, runtime/, std/, LICENSE, VERSION, and with a
+//   toolchain, toolchain.txt;
 // - with a toolchain, calx-toolchain-NAME-OS-CPU.tar.xz, holding toolchain/, NAME being the
 //   toolchain's VERSION in lower case with `-` between its words, such as
 //   `llvm-23.1.5-llvm-mingw-20261104`. toolchain.txt names it, with its SHA-256 and its VERSION,
@@ -30,8 +31,8 @@ import std.zip.{Writer as ZipWriter}
 
 fn main() {
     let a = args()
-    if (a.len() != 5 and a.len() != 6) or (a[1] != "windows" and a[1] != "linux") {
-        eprintln("usage: calx run tools/release/package.calx -- VERSION windows|linux CALX UPDATER OUT [TOOLCHAIN]")
+    if (a.len() != 5 and a.len() != 6) or (a[1] != "windows" and a[1] != "linux" and a[1] != "macos") {
+        eprintln("usage: calx run tools/release/package.calx -- VERSION windows|linux|macos CALX UPDATER OUT [TOOLCHAIN]")
         exit(2)
     }
     let toolchain = if a.len() == 6 { a[5].copy() } else { String() }

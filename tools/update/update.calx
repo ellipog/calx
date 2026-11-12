@@ -23,7 +23,7 @@
 // scripts run that, and it mends an installation whose toolchain went missing. With CALX_INSTALLER=1,
 // as install.ps1 runs it, it leaves out its closing line, since the script says the rest.
 
-import std.env.{arch, args, variable}
+import std.env.{arch, args, os, variable}
 import std.fs.{FsError, is_dir, is_file, list, make_dir_all, read, remove_dir_all, rename, separator, write}
 import std.hash.{sha256}
 import std.http.{Header, get}
@@ -136,7 +136,7 @@ fn run(o: Options, l: Look) ! String {
     let tag = tag_of(target)
     // This calx-update was built for the processor the installation is for.
     let cpu = if arch() == "aarch64" { "arm64" } else { "x64" }
-    let file = "calx-{target}-{if windows { "windows" } else { "linux" }}-{cpu}.{if windows { "zip" } else { "tar.gz" }}"
+    let file = "calx-{target}-{os()}-{cpu}.{if windows { "zip" } else { "tar.gz" }}"
     let url = "{releases()}/download/{tag}/{file}"
     if not l.color {
         println("Downloading {file}...")

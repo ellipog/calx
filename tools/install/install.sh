@@ -1,12 +1,13 @@
 #!/bin/sh
-# Installs Calx on Linux:
+# Installs Calx on Linux and macOS:
 #
 #     curl -fsSL https://calxlang.com/install.sh | sh
 #
 # It downloads the newest release from github.com/ellipog/calx, and the toolchain it builds
 # programs with, clang and lld, unless that's installed already, checks their SHA-256s, unpacks
 # them into ~/.calx, and puts ~/.calx/bin on your PATH. No root is needed. Run it again to
-# reinstall; `calx update` keeps an installation up to date.
+# reinstall; `calx update` keeps an installation up to date. On macOS, programs build against
+# Apple's SDK, from the Command Line Tools, which `xcode-select --install` installs.
 #
 # CALX_INSTALL installs somewhere else, CALX_CHANNEL=nightly picks the nightly releases,
 # CALX_NO_MODIFY_PATH=1 leaves PATH alone, and CALX_RELEASES points at a mirror.
@@ -226,13 +227,28 @@ stop() {
     exit 1
 }
 
-# The release for the processor: x64, or Arm64, which a Raspberry Pi 5 or an Arm server runs, and
-# which its release counts on ARMv8.2 from (D612).
+# The release for the system and processor: x64, or Arm64, which a Raspberry Pi 5 or an Arm
+# server runs, and which its release counts on ARMv8.2 from (D612), or a Mac with Apple Silicon,
+# whose shell may say x86_64 when it runs under Rosetta.
+os=linux
 case "$(uname -s) $(uname -m)" in
     "Linux x86_64") cpu=x64 ;;
     "Linux aarch64" | "Linux arm64") cpu=arm64 ;;
-    *) stop "Calx releases are for Linux on x64 and Arm64, and Windows on x64; on $(uname -s) $(uname -m), build it from source: https://calxlang.com/guide/install/#building-from-source" ;;
+    "Darwin arm64") os=macos cpu=arm64 ;;
+    "Darwin x86_64")
+        if [ "$(sysctl -n sysctl.proc_translated 2> /dev/null)" = 1 ]; then
+            os=macos cpu=arm64
+        else
+            stop "Calx's macOS release is for Apple Silicon; on an Intel Mac, build it from source: https://calxlang.com/guide/install/#building-from-source"
+        fi
+        ;;
+    *) stop "Calx releases are for Linux on x64 and Arm64, macOS on Apple Silicon, and Windows; on $(uname -s) $(uname -m), build it from source: https://calxlang.com/guide/install/#building-from-source" ;;
 esac
+# A Mac builds programs against Apple's SDK, which the Command Line Tools have. `xcode-select -p`
+# says where they are without offering to install them.
+if [ "$os" = macos ] && ! xcode-select -p > /dev/null 2>&1; then
+    stop "Calx builds programs against Apple's SDK, from the Command Line Tools: run \`xcode-select --install\`, then this again"
+fi
 
 if command -v curl > /dev/null 2>&1; then
     get() { curl -fsSL -A calx-install "$1"; }
@@ -284,7 +300,7 @@ case "$version" in
     *-nightly.*) tag=nightly ;;
     *) tag="v$version" ;;
 esac
-file="calx-$version-linux-$cpu.tar.gz"
+file="calx-$version-$os-$cpu.tar.gz"
 url="$releases/download/$tag/$file"
 
 temp=$(mktemp -d)
@@ -361,9 +377,18 @@ if [ "${CALX_NO_MODIFY_PATH:-}" != 1 ]; then
         *)
             line="export PATH=\"$bin:\$PATH\""
             added=""
-            for rc in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
-                # .profile always; the others only if the shell they're for is set up.
-                if [ "$rc" = "$HOME/.profile" ] || [ -f "$rc" ]; then
+            # On Linux .profile always; the others only if the shell they're for is set up. On
+            # macOS .zprofile always, since zsh is its shell and reads no .profile, and a Terminal
+            # window starts a login shell; .bash_profile if bash is set up.
+            if [ "$os" = macos ]; then
+                always="$HOME/.zprofile"
+                set -- "$HOME/.zprofile" "$HOME/.bash_profile"
+            else
+                always="$HOME/.profile"
+                set -- "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"
+            fi
+            for rc in "$@"; do
+                if [ "$rc" = "$always" ] || [ -f "$rc" ]; then
                     if ! grep -qF "$line" "$rc" 2> /dev/null; then
                         printf '\n# Calx\n%s\n' "$line" >> "$rc"
                         added="$added $rc"
@@ -404,23 +429,26 @@ else
     echo "Calx is installed in $root."
 fi
 
-# Calx builds programs with clang: the toolchain's, or one installed for a release without one.
-if [ ! -x "$root/toolchain/bin/clang" ] && [ -z "${CALX_CC:-}" ] && ! command -v clang > /dev/null 2>&1; then
-    echo
-    echo "Calx builds programs with clang, which isn't installed yet. On Ubuntu or Debian:"
-    echo "    sudo apt install clang lld"
-fi
-# Programs use the system's C library, with its headers and start files.
-if [ ! -f /usr/include/stdio.h ]; then
-    echo
-    echo "Calx builds programs with the C library's headers, which aren't installed yet."
-    echo "On Ubuntu or Debian:  sudo apt install libc6-dev"
-    echo "On Fedora:            sudo dnf install glibc-devel"
-fi
-if ! ldconfig -p 2> /dev/null | grep -q 'libcurl'; then
-    echo
-    echo "\`calx update\` downloads with libcurl, which isn't installed. On Ubuntu or Debian:"
-    echo "    sudo apt install libcurl4"
+# What Linux needs beside: macOS has libcurl, and the SDK was checked before the download.
+if [ "$os" = linux ]; then
+    # Calx builds programs with clang: the toolchain's, or one installed for a release without one.
+    if [ ! -x "$root/toolchain/bin/clang" ] && [ -z "${CALX_CC:-}" ] && ! command -v clang > /dev/null 2>&1; then
+        echo
+        echo "Calx builds programs with clang, which isn't installed yet. On Ubuntu or Debian:"
+        echo "    sudo apt install clang lld"
+    fi
+    # Programs use the system's C library, with its headers and start files.
+    if [ ! -f /usr/include/stdio.h ]; then
+        echo
+        echo "Calx builds programs with the C library's headers, which aren't installed yet."
+        echo "On Ubuntu or Debian:  sudo apt install libc6-dev"
+        echo "On Fedora:            sudo dnf install glibc-devel"
+    fi
+    if ! ldconfig -p 2> /dev/null | grep -q 'libcurl'; then
+        echo
+        echo "\`calx update\` downloads with libcurl, which isn't installed. On Ubuntu or Debian:"
+        echo "    sudo apt install libcurl4"
+    fi
 fi
 echo
 if [ -n "$styled" ]; then
