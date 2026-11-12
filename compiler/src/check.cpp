@@ -4752,6 +4752,7 @@ private:
         Type* elem = T.error;
         Local* borrowed = nullptr;
         Expr* over = it;
+        Expr* literal_range = nullptr;
         if (it->kind == ExprKind::range) {
             if (!it->lhs || !it->rhs) {
                 error(it->span, "a `for` loop's range needs both ends");
@@ -4761,6 +4762,7 @@ private:
                     error(it->span, "a range goes over integers, not " + name_of(t));
                 } else {
                     elem = t;
+                    if (t == T.i32 && is_untyped_literal(it->lhs) && is_untyped_literal(it->rhs)) literal_range = it;
                 }
             }
             it->type = elem;
@@ -4858,6 +4860,7 @@ private:
             }
             Local* l = new_local(p->name, elem, p->span, false);
             l->is_loop_var = true;
+            l->literal_range = literal_range;
             if (s->iter_mut) {
                 // A view of each element, which the body changes it through (D116). It stays one
                 // when what the loop goes over is wrong, so changing it isn't a second error.
@@ -5324,6 +5327,34 @@ private:
     }
 
     void mismatch(Expr* e, Type* want, Type* got) {
+        // CLX-289: `for i in 0..3` counts in `i32`, its literals' type, so each use as an index
+        // was an error of its own that offered `usize.wrap(...)`. The range is what to change:
+        // it's said once, there, and the variable's other uses are left alone.
+        if (e->kind == ExprKind::name && e->local && e->local->literal_range && got == T.i32 && is_integral(want)) {
+            Local* l = e->local;
+            if (l->range_hinted) return;
+            l->range_hinted = true;
+            Expr* r = l->literal_range;
+            const bool index = indexed_ && indexed_->rhs == e;
+            const Expr* base = index ? indexed_->lhs : nullptr;
+            std::string w(want->name);
+            auto digits = [](const Expr* x) {
+                if (x->kind == ExprKind::int_lit) return std::string(x->literal.digits);
+                if (x->kind == ExprKind::unary && x->lhs->kind == ExprKind::int_lit) return "-" + std::string(x->lhs->literal.digits);
+                return std::string("...");
+            };
+            std::string lo = digits(r->lhs), hi = digits(r->rhs);
+            std::string msg = q(std::string(text(l->name))) + " counts over a range of literals, which is " + a_type(got) +
+                              ", but it's used as " + (index ? "an index, " + a_type(want) : a_type(want)) + "; write ";
+            std::string typed = q(lo + w + (r->inclusive ? "..=" : "..") + hi);
+            if (want == T.usize && base && base->kind == ExprKind::name && !r->inclusive && lo == "0") {
+                msg += q("0.." + std::string(text(base->path.parts[0])) + ".len()") + " to go over its indexes, or " + typed;
+            } else {
+                msg += typed;
+            }
+            error(r->span, msg);
+            return;
+        }
         std::string msg = "expected " + name_of(want) + ", found " + name_of(got);
         if (is_numeric(want) && (is_numeric(got) || is_integral(got))) {
             if (exact_conversion(got, want)) {
@@ -6919,7 +6950,10 @@ private:
                            "anything; read it with `peek`, or go over the queue in a loop");
             return T.error;
         }
+        Expr* outer_index = indexed_;
+        indexed_ = e;
         Type* it = check(e->rhs, T.usize);
+        indexed_ = outer_index;
         if (is_bad(base)) return T.error;
         if (base->kind == TypeKind::list || base->kind == TypeKind::deque) return base->elem;
         if (base->kind != TypeKind::array) {
@@ -12339,6 +12373,7 @@ private:
     Item* error_context_fn_ = nullptr;
     Item* error_add_fn_ = nullptr;
     Expr* for_iter_ = nullptr;  // what the `for` loop being checked goes over
+    Expr* indexed_ = nullptr;   // the `a[i]` whose index is being checked, for CLX-289's hint
     Expr* find_at_ = nullptr;   // what the `if let` or `let ... else` being checked matches, which can be `m.find(k)`
     const Expr* place_lhs_ = nullptr;  // the base of the field or index being checked
     int mut_loops_ = 0;                // `for ... in mut` loops and `match mut` arms around the code being checked

@@ -142,6 +142,7 @@ fn main() ! Error {
 | `sum(xs)`, `min(xs)`, `max(xs)` | `xs.sum()`, `xs.min()`, `xs.max()`, the last two `none` for an empty list ([lists](../reference/lists.md#sum-min-and-max)) |
 | `xs.sort()`, `xs.sort(key=f)` | `xs.sort()`, `xs.sort_by_key(\|x\| f(x))` for a key that's `Copy`, such as a number, or `xs.sort_by(\|a, b\| ...)`. All sort in place, and the last two are stable |
 | `any(...)`, `all(...)` | `xs.any(\|x\| ...)`, `xs.all(\|x\| ...)` |
+| `for i in range(len(xs)):`, `for i in range(n):` | `for i in 0..xs.len()`, whose `i` is a `usize`, an index. `for i in 0..n` counts in `n`'s type, and `0..10` in `i32`, a bare literal's, so write `0usize..10` to index with it |
 | `enumerate(xs)` | `for (i, x) in xs.enumerate()` |
 | `zip(xs, ys)` | `for (x, y) in xs.zip(ys)` |
 | `dict`, which keeps the order keys went in | `LinkedMap<K, V>` ([linked maps](../reference/linked-maps.md)). A `Map` is faster where the order doesn't matter |

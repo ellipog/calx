@@ -1,0 +1,20 @@
+// A loop variable over a range of literals is an `i32`. Used as an index or where another integer
+// type is wanted, the error is at the range, once, and says what to write there (CLX-289).
+
+fn takes(n: u8) -> u8 {
+    return n
+}
+
+fn main() {
+    let names = ["crc32", "crc64"]
+    for c in 0..2 {    // error: `c` counts over a range of literals, which is an `i32`, but it's used as an index, a `usize`; write `0..names.len()` to go over its indexes, or `0usize..2`
+        println("{names[c]}")
+        println("{names[c]} again")
+    }
+    for k in 1..=3 {    // error: `k` counts over a range of literals, which is an `i32`, but it's used as a `u8`; write `1u8..=3`
+        println("{takes(k)}")
+    }
+    for i in 0..names.len() {
+        println("{names[i]}")
+    }
+}

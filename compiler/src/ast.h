@@ -124,6 +124,10 @@ struct Local {
     bool is_var = false;     // `var`, which can be assigned again
     bool is_param = false;
     bool is_loop_var = false;  // a `for` loop's variable, which the loop assigns
+    // A `for` loop's range whose ends are untyped literals, so its variable is an `i32`, which an
+    // index or a `usize` parameter won't take: said once, at the range (CLX-289).
+    Expr* literal_range = nullptr;
+    bool range_hinted = false;
     bool is_part_view = false;  // a name `match mut` or `if let ... = mut` binds: a `mut` view of a part (CLX-233)
     ParamMode mode{};        // parameters: read, mut or own
     bool is_view = false;    // a parameter passed as a pointer: structs and arrays in read or mut mode
