@@ -1,0 +1,22 @@
+// Names from Python, Rust, Java and JavaScript that Calx spells another way: the error says how
+// (CLX-285).
+
+fn main() {
+    let s = "Hello"
+    println(s.lower())    // error: `str` has no method `lower`; write `to_lower_root()`, which changes the case as Java's `toLowerCase(Locale.ROOT)` does
+    println(s.toUpperCase())    // error: has no method `toUpperCase`; write `to_upper_root()`
+    println(s.strip())    // error: has no method `strip`; text's is `trim`
+    println("{s.startswith("He")}")    // error: has no method `startswith`; text's is `starts_with`
+    println("{s.length()}")    // error: has no method `length`; text's is `len`
+    let n: usize = 5
+    let b: u8 = 7
+    let w: i64 = 300
+    let f = 2.5
+    println("{n.to_f64()}")    // error: `usize` has no method `to_f64`; write `f64.nearest(x)`, which rounds to the nearest f64
+    println("{b.to_u64()}")    // error: `u8` has no method `to_u64`; write `u64(x)`, which converts exactly
+    println("{w.to_u8()}")    // error: `i64` has no method `to_u8`; write `u8.wrap(x)` to keep the low bits, or `u8.try_from(x)`
+    println("{f.to_i64()}")    // error: `f64` has no method `to_i64`; write `i64.saturate(x)`
+    println("{f.as_u8()}")    // error: write `i64.saturate(x)`, which drops the fraction and clamps, then `u8.try_from` or `u8.wrap` of that
+    let xs: List<u8> = List.with_capacity(8)    // error: unknown name `List`; a list is `[]`, with its type on the variable
+    println("{xs.len()}")
+}

@@ -124,6 +124,7 @@ fn main() ! Error {
 | `x in s`, `s.find(t)` | `s.contains(t)`, `s.find(t)`, a `usize?` rather than `-1` |
 | `s.lower()` | `s.to_lower_root()` |
 | `int(s)`, `float(s)` | `i32.parse(s)`, `f64.parse(s)`, which give `none` for text that isn't one |
+| `float(n)`, `int(x)`, `x & 0xff` for a number | `f64(n)` where it's exact, `f64.nearest(n)` where it rounds, `i64.saturate(x)` for a float, `u8.wrap(x)` for the low bits: no number changes type unless the conversion is written ([conversions](../reference/conversions.md)). The checker names the right one for Rust's `x.to_f64()` and the like |
 | `re.sub(p, r, s)` | `Regex.python(p)` from [`std.regex`](../std/regex.md), then `replace_all(s, r)`: Python's `re` as it is, its syntax, templates and matches. Or `Regex.new(p)`, whose syntax is Rust's and which searches in linear time, for patterns from outside |
 | `re.sub(p, lambda m: ..., s)` | `replace_all_with(s, \|c\| ...)` on a `Regex` from [`std.regex`](../std/regex.md), where `c` is the match's `Captures` |
 | `re.match(p, s)`, `re.fullmatch(p, s)` | `match_start(s)` and `full_match(s)` on a `Regex` from [`std.regex`](../std/regex.md), or `captures_start` and `full_captures` for the groups |
@@ -134,6 +135,7 @@ fn main() ! Error {
 | Python | Calx |
 | --- | --- |
 | `xs = [1, 2]`, `xs.append(3)` | `var xs = [1, 2]`, `xs.push(3)`. A `let` can't change, and a `var` can |
+| `xs = []`, room for n | `var xs: List<u8> = []`, with the element type on the variable, and `xs.reserve(n)` |
 | `xs[-1]` | `xs[xs.len() - 1]` |
 | `xs[1:3]` | `xs[1..3]` |
 | `[f(x) for x in xs if p(x)]` | `xs.filter(\|x\| p(x)).map(\|x\| f(x))` ([closures](../reference/closures.md)) |

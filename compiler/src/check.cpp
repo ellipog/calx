@@ -6119,7 +6119,13 @@ private:
             case NameKind::none:
                 if (e->kind == ExprKind::self) error(e->span, "`self` only exists in a method");
                 else if (!failed_import(n) && !module_item_error(e->span, n) && !module_name_error(e->span, n, "a value")) {
-                    error(e->span, "unknown name " + q(text(n)));
+                    // `List.new()`, `List.with_capacity(n)` and Rust's `Vec` (CLX-285).
+                    std::string_view name = text(n);
+                    std::string hint = name == "List" || name == "Vec"
+                                           ? "; a list is `[]`, with its type on the variable, as in `var xs: List<u8> = []`, "
+                                             "and `xs.reserve(n)` makes room for n"
+                                           : "";
+                    error(e->span, "unknown name " + q(name) + hint);
                 }
                 return T.error;
         }
@@ -10701,6 +10707,58 @@ private:
         return "";
     }
 
+    // What text calls a method of Python's `str`, Rust's, Java's or JavaScript's (CLX-285).
+    static std::string text_hint(std::string_view m) {
+        static const std::pair<std::string_view, std::string_view> names[] = {
+            {"lower", "to_lower_root"},        {"to_lower", "to_lower_root"},     {"to_lowercase", "to_lower_root"},
+            {"toLowerCase", "to_lower_root"},  {"lowercase", "to_lower_root"},    {"casefold", "to_lower_root"},
+            {"upper", "to_upper_root"},        {"to_upper", "to_upper_root"},     {"to_uppercase", "to_upper_root"},
+            {"toUpperCase", "to_upper_root"},  {"uppercase", "to_upper_root"},    {"strip", "trim"},
+            {"lstrip", "trim_start"},          {"rstrip", "trim_end"},            {"trim_left", "trim_start"},
+            {"trim_right", "trim_end"},        {"trimStart", "trim_start"},       {"trimEnd", "trim_end"},
+            {"startswith", "starts_with"},     {"startsWith", "starts_with"},     {"endswith", "ends_with"},
+            {"endsWith", "ends_with"},         {"removeprefix", "trim_prefix"},   {"strip_prefix", "trim_prefix"},
+            {"removesuffix", "trim_suffix"},   {"strip_suffix", "trim_suffix"},   {"index", "find"},
+            {"indexOf", "find"},               {"rfind", "find_last"},            {"rindex", "find_last"},
+            {"lastIndexOf", "find_last"},      {"splitlines", "lines"},           {"includes", "contains"},
+            {"isEmpty", "is_empty"},           {"length", "len"},                 {"size", "len"},
+            {"encode", "to_bytes"},            {"as_bytes", "to_bytes"},          {"getBytes", "to_bytes"},
+            {"rjust", "pad_start"},            {"padStart", "pad_start"},         {"ljust", "pad_end"},
+            {"padEnd", "pad_end"},             {"partition", "split_once"},
+        };
+        for (const auto& [other, calx] : names) {
+            if (m == other) {
+                if (calx == "to_lower_root" || calx == "to_upper_root") {
+                    return "; write `" + std::string(calx) + "()`, which changes the case as Java's `" +
+                           (calx == "to_lower_root" ? "toLowerCase" : "toUpperCase") + "(Locale.ROOT)` does";
+                }
+                return "; text's is `" + std::string(calx) + "`";
+            }
+        }
+        return "";
+    }
+
+    // Rust's and other languages' conversion methods, which Calx writes as functions of the type
+    // converted to (CLX-285): `x.to_f64()` is `f64(x)` where every value converts exactly, and
+    // otherwise names what to do with the ones that don't.
+    std::string conversion_hint(Type* recv, std::string_view m) {
+        std::size_t under = m.find('_');
+        if (under == std::string_view::npos) return "";
+        std::string_view verb = m.substr(0, under), rest = m.substr(under + 1);
+        if (verb != "to" && verb != "as" && verb != "into") return "";
+        std::string t(rest.substr(0, rest.find('_')));
+        Type* to = T.primitive(t);
+        if (!to || !(is_int(to) || is_float(to)) || to == recv) return "";
+        std::string pre = "; write `" + t;
+        if (exact_conversion(recv, to)) return pre + "(x)`, which converts exactly";
+        if (is_float(to)) return pre + ".nearest(x)`, which rounds to the nearest " + t;
+        if (is_float(recv)) {
+            if (t == "i32" || t == "i64") return pre + ".saturate(x)`, which drops the fraction and clamps, as Java's cast does";
+            return "; write `i64.saturate(x)`, which drops the fraction and clamps, then `" + t + ".try_from` or `" + t + ".wrap` of that";
+        }
+        return pre + ".wrap(x)` to keep the low bits, or `" + t + ".try_from(x)`, which is `none` if it doesn't fit";
+    }
+
     static std::string slot_hint(std::string_view m) {
         if (m == "push" || m == "add" || m == "put") return "; a slot map's is `insert`, which gives the handle of the value";
         if (m == "keys") return "; a slot map's keys are its handles, from `handles()`";
@@ -11321,11 +11379,13 @@ private:
             }
         }
         if (b == BMethod::none) {
+            bool is_text = recv->kind == TypeKind::string || recv->kind == TypeKind::str;
             error(e->callee->span, name_of(recv) + " has no method " + q(m) +
-                                       (recv->kind == TypeKind::deque      ? deque_hint(m)
-                                        : recv->kind == TypeKind::slot_map ? slot_hint(m)
-                                        : recv->heap                       ? heap_hint(m)
-                                                                           : loop_hint(m)));
+                                       (recv->kind == TypeKind::deque       ? deque_hint(m)
+                                        : recv->kind == TypeKind::slot_map  ? slot_hint(m)
+                                        : recv->heap                        ? heap_hint(m)
+                                        : is_text && !text_hint(m).empty()  ? text_hint(m)
+                                                                            : loop_hint(m)));
             check_args(e);
             return T.error;
         }
@@ -11833,6 +11893,7 @@ private:
             if (m == "widening_mul" && is_int(recv))
                 hint = recv->is_usize ? "; it's for `u8`, `u16`, `u32` and `u64`, and `usize` can be 32 or 64 bits, so use `u64(n)`"
                                       : "; it's for `u8`, `u16`, `u32` and `u64`";
+            else hint = conversion_hint(recv, m);
             error(e->callee->span, name_of(recv) + " has no method " + q(m) + hint);
             check_args(e);
             return T.error;
