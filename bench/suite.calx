@@ -973,7 +973,7 @@ fn dx_group(work: String, langs: List<String>, calx: String, python: String, rou
         if kind != "scratch" {
             for l in build_langs {
                 let dir = "{base}/{l}/{size}"
-                let b = build_cmd(l.copy(), size.copy(), mode.copy(), dir, "{base}/{l}/warm-{mode}", "{base}/{l}/warm-{mode}{exe()}", calx.copy())
+                let b = build_cmd(l.copy(), size.copy(), mode.copy(), dir, "{base}/{l}/cache-{mode}", "{base}/{l}/warm-{mode}{exe()}", calx.copy())
                 match build_once(b.cmd.copy(), b.dir.copy(), b.envs.copy()) {
                     ok(_) => {}
                     err(e) => {
@@ -996,7 +996,8 @@ fn dx_group(work: String, langs: List<String>, calx: String, python: String, rou
                     continue
                 }
                 let dir = "{base}/{l}/{size}"
-                var cache = "{base}/{l}/warm-{mode}"
+                // The cache and the program apart, as without `.exe` they'd have the same name.
+                var cache = "{base}/{l}/cache-{mode}"
                 var out = "{base}/{l}/warm-{mode}{exe()}"
                 if kind == "scratch" {
                     fresh += 1
