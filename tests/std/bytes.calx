@@ -19,6 +19,25 @@ fn main() {
 
     println("{bytes.find(data, [1u8, 2])} {bytes.find(data, [9u8])} {bytes.find(data, [])} {bytes.find(data, [2u8], from: 5)}")  // out: some(3) none some(0) none
     println("{bytes.find(data, [7u8, 8])} {bytes.find(data, [8u8, 9])} {bytes.find(data, [], from: 11)} {bytes.find(data, [], from: 12)}")  // out: some(9) none some(11) none
+    println("{bytes.find_byte(data, 2)} {bytes.find_byte(data, 2, from: 5)} {bytes.find_byte(data, 8, from: 10)} {bytes.find_byte(data, 0, from: 11)} {bytes.find_byte(data, 0, from: 99)}")  // out: some(4) none some(10) none none
+    // Past 32 bytes the search compares many at once (CLX-299): matches in the middle, at the
+    // very end, and none, from every start around a match.
+    var wide: List<u8> = []
+    for i in 0..300 {
+        wide.push(u8.wrap(i % 7))
+    }
+    wide[150] = 200
+    wide[151] = 201
+    wide[299] = 200
+    println("{bytes.find(wide, [200u8, 201])} {bytes.find(wide, [200u8, 201], from: 151)} {bytes.find(wide, [200u8])} {bytes.find(wide, [200u8], from: 151)} {bytes.find(wide, [201u8, 200])}")  // out: some(150) none some(150) some(299) none
+    println("{bytes.find_byte(wide, 200)} {bytes.find_byte(wide, 200, from: 151)} {bytes.find_byte(wide, 201, from: 152)} {bytes.find_byte(wide, 6, from: 290)}")  // out: some(150) some(299) none some(293)
+    var found = 0
+    for from in 140usize..160 {
+        if bytes.find(wide, [200u8, 201], from: from) == (if from <= 150 { some(150usize) } else { none }) {
+            found += 1
+        }
+    }
+    println("{found}")  // out: 20
 
     println("{bytes.u16_le(data, 1)} {bytes.u16_be(data, 1)} {bytes.u32_le(data, 3)} {bytes.u32_be(data, 3)}")  // out: 4351 65296 67305985 16909060
     println("{bytes.u64_le(data, 3)} {bytes.u64_be(data, 3)} {bytes.i16_le(data, 0)} {bytes.i16_be(data, 1)}")  // out: 578437695752307201 72623859790382856 -256 -240

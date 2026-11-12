@@ -40,7 +40,22 @@ fn main() {
 
 ## Finding
 
-`find(haystack, needle, from: 0)` is where `needle` first appears, from index `from`, or `none`. An empty needle is found at `from`.
+| Function | Gives |
+| --- | --- |
+| `find(haystack, needle, from: 0)` | Where `needle` first appears, from index `from`, or `none`. An empty needle is found at `from` |
+| `find_byte(haystack, b, from: 0)` | Where the byte `b` first is, from index `from`, or `none`, without making a list for it |
+
+```calx
+import std.bytes
+
+fn main() {
+    let data: List<u8> = [104, 105, 10, 116, 104, 101, 114, 101, 10]
+    println("{bytes.find_byte(data, 10)} {bytes.find_byte(data, 10, from: 3)}")   // out: some(2) some(8)
+    println("{bytes.find(data, [104u8, 101])} {bytes.find(data, [33u8])}")        // out: some(4) none
+}
+```
+
+- They search as a `String`'s `find` does: `memchr` for one byte, and for a longer needle, 32 places tested at once with AVX2, or 16 with SSE2 or NEON, for two of its rarer bytes, so only where both are there is the rest compared. The language benchmarks' reverse-complement finds its line ends with `find_byte` ([`bench/suite/revcomp`](../../bench/suite/revcomp)).
 
 ## Numbers
 

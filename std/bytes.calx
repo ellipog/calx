@@ -6,6 +6,11 @@
 /// `put_u32_le(mut out, v)`, or over bytes already there, as `set_u32_le(mut out, 8, v)`.
 module std.bytes
 
+extern "C" {
+    fn cx_bytes_find(hay: *const u8, len: usize, needle: *const u8, n: usize) -> usize
+    fn cx_bytes_find3(hay: *const u8, len: usize, from: usize, a: u8, b: u8, c: u8) -> usize
+}
+
 const HEX: str = "0123456789abcdef"
 const BASE64: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 const BASE64_URL: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
@@ -158,29 +163,29 @@ pub fn from_base64_url(text: String) -> List<u8>? {
 }
 
 /// Where `needle` first appears in `haystack`, from index `from`, or `none`. An empty needle is
-/// found at `from`.
+/// found at `from`. It's the search a `String`'s `find` uses (CLX-299): `memchr` for one byte, and
+/// for more, 16 or 32 places tested at once for two of the needle's rarer bytes.
 pub fn find(haystack: List<u8>, needle: List<u8>, from: usize = 0) -> usize? {
-    if needle.is_empty() {
-        return if from <= haystack.len() { some(from) } else { none }
-    }
-    if needle.len() > haystack.len() {
+    if from > haystack.len() {
         return none
     }
-    let first = needle[0]
-    var i = from
-    while i + needle.len() <= haystack.len() {
-        if haystack[i] == first {
-            var k: usize = 1
-            while k < needle.len() and haystack[i + k] == needle[k] {
-                k += 1
-            }
-            if k == needle.len() {
-                return some(i)
-            }
-        }
-        i += 1
+    if needle.is_empty() {
+        return some(from)
     }
-    return none
+    let rest = haystack.len() - from
+    // Not found is the largest usize, past any place in the rest.
+    let at = unsafe { cx_bytes_find(haystack.as_ptr().add(from), rest, needle.as_ptr(), needle.len()) }
+    return if at >= rest { none } else { some(from + at) }
+}
+
+/// Where the byte `b` first is in `haystack`, from index `from`, or `none`: `find` with a needle of
+/// one byte, without making a list for it, 16 or 32 bytes compared at once.
+pub fn find_byte(haystack: List<u8>, b: u8, from: usize = 0) -> usize? {
+    if from >= haystack.len() {
+        return none
+    }
+    let at = unsafe { cx_bytes_find3(haystack.as_ptr(), haystack.len(), from, b, b, b) }
+    return if at == haystack.len() { none } else { some(at) }
 }
 
 // Numbers in bytes. Each checks the range once, then reads or writes the bytes one at a time,
