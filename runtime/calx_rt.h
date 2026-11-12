@@ -1368,8 +1368,10 @@ CX_COLD CX_FN(void, cx_panic_text, (const char* at, const char* message));
 
 /* `u64.div_wide(hi, lo, d)`: the 128-bit number `hi:lo` divided by `d`, which the caller has
  * checked is more than `hi`, so the quotient fits (CLX-102). x86-64 divides 128 bits by 64 in one
- * instruction, which clang's 128-bit `/` doesn't use, since it can't know the quotient fits;
- * elsewhere that `/` does it. */
+ * instruction, which clang's 128-bit `/` doesn't use, since it can't know the quotient fits.
+ * Elsewhere it's Knuth's algorithm D for two digits of 32 bits by one of 64, as Hacker's Delight's
+ * divlu does it: two of the processor's 64-bit divides, where a 128-bit `/` calls compiler-rt's
+ * general __udivti3, slower, and which Visual Studio's C runtime doesn't have (CLX-276). */
 CX_INLINE cx_u64 cx_div_wide_u64(cx_u64 hi, cx_u64 lo, cx_u64 d, cx_u64* rem) {
 #if defined(__x86_64__)
     cx_u64 q, r;
@@ -1377,10 +1379,30 @@ CX_INLINE cx_u64 cx_div_wide_u64(cx_u64 hi, cx_u64 lo, cx_u64 d, cx_u64* rem) {
     *rem = r;
     return q;
 #else
-    unsigned __int128 n = ((unsigned __int128)hi << 64) | lo;
-    cx_u64 q = (cx_u64)(n / d);
-    *rem = lo - q * d; /* below `d`, so its low 64 bits are all of it */
-    return q;
+    const cx_u64 b = (cx_u64)1 << 32;
+    /* Normalized, so the divisor's top bit is set and each estimate is at most 2 too big. */
+    unsigned s = (unsigned)__builtin_clzll(d);
+    d <<= s;
+    cx_u64 un32 = s ? hi << s | lo >> (64 - s) : hi;
+    cx_u64 un10 = lo << s;
+    cx_u64 vn1 = d >> 32, vn0 = d & 0xFFFFFFFFu;
+    cx_u64 un1 = un10 >> 32, un0 = un10 & 0xFFFFFFFFu;
+    cx_u64 q1 = un32 / vn1, rhat = un32 - q1 * vn1;
+    while (q1 >= b || q1 * vn0 > (rhat << 32 | un1)) {
+        q1--;
+        rhat += vn1;
+        if (rhat >= b) break;
+    }
+    cx_u64 un21 = (un32 << 32 | un1) - q1 * d;
+    cx_u64 q0 = un21 / vn1;
+    rhat = un21 - q0 * vn1;
+    while (q0 >= b || q0 * vn0 > (rhat << 32 | un0)) {
+        q0--;
+        rhat += vn1;
+        if (rhat >= b) break;
+    }
+    *rem = ((un21 << 32 | un0) - q0 * d) >> s;
+    return q1 << 32 | q0;
 #endif
 }
 /* `q.remove_marked(marks)` on a `PriorityQueue`, without one mark for each element (D113). */
