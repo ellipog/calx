@@ -160,7 +160,10 @@ export function suite(os = 'windows') {
 	const doc = record(os);
 	const groups = SUITE_GROUPS.map((g) => ({ ...g, rows: [] }));
 	let threads = 0;
+	// The most and fewest runs Calx's medians are of, which differ where a recording with --only
+	// ran more rounds than the one before it.
 	let rounds = 0;
+	let fewest = Infinity;
 	for (const [name, r] of Object.entries(doc.results)) {
 		const group = groups.find((g) => g.id === r.group);
 		if (!group) continue;
@@ -177,7 +180,9 @@ export function suite(os = 'windows') {
 			if (p?.status === 'ok') ms[id] = p.median_ms;
 			else why[id] = p ? p.why ?? p.status : 'no program';
 		}
-		rounds = Math.max(rounds, byLang.calx?.wall_ms?.length ?? 0);
+		const runs = byLang.calx?.wall_ms?.length ?? 0;
+		rounds = Math.max(rounds, runs);
+		if (runs) fewest = Math.min(fewest, runs);
 		// "n-body, 10 million steps" is "n-body" in the chart; the table says the rest.
 		group.rows.push({ name, title: r.title, label: r.title.split(/[:,]/)[0], ms, why });
 	}
@@ -191,6 +196,7 @@ export function suite(os = 'windows') {
 		cpu,
 		machine: `${cpu}, ${systemName(doc.machine)}`,
 		rounds,
+		fewest: Math.min(fewest, rounds),
 		recorded: doc.recorded.slice(0, 10),
 		versions: {
 			clang: tc.clang.match(/clang version ([\d.]+)/)?.[1],

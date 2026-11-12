@@ -28,12 +28,11 @@ const times = (f: number) => (f < 10 ? f.toFixed(1) : Math.round(f).toString());
 // to its notes until it's written here.
 const WHY: Record<string, string> = {
 	compress: "Go's gzip and xz write bigger files than the others', so they do less work.",
-	logs: 'C scans each line in place. The Calx program\'s parts are views, but it still makes a list for each <code>split</code> and copies the path it trims (CLX-309).',
+	logs: "On Linux C, which scans each line in place, is 8% ahead; much of what's left is in the set of addresses, whose slots take three times the room of C's.",
 	parmandel: "Go's loop over a row takes less time on one thread too, by about as much; how the rows are shared out is even now (CLX-296).",
 	parsum: 'On all 32 processors under WSL the times swing by a fifth from one recording to the next.',
 	binarytrees: "It times the allocator: Go's collector is a little faster than Calx's allocator, and C's and Rust's are slower.",
 	nbody: "LLVM's vectorizer packs the loop differently in Rust's LLVM 21 than in clang 23, which Calx's C goes through (CLX-301).",
-	revcomp: "On Linux, in reversing and pairing the bases, which we haven't traced (CLX-308).",
 };
 
 const OTHERS = SUITE_LANGS.filter((l) => l.id !== 'calx');
@@ -63,6 +62,7 @@ const systems = SUITE_OSES.map((os) => {
 		system: s.system,
 		cpu: s.cpu,
 		rounds: s.rounds,
+		fewest: s.fewest,
 		versions: s.versions,
 		recorded: s.recorded,
 		programs: s.groups.reduce((n, g) => n + g.rows.length, 0),
@@ -320,7 +320,7 @@ const SECTIONS = [
 					{
 						systems.map((s) => (
 							<p class="recorded" data-os={s.os}>
-								{s.system}: median of {s.rounds} runs, recorded {s.recorded} with clang {s.versions.clang}, rustc{' '}
+								{s.system}: median of {s.fewest === s.rounds ? s.rounds : `${s.fewest} to ${s.rounds}`} runs, recorded {s.recorded} with clang {s.versions.clang}, rustc{' '}
 								{s.versions.rustc}, Go {s.versions.go} and Python {s.versions.python}.{' '}
 								<a class="more" href={`${BENCH}#how-its-measured`}>
 									The details

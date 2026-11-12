@@ -15,20 +15,19 @@ How many programs Calx took less time on than each language, how many came withi
 
 | Calx against | Programs both have | Windows 11 | Ubuntu 26.04 in WSL2 |
 | --- | --- | --- | --- |
-| C | 19 | 14 faster, 4 even, 1 slower | 11 faster, 6 even, 2 slower |
-| Rust | 25 | 19 faster, 5 even, 1 slower | 16 faster, 6 even, 3 slower |
+| C | 19 | 15 faster, 4 even | 11 faster, 7 even, 1 slower |
+| Rust | 25 | 19 faster, 5 even, 1 slower | 17 faster, 6 even, 2 slower |
 | Go | 25 | 19 faster, 3 even, 3 slower | 17 faster, 4 even, 4 slower |
 | Python | 21 | 21 faster | 21 faster |
 
 - **Loops over numbers are even with C.** Calx compiles through C that clang builds at C's flags, so n-body, spectral-norm and mandelbrot come within about 1% of C, and within 9% of Rust either way.
 - **Most of Calx's wins are its runtime and library.** Its allocator, hash maps, sort, `std.json`, `std.csv`, `std.regex`, `std.bigint` and `std.image.png` are written for these jobs. Binary-trees and many small objects take C and Rust 2 to 5 times as long on the Windows heap, and 1.3 to 4.3 times with glibc's on Linux. Hash maps take the others 1.7 to 2.5 times as long with their default hashes, and JSON takes serde_json a third to a half again as long. Text parts a program only looks at, as word count's words and the log's fields, are views into the text, not copies.
 - **The losses, and why.**
-  - Log analysis goes to C, which scans each line in place, in 77 to 83% of Calx's time.
+  - On Linux, log analysis goes to C, which scans each line in place, by 8%. On Windows it's Calx's.
   - n-body goes to Rust, by 7 to 9%, which is how LLVM's vectorizer packs the loop in each version.
   - Compression goes to Go, whose compressors write bigger files.
   - binary-trees goes to Go's collector, by 7 to 10%.
   - The parallel mandelbrot goes to Go, by 5 to 8% at 4 threads and up, about what Calx is behind it on one thread.
-  - On Linux, reverse-complement goes to C and Rust, by 15% and 7%.
   - On Linux, on all 32 processors, the float sum goes to Rust and Go, though there the times swing by a fifth from one recording to the next.
 
   The notes under each table say more, and the board has a card for each loss Calx can do something about.
@@ -46,15 +45,15 @@ How many programs Calx took less time on than each language, how many came withi
 
 | | Windows 11 | Ubuntu 26.04 in WSL2 |
 | --- | --- | --- |
-| Calx | 0.1.0-dev at 8feb83b, through clang 23.1.4 | 0.1.0-dev at 8feb83b, through clang 23.1.5 |
+| Calx | 0.1.0-dev at 8feb83b and 2cf57a1, through clang 23.1.4 | 0.1.0-dev at 8feb83b and 2cf57a1, through clang 23.1.5 |
 | C | clang 23.1.4 | clang 23.1.5 |
 | OpenMP | LLVM's libomp 23.1.4 | LLVM's libomp 23.1.6 |
 | Rust | 1.91.1, with LLVM 21.1.2 | 1.91.0 |
 | Go | 1.27.3 | 1.27.3 |
 | Python | 3.14.6 | 3.14.4 |
-| Rounds | 5 | 3, and 5 for the builds |
+| Rounds | 5 | 3, and 5 for the builds and the ten programs timed at 2cf57a1 |
 
-The programs that Calx's changes since the first recording touch, fifteen of them and Linux's builds, were timed again at 8feb83b in every language, but Go on Linux, which wasn't installed there then. The rest, and Go's results on Linux, are from the first recording, with Calx as of 9ebb972. Each benchmark's entry in the record has the commit it was timed at.
+The programs that Calx's changes since the first recording touch, fifteen of them and Linux's builds, were timed again at 8feb83b in every language, but Go on Linux, which wasn't installed there then. Ten of them were timed again at 2cf57a1, after the changes for log analysis and reverse-complement (CLX-308, CLX-309): k-nucleotide, reverse-complement, regex-redux, JSON, CSV, log analysis, word count, sorting, hash maps and text, in every language but Go on Linux. The rest, and Go's results on Linux, are from the first recording, with Calx as of 9ebb972. Each benchmark's entry in the record has the commit it was timed at.
 
 ## Classic compute
 
@@ -72,9 +71,9 @@ On Windows 11:
 | binary-trees, depth 18 | 819 ms, 68 MB | 1,644 ms, 36 MB | 1,724 ms, 36 MB | **758 ms**, 41 MB | 15,758 ms, 59 MB |
 | mandelbrot, 4,000 by 4,000 | 625 ms, 5.8 MB | 627 ms, 5.2 MB | 643 ms, 5.6 MB | **609 ms**, 7.4 MB | 27,256 ms, 14 MB |
 | fasta, n = 2.5 million | **198 ms**, 3.9 MB | 209 ms, 3.8 MB | 216 ms, 4.2 MB | 245 ms, 5.5 MB | 3,592 ms, 11 MB |
-| k-nucleotide, fasta n = 1 million | **140 ms**, 27 MB | 161 ms, 21 MB | 320 ms, 26 MB | 391 ms, 43 MB | 3,379 ms, 29 MB |
-| reverse-complement, fasta n = 1 million | **20.5 ms**, 19 MB | 25.6 ms, 18 MB | 23.1 ms, 18 MB | 27.9 ms, 25 MB | 72.7 ms, 31 MB |
-| regex-redux, fasta n = 1 million | **103 ms**, 49 MB | — | 130 ms, 53 MB | 3,834 ms, 63 MB | 1,445 ms, 99 MB |
+| k-nucleotide, fasta n = 1 million | **146 ms**, 28 MB | 168 ms, 22 MB | 341 ms, 26 MB | 403 ms, 42 MB | 3,496 ms, 29 MB |
+| reverse-complement, fasta n = 1 million | **22.8 ms**, 19 MB | 29.8 ms, 18 MB | 27.6 ms, 19 MB | 32.0 ms, 26 MB | 79.0 ms, 32 MB |
+| regex-redux, fasta n = 1 million | **105 ms**, 50 MB | — | 134 ms, 53 MB | 3,788 ms, 64 MB | 1,461 ms, 100 MB |
 | pidigits, 10,000 digits | **581 ms**, 6.4 MB | — | 5,106 ms, 8.6 MB | 877 ms, 47 MB | 2,197 ms, 12 MB |
 
 On Ubuntu 26.04 in WSL2:
@@ -87,9 +86,9 @@ On Ubuntu 26.04 in WSL2:
 | binary-trees, depth 18 | 785 ms, 66 MB | 1,014 ms, 34 MB | 1,115 ms, 34 MB | **709 ms**, 35 MB | 6,820 ms, 58 MB |
 | mandelbrot, 4,000 by 4,000 | 628 ms, 4.1 MB | 631 ms, 4.1 MB | 642 ms, 3.9 MB | **608 ms**, 3.9 MB | 18,265 ms, 12 MB |
 | fasta, n = 2.5 million | **202 ms**, 2.2 MB | 224 ms, 2.1 MB | 218 ms, 2.2 MB | 248 ms, 2.1 MB | 2,219 ms, 9.9 MB |
-| k-nucleotide, fasta n = 1 million | **153 ms**, 25 MB | 161 ms, 23 MB | 310 ms, 25 MB | 412 ms, 39 MB | 2,415 ms, 31 MB |
-| reverse-complement, fasta n = 1 million | 15.8 ms, 17 MB | **13.5 ms**, 16 MB | 14.7 ms, 16 MB | 18.5 ms, 20 MB | 63.1 ms, 30 MB |
-| regex-redux, fasta n = 1 million | **96.6 ms**, 43 MB | — | 138 ms, 52 MB | 3,871 ms, 60 MB | 1,260 ms, 102 MB |
+| k-nucleotide, fasta n = 1 million | **157 ms**, 25 MB | 176 ms, 23 MB | 343 ms, 25 MB | 412 ms, 39 MB | 2,568 ms, 31 MB |
+| reverse-complement, fasta n = 1 million | 16.3 ms, 17 MB | **15.8 ms**, 16 MB | 17.6 ms, 16 MB | 18.5 ms, 20 MB | 75.7 ms, 30 MB |
+| regex-redux, fasta n = 1 million | **97.8 ms**, 43 MB | — | 140 ms, 52 MB | 3,871 ms, 60 MB | 1,269 ms, 102 MB |
 | pidigits, 10,000 digits | **569 ms**, 4.6 MB | — | 3,533 ms, 2.9 MB | 868 ms, 8.8 MB | 1,900 ms, 9.7 MB |
 
 A program that does nothing peaks at 2.1 to 2.2 MB on Linux, as the runner measures it, so that much there is a program that holds next to nothing.
@@ -97,9 +96,9 @@ A program that does nothing peaks at 2.1 to 2.2 MB on Linux, as the runner measu
 - **n-body, spectral-norm, mandelbrot and fasta** are plain loops over doubles and bytes. Calx and C, which the same clang compiles, come out within about 5% of each other, and Rust within 9% of Calx either way. Its n-body takes 7 to 9% less time. Each version unrolls the loop over the five bodies' ten pairs, and LLVM's SLP vectorizer packs pairs into two-lane vector operations: clang 23 packs all ten and pays for it in shuffles and spills, where Rust's LLVM 21 leaves two as they are (CLX-301). It's a knife-edge of the vectorizer's cost model, not of what Calx emits, as the C program comes out the same: one setting of its threshold made the C program faster than Rust's, and the settings either side of it made it up to 80% slower. Rust's fasta takes up to 9% more. Go's n-body takes twice as long as the others.
 - **fannkuch-redux** takes 12% less time in Calx than in C, Rust or Go on Windows, and is even with them on Linux. It's the same loop: the C that Calx emits for the flips is the C program's, with bounds checks, so the Windows lead is how clang happened to lay it out there.
 - **binary-trees** makes a node at a time on the heap, so it times each language's allocator. On Windows, C's `malloc` and Rust's default allocator both use the system's heap, and take twice as long as Calx's own allocator. On Linux glibc's `malloc` is quicker, and they take 1.3 and 1.4 times as long. Go's collector takes 7 to 10% less time than Calx. Calx holds the most memory, 66 to 68 MB to their 34 to 41, since its allocator keeps freed blocks for the next ones of their size ([std.memory](std/memory.md)).
-- **reverse-complement** finds where lines end with `std.bytes`'s `find_byte`, which looks at 16 or 32 bytes at once as C's `memchr` does (CLX-299). On Windows Calx's takes 20.5 ms, Rust's 13% longer and C's 25%. On Linux Calx takes 15.8 ms to C's 13.5 and Rust's 14.7; the difference there is in reversing and pairing the bases, which we haven't traced (CLX-308).
-- **k-nucleotide** counts k-mers in each language's hash map. Rust's standard map, which hashes with SipHash to resist flooding, takes 2 to 2.3 times as long as Calx's; many Rust programs swap in a faster hasher. Go's map takes 2.7 to 2.8 times as long, and C's, written for the program, 5 to 15% longer.
-- **regex-redux** is Calx's: Rust's regex crate takes 26% longer on Windows and 43% on Linux. Each motif, such as `agggtaaa|tttaccct`, is a few strings of one length, which `std.regex` finds without a DFA, testing 32 places at a time for their first 4 bytes, as Rust's regex finds them with a SIMD search for several literals at once (CLX-297). Go's `regexp` takes 37 to 40 times as long as Calx's, since it never builds a DFA.
+- **reverse-complement** finds where lines end with `std.bytes`'s `find_byte`, which looks at 16 or 32 bytes at once as C's `memchr` does (CLX-299). Each line's bases are added from the input with `extend` on a slice, which copies them straight across with no list made of them first, and `reverse` swaps 16 bytes from each end at a time, where a loop of swaps from both ends wasn't vectorized (CLX-308). On Windows Calx's takes 22.8 ms, Rust's 21% longer and C's 31%. On Linux it's within 3% of C's, 16.3 ms to 15.8, and Rust's takes 8% longer.
+- **k-nucleotide** counts k-mers in each language's hash map. Rust's standard map, which hashes with SipHash to resist flooding, takes 2.2 to 2.3 times as long as Calx's; many Rust programs swap in a faster hasher. Go's map takes 2.6 to 2.8 times as long, and C's, written for the program, 12 to 15% longer.
+- **regex-redux** is Calx's: Rust's regex crate takes 28% longer on Windows and 43% on Linux. Each motif, such as `agggtaaa|tttaccct`, is a few strings of one length, which `std.regex` finds without a DFA, testing 32 places at a time for their first 4 bytes, as Rust's regex finds them with a SIMD search for several literals at once (CLX-297). Go's `regexp` takes 36 to 40 times as long as Calx's, since it never builds a DFA.
 - **pidigits** is Calx's: Go's `math/big`, whose inner loops are assembly, takes half again as long. Each digit multiplies a big number by a small one and divides two that differ by at most a limb, and `std.bigint` does both in one pass, with no general division (CLX-298). Rust's num-bigint takes 6 to 9 times as long as Calx's.
 
 ## Realistic programs
@@ -110,14 +109,14 @@ On Windows 11:
 
 | Benchmark | Calx | C | Rust | Go | Python |
 | --- | --- | --- | --- | --- | --- |
-| JSON: 200,000 records parsed, written, read typed | **228 ms**, 331 MB | — | 352 ms, 424 MB | 818 ms, 442 MB | 1,162 ms, 459 MB |
-| CSV report: a million rows summed by group | **87.0 ms**, 40 MB | 233 ms, 39 MB | 163 ms, 4.5 MB | 178 ms, 12 MB | 776 ms, 11 MB |
-| Log analysis: a million access-log lines | 294 ms, 141 MB | **243 ms**, 124 MB | 537 ms, 138 MB | 424 ms, 227 MB | 1,493 ms, 35 MB |
-| Word count: 5 million words | **126 ms**, 96 MB | 175 ms, 50 MB | 219 ms, 89 MB | 474 ms, 472 MB | 1,021 ms, 380 MB |
-| Sorting: 5M integers, 5M doubles, 1M strings | **238 ms**, 284 MB | 1,269 ms, 101 MB | 366 ms, 186 MB | 867 ms, 200 MB | 2,896 ms, 587 MB |
-| Hash maps: 2M integer keys, 500,000 strings | **251 ms**, 270 MB | 418 ms, 202 MB | 622 ms, 239 MB | 567 ms, 169 MB | 2,046 ms, 372 MB |
+| JSON: 200,000 records parsed, written, read typed | **225 ms**, 331 MB | — | 346 ms, 425 MB | 816 ms, 444 MB | 1,144 ms, 461 MB |
+| CSV report: a million rows summed by group | **89.1 ms**, 40 MB | 236 ms, 40 MB | 165 ms, 5.2 MB | 185 ms, 12 MB | 800 ms, 12 MB |
+| Log analysis: a million access-log lines | **212 ms**, 142 MB | 240 ms, 125 MB | 517 ms, 139 MB | 400 ms, 228 MB | 1,424 ms, 36 MB |
+| Word count: 5 million words | **131 ms**, 97 MB | 178 ms, 50 MB | 225 ms, 90 MB | 467 ms, 473 MB | 1,049 ms, 381 MB |
+| Sorting: 5M integers, 5M doubles, 1M strings | **245 ms**, 285 MB | 1,276 ms, 102 MB | 368 ms, 186 MB | 873 ms, 201 MB | 2,946 ms, 589 MB |
+| Hash maps: 2M integer keys, 500,000 strings | **256 ms**, 270 MB | 451 ms, 202 MB | 633 ms, 240 MB | 572 ms, 170 MB | 2,146 ms, 371 MB |
 | Many small objects: 4M records | **143 ms**, 52 MB | 682 ms, 54 MB | 571 ms, 56 MB | 538 ms, 89 MB | 6,244 ms, 161 MB |
-| Building and splitting text: a million lines | **95.9 ms**, 78 MB | 198 ms, 88 MB | 167 ms, 89 MB | 297 ms, 188 MB | 660 ms, 209 MB |
+| Building and splitting text: a million lines | **99.5 ms**, 79 MB | 200 ms, 89 MB | 169 ms, 89 MB | 294 ms, 183 MB | 657 ms, 210 MB |
 | Files: 2,000 written, read and removed | **5,585 ms**, 4.1 MB | 6,067 ms, 4.0 MB | 6,086 ms, 4.3 MB | 6,347 ms, 12 MB | 6,366 ms, 13 MB |
 | Compression: gzip, zstd and xz round trips | 1,102 ms, 101 MB | — | 1,731 ms, 92 MB | **321 ms**, 115 MB | 1,209 ms, 117 MB |
 | Hashing: SHA-256 and CRC-32 of 270 MB | 107 ms, 18 MB | — | **105 ms**, 18 MB | 108 ms, 21 MB | 131 ms, 28 MB |
@@ -127,27 +126,27 @@ On Ubuntu 26.04 in WSL2:
 
 | Benchmark | Calx | C | Rust | Go | Python |
 | --- | --- | --- | --- | --- | --- |
-| JSON: 200,000 records parsed, written, read typed | **240 ms**, 329 MB | — | 325 ms, 451 MB | 858 ms, 452 MB | 842 ms, 459 MB |
-| CSV report: a million rows summed by group | **77.6 ms**, 38 MB | 166 ms, 38 MB | 106 ms, 2.1 MB | 162 ms, 7.3 MB | 547 ms, 10.0 MB |
-| Log analysis: a million access-log lines | 277 ms, 140 MB | **213 ms**, 122 MB | 487 ms, 137 MB | 429 ms, 222 MB | 1,103 ms, 34 MB |
-| Word count: 5 million words | **143 ms**, 94 MB | 173 ms, 48 MB | 233 ms, 87 MB | 515 ms, 466 MB | 885 ms, 364 MB |
-| Sorting: 5M integers, 5M doubles, 1M strings | **261 ms**, 282 MB | 1,231 ms, 136 MB | 319 ms, 182 MB | 886 ms, 195 MB | 2,931 ms, 588 MB |
-| Hash maps: 2M integer keys, 500,000 strings | **279 ms**, 268 MB | 499 ms, 204 MB | 681 ms, 240 MB | 609 ms, 164 MB | 2,045 ms, 376 MB |
+| JSON: 200,000 records parsed, written, read typed | **242 ms**, 329 MB | — | 321 ms, 451 MB | 858 ms, 452 MB | 773 ms, 459 MB |
+| CSV report: a million rows summed by group | **79.4 ms**, 38 MB | 166 ms, 38 MB | 104 ms, 2.2 MB | 162 ms, 7.3 MB | 558 ms, 10 MB |
+| Log analysis: a million access-log lines | 247 ms, 140 MB | **227 ms**, 122 MB | 525 ms, 137 MB | 429 ms, 222 MB | 1,130 ms, 34 MB |
+| Word count: 5 million words | **136 ms**, 94 MB | 155 ms, 48 MB | 195 ms, 87 MB | 515 ms, 466 MB | 843 ms, 364 MB |
+| Sorting: 5M integers, 5M doubles, 1M strings | **269 ms**, 282 MB | 1,234 ms, 136 MB | 326 ms, 182 MB | 886 ms, 195 MB | 3,051 ms, 588 MB |
+| Hash maps: 2M integer keys, 500,000 strings | **283 ms**, 268 MB | 486 ms, 204 MB | 665 ms, 240 MB | 609 ms, 164 MB | 1,833 ms, 376 MB |
 | Many small objects: 4M records | **145 ms**, 50 MB | 626 ms, 57 MB | 421 ms, 57 MB | 568 ms, 74 MB | 3,733 ms, 158 MB |
-| Building and splitting text: a million lines | **115 ms**, 76 MB | 123 ms, 76 MB | 127 ms, 76 MB | 319 ms, 178 MB | 579 ms, 205 MB |
+| Building and splitting text: a million lines | **110 ms**, 76 MB | 123 ms, 76 MB | 127 ms, 76 MB | 319 ms, 178 MB | 569 ms, 205 MB |
 | Files: 2,000 written, read and removed | 19.9 ms, 2.4 MB | 20.2 ms, 2.1 MB | **19.7 ms**, 2.2 MB | 31.4 ms, 6.8 MB | 64.6 ms, 9.6 MB |
 | Compression: gzip, zstd and xz round trips | 1,146 ms, 100 MB | — | 1,571 ms, 94 MB | **353 ms**, 111 MB | 1,378 ms, 128 MB |
 | Hashing: SHA-256 and CRC-32 of 270 MB | 106 ms, 16 MB | — | **104 ms**, 16 MB | 109 ms, 16 MB | 148 ms, 29 MB |
 | PNG: a 2,048 by 2,048 image encoded and decoded | **241 ms**, 51 MB | — | 705 ms, 31 MB | 305 ms, 58 MB | — |
 
-- **JSON** parses 200,000 records into a tree, writes the tree back as text, and reads that into typed records. Calx's `std.json` takes 65% of serde_json's time on Windows and 74% on Linux, and holds 22 to 27% less memory. Go's `encoding/json` works by reflection and takes 3.6 times as long as Calx, longer than Python's on Linux.
-- **CSV** reads a million rows with each language's CSV reader, some fields quoted, and sums them by group. Calx's `std.csv` takes about half the time of Rust's csv crate and Go's `encoding/csv` on Windows, each reading into one reused row, and on Linux 73% of Rust's and half of Go's. But it reads from text in memory, so it holds the whole 40 MB file, where they stream it in 2 to 12 MB. C reads its fields by hand, a byte at a time; on Windows about a third of its time goes to the C runtime's `snprintf` and `strtod`.
-- **Log analysis** is C's. The Calx version is written as a script would be, with `split_once` and `split`, and the parts of a line it binds with `let` and only looks at are views into the line, not copies (CLX-293). C scans each line in place with `memchr` and copies nothing, in 77 to 83% of Calx's time. The Calx program still makes a list for each `split` and copies the path it trims, which a `var` holds; what that costs is CLX-309. Go's `strings.Cut` gives parts that share the line too, and takes 44 to 55% longer than Calx. Rust's `&str` parts copy nothing either, and with std's maps, which hash with SipHash, it takes 76 to 83% longer.
-- **Word count** is Calx's: C takes 21 to 39% longer, though its hand-written map keeps its keys pointing into the text and holds half the memory. Each word the Calx program looks up is a view into the text, and only a word the map hasn't seen is copied, to be its key.
-- **Sorting** is Calx's: Rust's `sort_unstable` takes 22 to 54% longer. `sort_by` with `total_cmp` on the 5 million doubles is a radix sort of their bits (CLX-292), 60 to 66 ms measured alone on Windows to Rust's 92, and the integers and strings take 44 ms to Rust's 61 and 46 to its 133. C's `qsort` calls a comparison function for every comparison and takes 4.7 to 5.3 times as long as Calx. The radix sort's second list is why Calx holds the most memory here.
-- **Hash maps** use each language's map with its default hash. Rust's, which hashes with SipHash, takes 2.4 to 2.5 times as long as Calx's, Go's 2.2 to 2.3 times, and C's open addressing, written for the program, 1.7 to 1.8 times.
+- **JSON** parses 200,000 records into a tree, writes the tree back as text, and reads that into typed records. Calx's `std.json` takes 65% of serde_json's time on Windows and 75% on Linux, and holds 22 to 27% less memory. Go's `encoding/json` works by reflection and takes 3.5 to 3.6 times as long as Calx, longer than Python's on Linux.
+- **CSV** reads a million rows with each language's CSV reader, some fields quoted, and sums them by group. Calx's `std.csv` takes about half the time of Rust's csv crate and Go's `encoding/csv` on Windows, each reading into one reused row, and on Linux 76% of Rust's and half of Go's. But it reads from text in memory, so it holds the whole 40 MB file, where they stream it in 2 to 12 MB. C reads its fields by hand, a byte at a time; on Windows about a third of its time goes to the C runtime's `snprintf` and `strtod`.
+- **Log analysis** is Calx's on Windows and C's on Linux. The Calx version is written as a script would be, with `split_once` and `split`, and the parts of a line it binds with `let` and only looks at are views into the line, not copies (CLX-293). Its one-byte searches look over the first 64 bytes inline, a `split` it only indexes by number stops at the highest index, and checking that the file is UTF-8 goes 64 bytes at a time (CLX-309). C scans each line in place with `memchr` and copies nothing, and takes 13% longer than Calx on Windows and 8% less time on Linux. There, `perf` puts much of what's left in the set of addresses, whose slots take three times the room of C's; the path the Calx program trims, which a `var` holds, is still a copy (CLX-310). Go's `strings.Cut` gives parts that share the line too, and takes 74 to 89% longer than Calx. Rust's `&str` parts copy nothing either, and with std's maps, which hash with SipHash, it takes 2.1 to 2.4 times as long.
+- **Word count** is Calx's: C takes 14 to 36% longer, though its hand-written map keeps its keys pointing into the text and holds half the memory. Each word the Calx program looks up is a view into the text, and only a word the map hasn't seen is copied, to be its key.
+- **Sorting** is Calx's: Rust's `sort_unstable` takes 21 to 50% longer. `sort_by` with `total_cmp` on the 5 million doubles is a radix sort of their bits (CLX-292), 60 to 66 ms measured alone on Windows to Rust's 92, and the integers and strings take 44 ms to Rust's 61 and 46 to its 133. C's `qsort` calls a comparison function for every comparison and takes 4.6 to 5.2 times as long as Calx. The radix sort's second list is why Calx holds the most memory here.
+- **Hash maps** use each language's map with its default hash. Rust's, which hashes with SipHash, takes 2.3 to 2.5 times as long as Calx's, Go's 2.2 times, and C's open addressing, written for the program, 1.7 to 1.8 times.
 - **Many small objects** makes 4 million records of three allocations each, keeps one in 16 and frees the rest, so like binary-trees it times the allocator. C and Rust take 4 to 5 times as long as Calx on the Windows heap, and 2.9 to 4.3 times with glibc's on Linux, and Go's collector 3.8 to 3.9 times.
-- **Text** builds a million lines with formatting and takes them apart again. On Windows Rust takes 74% more time than Calx, and C, growing its buffers by doubling and formatting with `snprintf`, twice as much. On Linux it's closer: C takes 7% longer and Rust 10%. C's and Rust's take 24 to 38% less time there than on Windows, with glibc's `snprintf` and `malloc`, and Calx's 20% more. Calx's own work is no slower on Linux; under WSL, touching fresh memory costs this program about 28 ms in the first round, in every language alike (CLX-300). Calx's `split` sets up its search once for all the parts, and the fields a line is split into are views.
+- **Text** builds a million lines with formatting and takes them apart again. On Windows Rust takes 70% more time than Calx, and C, growing its buffers by doubling and formatting with `snprintf`, twice as much. On Linux it's closer: C takes 12% longer and Rust 15%. C's and Rust's take 25 to 38% less time there than on Windows, with glibc's `snprintf` and `malloc`, and Calx's 11% more. Calx's own work is no slower on Linux; under WSL, touching fresh memory costs this program about 28 ms in the first round, in every language alike (CLX-300). Calx's `split` sets up its search once for all the parts, and the fields a line is split into are views.
 - **Files** writes 2,000 small files, reads them back and removes them. On Windows that's the file system's time and Windows Defender's, which looks at each new file, so every language, Python too, takes 5.6 to 6.4 seconds, and the runs vary by a tenth. On Linux the same takes 20 ms in Calx, C and Rust, 31 in Go and 65 in Python.
 - **Compression** is Go's, for less work: its gzip writes a file 8 to 15% bigger than the others', and its xz, from ulikunitz/xz, one 38% bigger than liblzma's. Rust's and Python's xz is liblzma, 1.37 s of Rust's 1.73 s. Calx's `std.xz` writes within 1% of liblzma's size in less time, and its zstd and xz would use every processor; here the Calx program sets one worker, as the others compress on one thread.
 - **Hashing** is even: SHA-256 and CRC-32 run on the processor's own instructions in Calx, Rust and Go alike.

@@ -33,8 +33,8 @@ On the [language benchmarks](docs/language-benchmarks.md), Calx against C, Rust,
 
 | Calx against | Windows 11 | Linux (WSL2) |
 | --- | --- | --- |
-| C | 14 faster, 4 even, 1 slower | 11 faster, 6 even, 2 slower |
-| Rust | 19 faster, 5 even, 1 slower | 16 faster, 6 even, 3 slower |
+| C | 15 faster, 4 even | 11 faster, 7 even, 1 slower |
+| Rust | 19 faster, 5 even, 1 slower | 17 faster, 6 even, 2 slower |
 | Go | 19 faster, 3 even, 3 slower | 17 faster, 4 even, 4 slower |
 | Python | 21 faster | 21 faster |
 
