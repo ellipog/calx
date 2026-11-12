@@ -96,6 +96,7 @@ CX_FN(cx_usize, cx_arg_len, (cx_usize i));
 CX_FN(cx_i64, cx_env_get, (const cx_u8* name, cx_usize n, cx_u8* out, cx_usize cap));
 CX_FN(cx_u32, cx_env_os, (void));
 CX_FN(cx_u32, cx_env_arch, (void));
+CX_FN(cx_u32, cx_env_native_arch, (void));
 CX_FN(const cx_u8*, cx_script, (void));
 CX_FN(cx_usize, cx_script_len, (void));
 

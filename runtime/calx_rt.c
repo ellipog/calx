@@ -579,6 +579,25 @@ cx_u32 cx_env_arch(void) {
 #endif
 }
 
+/* Declared by std/env.calx: the processor the system has, numbered as cx_env_arch's, which is
+ * Arm64 for an x64 program that Windows on Arm or macOS's Rosetta translates (CLX-276). Windows
+ * runs an x64 program there without WOW64, so IsWow64Process2 says "unknown" of the process, but
+ * gives the machine's own; it's from Windows 10 1709, so it's looked up. */
+cx_u32 cx_env_native_arch(void) {
+#if defined(_WIN32) && !defined(__aarch64__) && !defined(_M_ARM64)
+    typedef BOOL(WINAPI * wow64_fn)(HANDLE, USHORT*, USHORT*);
+    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+    wow64_fn machines = kernel ? (wow64_fn)(void*)GetProcAddress(kernel, "IsWow64Process2") : NULL;
+    USHORT process = 0, native = 0;
+    if (machines && machines(GetCurrentProcess(), &process, &native) && native == 0xAA64) return 2; /* IMAGE_FILE_MACHINE_ARM64 */
+#elif defined(__APPLE__) && defined(__x86_64__)
+    int translated = 0;
+    size_t size = sizeof translated;
+    if (sysctlbyname("sysctl.proc_translated", &translated, &size, NULL, 0) == 0 && translated == 1) return 2;
+#endif
+    return cx_env_arch();
+}
+
 /* Declared by std/env.calx. The value of the environment variable named by the `n` bytes of
  * UTF-8 at `name`, written to `out` if its UTF-8 fits in `cap` bytes: its length in bytes, which
  * is more than `cap` if it didn't fit, or -1 if it isn't set or the name can't be one. Windows

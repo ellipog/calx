@@ -13,7 +13,9 @@
 // `calx-VERSION-OS-CPU.zip` or `.tar.gz`, CPU being `x64` or `arm64` (D612), with a `.sha256`
 // beside it. Stable releases are tagged `vVERSION` and are what `releases/latest` points to;
 // nightlies replace the `nightly` release on every push to main that passes CI, and upload
-// version.txt last, so the archive it names is already there.
+// version.txt last, so the archive it names is already there. An x64 installation that Windows
+// or macOS translates on an Arm processor updates to the Arm build where the release has one,
+// even at the same version.
 //
 // A release's archive can name, in toolchain.txt, the toolchain it builds programs with: an
 // archive of its own in the release, `calx-toolchain-NAME-OS-CPU.tar.xz`, its SHA-256, and its
@@ -23,7 +25,7 @@
 // scripts run that, and it mends an installation whose toolchain went missing. With CALX_INSTALLER=1,
 // as install.ps1 runs it, it leaves out its closing line, since the script says the rest.
 
-import std.env.{arch, args, os, variable}
+import std.env.{arch, args, native_arch, os, variable}
 import std.fs.{FsError, is_dir, is_file, list, make_dir_all, read, remove_dir_all, rename, separator, write}
 import std.hash.{sha256}
 import std.http.{Header, get}
@@ -117,7 +119,13 @@ fn run(o: Options, l: Look) ! String {
         }
         return
     }
-    if target == o.current and not o.force {
+    let tag = tag_of(target)
+    let ext = if windows { "zip" } else { "tar.gz" }
+    let cpu = processor(target, tag, ext)
+    // An x64 installation that the system translates on an Arm processor moves to the Arm build,
+    // even to the same version.
+    let moving = cpu != built_for()
+    if target == o.current and not o.force and not moving {
         if l.color {
             done(l, "calx `{o.current}` is the newest; there's nothing to update")
         } else {
@@ -133,10 +141,15 @@ fn run(o: Options, l: Look) ! String {
         }
         return
     }
-    let tag = tag_of(target)
-    // This calx-update was built for the processor the installation is for.
-    let cpu = if arch() == "aarch64" { "arm64" } else { "x64" }
-    let file = "calx-{target}-{os()}-{cpu}.{if windows { "zip" } else { "tar.gz" }}"
+    if moving {
+        let says = "This calx is for x64, which the system translates on this Arm processor, so the update is the Arm64 build, which runs natively"
+        if l.color {
+            println("{dim(l, "·")} {dim(l, says)}")
+        } else {
+            println("{says}.")
+        }
+    }
+    let file = "calx-{target}-{os()}-{cpu}.{ext}"
     let url = "{releases()}/download/{tag}/{file}"
     if not l.color {
         println("Downloading {file}...")
@@ -194,6 +207,33 @@ fn run(o: Options, l: Look) ! String {
         println("{dim(l, commands(l, "in place of {o.current}; `calx update --rollback` puts it back"))}")
     } else {
         println("Installed calx {target}, in place of {o.current}. `calx update --rollback` puts {o.current} back.")
+    }
+}
+
+// The processor this calx-update was built for, as the installation is, as release archives
+// name it.
+fn built_for() -> String {
+    return archive_cpu(arch())
+}
+
+// A processor as std.env names it, as release archives name it.
+fn archive_cpu(name: String) -> String {
+    return if name == "aarch64" { "arm64" } else { "x64" }
+}
+
+// The processor the update's build is for: the installation's, unless Windows or macOS
+// translates it on an Arm processor and the release has an Arm build, which runs natively there
+// in its place (CLX-276). Not every release has one, so the Arm build's SHA-256 is asked for
+// first.
+fn processor(target: String, tag: String, ext: String) -> String {
+    let built = built_for()
+    if native_arch() == arch() {
+        return built
+    }
+    let native = archive_cpu(native_arch())
+    return match fetch("{releases()}/download/{tag}/calx-{target}-{os()}-{native}.{ext}.sha256", 30000, 4096) {
+        ok(_) => native,
+        err(_) => built,
     }
 }
 

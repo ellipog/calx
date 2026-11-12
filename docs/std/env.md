@@ -34,6 +34,7 @@ fn main() {
 | `variable(name: String) -> String?` | The value of the environment variable `name`, or `none` if it isn't set or `name` can't be one: empty, or with `=` or a zero byte in it. Windows matches names without regard to case |
 | `os() -> String` | The system the program runs on, `"windows"`, `"linux"` or `"macos"`, as Rust's `std::env::consts::OS` names them, for the few things a script does differently on each. A program is built for one system, so it's the same on every call |
 | `arch() -> String` | The processor the program was built for, `"x86_64"` or `"aarch64"`, as Rust's `std::env::consts::ARCH` names them. An x64 program that Windows or macOS runs on an Arm processor, translating it as it goes, says `"x86_64"` |
+| `native_arch() -> String` | The processor the system has: `arch()`, but `"aarch64"` for an x64 program that Windows on Arm or macOS's Rosetta translates. For choosing which build of a program to download, as `calx update` does. Python's `platform.machine()` says what the system says to the program, which is `AMD64` under Windows' translation |
 
 Run a program with arguments by putting them after `--`: `calx run tool.calx -- --threads 24` ([the calx command](../reference/command.md)). [`std.cli`](cli.md) reads them into a struct, as options, flags and arguments by place, with `--help`.
 
