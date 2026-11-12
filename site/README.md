@@ -25,15 +25,11 @@ Search works only in a build: Pagefind indexes the pages as `npm run build` writ
 
 ## Publishing it
 
-Vercel builds and deploys the site from this repo. Its project's root directory is `site/`, and it runs `npm run build` and serves `dist/`. The project's `vercel.app` address serves the same pages, and their canonical links send search engines to calxlang.com.
+The site is self-hosted on Elliot's VPS behind Cloudflare. The VPS checks main every minute and builds the site (`npm run build` in `site/`, serving `dist/`) when a push changes what it's made from: this folder, `docs/`, the README, the language benchmarks' records (`bench/results/`), `assets/logo/`, `tools/install/` and `tools/vscode/syntaxes/`. A push that changes only the compiler, the runtime, std or the tests makes no deployment. A new build goes live in one atomic switch, so there's no downtime, and a build that fails leaves the live site as it was. A new file the site reads from elsewhere in the repo goes in that list, which is kept on the VPS.
 
-The live site, https://calxlang.com, is deployed only when a push to main changes what it's made from: this folder, `docs/`, the README, the language benchmarks' records (`bench/results/suite-*.json`), `assets/logo/`, `tools/install/` and `tools/vscode/syntaxes/`. Vercel's own deploys from main are off (`git.deploymentEnabled` in `vercel.json`). [`.github/workflows/site.yml`](../.github/workflows/site.yml) runs on those paths and calls the project's deploy hook, the repo's `VERCEL_DEPLOY_HOOK` secret, made in Vercel's project settings under Git, Deploy Hooks. So a push that changes only the compiler, the runtime, std or the tests makes no deployment, and doesn't count toward the deployments Vercel allows a day. Running the workflow by hand deploys main as it is.
+The web server sends an address without its closing slash, `/reference/parallel`, to the one with it, and one ending in `.html` or `index.html` to the page's own, so each page has one address. It serves `install.sh` and `install.ps1` as plain text, and the pages' `.md` copies and `llms.txt` with `X-Robots-Tag: noindex`.
 
-A push to another branch, or a pull request, gets a preview of its own from Vercel, and its build shows as a check on GitHub, so a change that breaks the site shows there before it merges. It's built only if it changes those files: [`skip-build.sh`](skip-build.sh), `vercel.json`'s `ignoreCommand`, compares it with the branch's last deployment, `VERCEL_GIT_PREVIOUS_SHA`, and builds when there's nothing to compare with. A new file the site reads from elsewhere in the repo goes in both lists.
-
-[`vercel.json`](vercel.json) sends an address without its closing slash, `/reference/parallel`, to the one with it, and one ending in `index.html` to the page's own, so each page has one address.
-
-The project has one environment variable, `PUBLIC_ACTA_ROADMAP_KEY`, the roadmap's key ([The roadmap](#the-roadmap)). Without it the site still builds, and the roadmap is read only.
+The site has one environment variable, `PUBLIC_ACTA_ROADMAP_KEY`, the roadmap's key ([The roadmap](#the-roadmap)). Without it the site still builds, and the roadmap is read only.
 
 ## Search engines
 
@@ -42,9 +38,9 @@ Every page's links for search engines and link previews use the site's address, 
 - **Each page** has a title and description from its front matter, a canonical link to its own address, and the `og:` tags that link previews read, with `social.png` as the picture.
 - **Titles say which Calx.** "Calx" is also a word in chemistry and anatomy, so a page's `<title>` ends with the part of the site it's in: "Lists | Calx language reference", "std.zlib | Calx standard library", and "Install Calx | The Calx programming language" for the rest. [`src/seo.mjs`](src/seo.mjs) has the rule, and [`src/route-data.mjs`](src/route-data.mjs) applies it to the docs pages, as Starlight's route middleware. The page itself shows the front matter's title as it is.
 - **Descriptions are 160 characters at most.** Search results cut a longer one short, so a description says what the page is first, in under 160 characters, and over 70, so a result has something to show.
-- **One address for each page.** [`vercel.json`](vercel.json) sends `/reference/parallel` to `/reference/parallel/`, and `/index.html` to `/` (`cleanUrls`), so links to a page all count for the same address. The project's `vercel.app` addresses send `X-Robots-Tag: noindex`, so only calxlang.com is in search results.
+- **One address for each page.** The web server sends `/reference/parallel` to `/reference/parallel/`, and `/index.html` to `/`, so links to a page all count for the same address, and `www.calxlang.com` to calxlang.com.
 - **The site** has `robots.txt` ([`src/pages/robots.txt.ts`](src/pages/robots.txt.ts)), which lets every page be crawled and points at the sitemap, and the sitemap, with every page but the 404 one. Each page made from a file in `docs/` has a `lastmod` there, when the file last changed, which search engines use to know what to crawl again. The section pages and `/docs/` take theirs from `docs/README.md`; the home page and the roadmap, made from more than one file, have none.
-- **Dates from git.** [`src/facts.mjs`](src/facts.mjs) reads when each file in `docs/` was first committed and last changed, in one `git log`. Vercel's clone has only recent history, so the build first fetches the rest from the public repo, in about two seconds. If it can't, a date from before the clone's history begins isn't known, and it's left out rather than guessed. A docs page shows its last change at the bottom, the same date its structured data and the sitemap give.
+- **Dates from git.** [`src/facts.mjs`](src/facts.mjs) reads when each file in `docs/` was first committed and last changed, in one `git log`. A shallow clone has only recent history, so the build first fetches the rest from the public repo, in about two seconds. If it can't, a date from before the clone's history begins isn't known, and it's left out rather than guessed. A docs page shows its last change at the bottom, the same date its structured data and the sitemap give.
 - **Section pages.** `/guide/`, `/reference/` and `/std/` list their section's pages, as `/docs/` does all of them ([`src/pages/[hub].astro`](src/pages/[hub].astro), `HUBS` in [`src/seo.mjs`](src/seo.mjs)). So the address above each page is a page too, the crumbs link to it, and a search for "Calx standard library" has a page to find. The header's Reference and Std go there, and a docs link to `README.md#reference` does too.
 - **The 404 page** asks not to be indexed and has no canonical link.
 - **Structured data** (schema.org, as JSON-LD, from [`src/seo.mjs`](src/seo.mjs)):
@@ -63,7 +59,7 @@ The docs are also plain Markdown, for language models and the tools that read do
 - [`/llms-full.txt`](https://calxlang.com/llms-full.txt), every page in one file, in reading order;
 - each page's own Markdown beside it, `/reference/parallel.md` for `/reference/parallel/`, which its head links to as `rel="alternate"`.
 
-Each is the page as the site shows it: the front matter's title and description at the top, no decisions cited, and every link a full address. `vercel.json` serves them with `X-Robots-Tag: noindex`, so search results show the pages rather than their Markdown.
+Each is the page as the site shows it: the front matter's title and description at the top, no decisions cited, and every link a full address. The web server sends them with `X-Robots-Tag: noindex`, so search results show the pages rather than their Markdown.
 
 ## How it's made
 

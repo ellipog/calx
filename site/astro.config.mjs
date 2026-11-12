@@ -18,7 +18,7 @@ import { HEAD, ORIGIN, sourceOf } from './src/seo.mjs';
 const SITE = ORIGIN;
 
 export default defineConfig({
-	// The build goes to dist/, Astro's own place for it, where Vercel looks.
+	// The build goes to dist/, Astro's own place for it, which the web server serves.
 	site: SITE,
 	// The dev server shows the pages as they'll ship, without Astro's toolbar over them.
 	devToolbar: { enabled: false },

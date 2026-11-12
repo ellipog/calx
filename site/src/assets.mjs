@@ -23,7 +23,7 @@ export const FILES = {
 	'/apple-touch-icon.png': { type: 'image/png', read: () => readFileSync(new URL('calx-icon-180.png', LOGO)) },
 	'/crystal-tones.jpg': { type: 'image/jpeg', read: () => readFileSync(new URL('calx-tones.jpg', LOGO)) },
 	// The install scripts, from tools/install, for `irm calxlang.com/install.ps1 | iex` and
-	// `curl -fsSL calxlang.com/install.sh | sh`. vercel.json gives them a text type.
+	// `curl -fsSL calxlang.com/install.sh | sh`. The web server gives them a text type too.
 	'/install.ps1': { type: 'text/plain; charset=utf-8', read: () => readFileSync(new URL('tools/install/install.ps1', REPO)) },
 	'/install.sh': { type: 'text/plain; charset=utf-8', read: () => readFileSync(new URL('tools/install/install.sh', REPO)) },
 };
