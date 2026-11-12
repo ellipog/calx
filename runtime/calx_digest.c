@@ -456,25 +456,50 @@ AVX2_TARGET static inline void sha512_pair2(__m256i* w, cx_u64* wk, int j) {
 #define SHA512_AT1(t) (2 * (t) - ((t) & 1))
 #define SHA512_AT2(t) (2 * (t) - ((t) & 1) + 2)
 
-/* The 80 rounds of one block on its words with their constants added, from the state in `hs`:
- * round t's is `wk[at(t)]`. */
-#define SHA512_ROUNDS(at, before)                                                                \
+/* The AVX2 path's round, which has BMI too. It's SHA512_ROUND with Maj as (a & bxc) + (b & ~bxc),
+ * bxc being b ^ c: where b and c differ the majority is a's bit, and where they agree it's b's, so
+ * the two halves never share a bit and adding them is or-ing them. The second half doesn't wait on
+ * a, so it goes into h + wk with the sums that come first, and andn makes it one instruction. b ^ c
+ * is the round before's a ^ b, carried in `bxc`. That's two moves a round fewer than with b | c
+ * and b & c carried, and Maj still waits on a for one operation before its add. */
+#define SHA512_ROUND_BMI(a, b, c, d, e, f, g, h, i)                                              \
     do {                                                                                         \
-        cx_u64 a = hs[0], b = hs[1], c = hs[2], d = hs[3], e = hs[4], f = hs[5], g = hs[6], h = hs[7]; \
-        cx_u64 bor = b | c, band = b & c;                                                        \
-        for (int i = 0; i < 80; i += 8) {                                                        \
-            before;                                                                              \
-            SHA512_ROUND(a, b, c, d, e, f, g, h, at(i));                                         \
-            SHA512_ROUND(h, a, b, c, d, e, f, g, at(i + 1));                                     \
-            SHA512_ROUND(g, h, a, b, c, d, e, f, at(i + 2));                                     \
-            SHA512_ROUND(f, g, h, a, b, c, d, e, at(i + 3));                                     \
-            SHA512_ROUND(e, f, g, h, a, b, c, d, at(i + 4));                                     \
-            SHA512_ROUND(d, e, f, g, h, a, b, c, at(i + 5));                                     \
-            SHA512_ROUND(c, d, e, f, g, h, a, b, at(i + 6));                                     \
-            SHA512_ROUND(b, c, d, e, f, g, h, a, at(i + 7));                                     \
-        }                                                                                        \
-        hs[0] += a, hs[1] += b, hs[2] += c, hs[3] += d, hs[4] += e, hs[5] += f, hs[6] += g, hs[7] += h; \
+        cx_u64 hk = h + wk[i];                                                                   \
+        KEEP(hk);                                                                                \
+        cx_u64 dk = d + hk;                                                                      \
+        KEEP(dk);                                                                                \
+        cx_u64 hm = hk + (b & ~bxc);                                                             \
+        KEEP(hm);                                                                                \
+        cx_u64 ch = g ^ (e & (f ^ g));                                                           \
+        cx_u64 s1 = rotr64(e, 14) ^ rotr64(e, 18) ^ rotr64(e, 41);                               \
+        dk += ch;                                                                                \
+        KEEP(dk);                                                                                \
+        d = dk + s1;                                                                             \
+        cx_u64 t1 = hm + ch;                                                                     \
+        KEEP(t1);                                                                                \
+        t1 += s1;                                                                                \
+        KEEP(t1);                                                                                \
+        t1 += a & bxc;                                                                           \
+        bxc = a ^ b;                                                                             \
+        KEEP(t1);                                                                                \
+        h = t1 + (rotr64(a, 28) ^ rotr64(a, 34) ^ rotr64(a, 39));                                \
     } while (0)
+
+/* Rounds i to i + 7 of one block, round t's word with its constant at `wk[at(t)]`, with x0 to x3
+ * done before rounds i, i + 2, i + 4 and i + 6. */
+#define SHA512_EIGHT(at, x0, x1, x2, x3)                                                         \
+    x0;                                                                                          \
+    SHA512_ROUND_BMI(a, b, c, d, e, f, g, h, at(i));                                             \
+    SHA512_ROUND_BMI(h, a, b, c, d, e, f, g, at(i + 1));                                         \
+    x1;                                                                                          \
+    SHA512_ROUND_BMI(g, h, a, b, c, d, e, f, at(i + 2));                                         \
+    SHA512_ROUND_BMI(f, g, h, a, b, c, d, e, at(i + 3));                                         \
+    x2;                                                                                          \
+    SHA512_ROUND_BMI(e, f, g, h, a, b, c, d, at(i + 4));                                         \
+    SHA512_ROUND_BMI(d, e, f, g, h, a, b, c, at(i + 5));                                         \
+    x3;                                                                                          \
+    SHA512_ROUND_BMI(c, d, e, f, g, h, a, b, at(i + 6));                                         \
+    SHA512_ROUND_BMI(b, c, d, e, f, g, h, a, at(i + 7))
 
 AVX2_TARGET static void sha512_blocks_avx2(cx_u64* hs, const cx_u8* p, cx_usize n) {
     /* Each 64-bit word's bytes reversed, in both halves. */
@@ -490,13 +515,33 @@ AVX2_TARGET static void sha512_blocks_avx2(cx_u64* hs, const cx_u8* p, cx_usize 
             __m256i k = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)(sha512_k + 2 * j)));
             _mm256_storeu_si256((__m256i*)(wk + 4 * j), _mm256_add_epi64(w[j], k));
         }
-        SHA512_ROUNDS(SHA512_AT1, if (i < 64) {
-            sha512_pair2(w, wk, i / 2 + 8);
-            sha512_pair2(w, wk, i / 2 + 9);
-            sha512_pair2(w, wk, i / 2 + 10);
-            sha512_pair2(w, wk, i / 2 + 11);
-        });
-        SHA512_ROUNDS(SHA512_AT2, (void)0);
+        /* The first block's rounds, with the words for sixteen rounds on made a pair before every
+         * two rounds. Its first 64 rounds are a loop of their own: an `i < 64` test in the one
+         * loop put the schedule's vector work in a basic block apart from the rounds, so it came
+         * all at once instead of mixed in with them. CLX-151, hashing 64 MiB on one P-core of an
+         * i9-13900K on Windows: 1081 MiB/s with the two changes, against 1032 with b | c and b & c
+         * carried and the test in the loop, and 1118 for Python's hashlib (OpenSSL 3.5). */
+        {
+            cx_u64 a = hs[0], b = hs[1], c = hs[2], d = hs[3], e = hs[4], f = hs[5], g = hs[6], h = hs[7];
+            cx_u64 bxc = b ^ c;
+            for (int i = 0; i < 64; i += 8) {
+                SHA512_EIGHT(SHA512_AT1, sha512_pair2(w, wk, i / 2 + 8), sha512_pair2(w, wk, i / 2 + 9),
+                             sha512_pair2(w, wk, i / 2 + 10), sha512_pair2(w, wk, i / 2 + 11));
+            }
+            for (int i = 64; i < 80; i += 8) {
+                SHA512_EIGHT(SHA512_AT1, (void)0, (void)0, (void)0, (void)0);
+            }
+            hs[0] += a, hs[1] += b, hs[2] += c, hs[3] += d, hs[4] += e, hs[5] += f, hs[6] += g, hs[7] += h;
+        }
+        /* The second block's, on its words, all made by now. */
+        {
+            cx_u64 a = hs[0], b = hs[1], c = hs[2], d = hs[3], e = hs[4], f = hs[5], g = hs[6], h = hs[7];
+            cx_u64 bxc = b ^ c;
+            for (int i = 0; i < 80; i += 8) {
+                SHA512_EIGHT(SHA512_AT2, (void)0, (void)0, (void)0, (void)0);
+            }
+            hs[0] += a, hs[1] += b, hs[2] += c, hs[3] += d, hs[4] += e, hs[5] += f, hs[6] += g, hs[7] += h;
+        }
     }
     if (n) sha512_blocks(hs, p, n);
 }
