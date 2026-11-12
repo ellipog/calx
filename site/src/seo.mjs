@@ -1,6 +1,6 @@
 // What search engines read about a page beyond its front matter: its title, where it sits, and
 // structured data (schema.org, as JSON-LD). site/README.md's "Search engines" says why.
-import { docsIndex, fileOf } from './docs-index.mjs';
+import { docsIndex, fileOf, OWN_PAGES } from './docs-index.mjs';
 
 export const ORIGIN = 'https://calxlang.com';
 
@@ -53,8 +53,13 @@ export const HUBS = [
 	},
 ];
 
+/** Sections whose first page the site renders itself, with the rest of the section linked from it:
+ *  the performance section's overview is /performance/ (src/pages/performance.astro). */
+const OWN_SECTIONS = { performance: '/performance/' };
+
 /** Where a section of the docs is listed: its own page, a part of one, or a part of /docs/. */
 export function sectionPath(id) {
+	if (id in OWN_SECTIONS) return OWN_SECTIONS[id];
 	const hub = HUBS.find((h) => h.sections.includes(id));
 	if (!hub) return `/docs/#${id}`;
 	return hub.sections[0] === id ? `/${hub.path}/` : `/${hub.path}/#${id}`;
@@ -62,12 +67,13 @@ export function sectionPath(id) {
 
 /** The file in the repo a page is made from, by its path on the site: "/reference/parallel/" is
  *  docs/reference/parallel.md, and /docs/ and the section pages are made from docs/README.md's
- *  page list. Null for the home page, the roadmap, and the 404 page, which are made from more. */
+ *  page list. Null for the home page, the roadmap, the performance page and the 404 page, which
+ *  are made from more. */
 export function sourceOf(path) {
 	const slug = path.replace(/^\/|\/$/g, '');
 	if (slug === 'docs' || HUBS.some((h) => h.path === slug)) return 'docs/README.md';
 	const listed = docsIndex().some((s) => s.pages.some((p) => p.slug === slug));
-	return listed && slug !== 'roadmap' ? `docs/${fileOf(slug)}` : null;
+	return listed && !OWN_PAGES.has(slug) ? `docs/${fileOf(slug)}` : null;
 }
 
 /** Tags every page's head has, on Starlight's pages and the site's own: the icons beside the SVG

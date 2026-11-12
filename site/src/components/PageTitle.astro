@@ -46,8 +46,8 @@ const PAGE_TITLE_ID = '_top';
 	</a>
 </div>
 {
-	// The header's Performance link comes here, so the page opens with the results, as the README's
-	// Performance section has them, and then says how they're made.
+	// The tick-loop page opens with its results, as the README's Performance section has them, and
+	// then says how they're made.
 	route.id === 'benchmarks' && (
 		<section class="results" aria-labelledby="results" data-pagefind-ignore>
 			<h2 id="results" class="sr-only">Results</h2>
@@ -56,7 +56,8 @@ const PAGE_TITLE_ID = '_top';
 	)
 }
 {
-	// The language benchmarks open with who won each one, then the tables say by how much.
+	// The language benchmarks open with who won each one, on either system, then the tables say by
+	// how much.
 	route.id === 'language-benchmarks' && (
 		<section class="results" aria-labelledby="results" data-pagefind-ignore>
 			<h2 id="results" class="sr-only">Results</h2>

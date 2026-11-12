@@ -1,0 +1,275 @@
+---
+// Calx against each language on the language benchmarks, as one bar a language: the programs Calx
+// took less time on, those within 5% either way, and those it took longer on, with the count in
+// each part, and beside it the geometric mean of the two languages' times. Both systems' bars are
+// here, marked data-os, for the switch of the .os-scope around it (OsSwitch.astro). Pointing at a
+// part, or tabbing to it, names its programs.
+import { SUITE_OSES, suite, tally, versus } from '../numbers.mjs';
+
+const PARTS = [
+	{ kind: 'calx', label: 'Calx faster' },
+	{ kind: 'even', label: 'within 5%' },
+	{ kind: 'other', label: 'the other faster' },
+] as const;
+
+const factor = (f: number) => (f < 10 ? f.toFixed(2) : f.toFixed(1));
+
+const systems = SUITE_OSES.map((os) => {
+	const s = suite(os);
+	const rows = s.groups.flatMap((g) => g.rows);
+	return {
+		os,
+		rows: tally(os).map((t) => {
+			// Which programs fall in each part, for the tooltip.
+			const names = { calx: [] as string[], even: [] as string[], other: [] as string[] };
+			for (const r of rows) {
+				if (r.ms.calx === undefined || r.ms[t.id] === undefined) continue;
+				names[versus(r.ms.calx, r.ms[t.id]).kind].push(r.label);
+			}
+			const mean = versus(t.mean, 1);
+			return {
+				...t,
+				parts: PARTS.map((p) => ({ ...p, count: t[p.kind], names: names[p.kind] })).filter((p) => p.count > 0),
+				mean:
+					mean.kind === 'even'
+						? 'even'
+						: mean.kind === 'calx'
+							? `Calx ${factor(mean.factor)}× faster`
+							: `${t.name} ${factor(mean.factor)}× faster`,
+			};
+		}),
+	};
+});
+---
+
+<div class="score">
+	<div class="legend" aria-hidden="true">
+		{
+			PARTS.map((p) => (
+				<span>
+					<i class={`k-${p.kind}`} />
+					{p.label === 'the other faster' ? 'the other language faster' : p.label}
+				</span>
+			))
+		}
+	</div>
+	{
+		systems.map((s) => (
+			<div class="rows" data-os={s.os}>
+				{s.rows.map((r, i) => (
+					<div class="row" style={`--i:${i}`}>
+						<div class="who">
+							<span>vs</span> {r.name}
+						</div>
+						<div class="bar" role="img" aria-label={`Against ${r.name}: Calx faster on ${r.calx}, even on ${r.even}, slower on ${r.other}, of ${r.both} programs`}>
+							{r.parts.map((p) => (
+								<span
+									class={`part p-${p.kind}`}
+									style={`flex-grow:${p.count}`}
+									tabindex="0"
+									data-tip={`${p.count} ${p.kind === 'other' ? `${r.name} faster` : p.label}: ${p.names.join(', ')}`}
+								>
+									{p.count}
+								</span>
+							))}
+						</div>
+						<div class="mean">
+							<b>{r.mean}</b>
+							<span>geometric mean of {r.both} programs</span>
+						</div>
+					</div>
+				))}
+			</div>
+		))
+	}
+	<div class="tip" hidden></div>
+</div>
+
+<script>
+	// A board below the fold draws its bars when it's scrolled to. One already in view when the page
+	// opens doesn't, as its bars have been painted by then.
+	const seen = new IntersectionObserver(
+		(entries) => {
+			for (const e of entries)
+				if (e.isIntersecting) {
+					e.target.classList.replace('pending', 'reveal');
+					seen.unobserve(e.target);
+				}
+		},
+		{ rootMargin: '0px 0px -10% 0px' }
+	);
+	const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+	for (const board of document.querySelectorAll<HTMLElement>('.score')) {
+		if (!still && board.getBoundingClientRect().top > innerHeight) {
+			board.classList.add('pending');
+			seen.observe(board);
+		}
+		const tip = board.querySelector<HTMLElement>('.tip')!;
+		const show = (part: HTMLElement, x: number, y: number) => {
+			tip.textContent = part.dataset.tip ?? '';
+			tip.hidden = false;
+			tip.style.left = `${Math.max(8, Math.min(x + 14, innerWidth - tip.offsetWidth - 8))}px`;
+			tip.style.top = `${y + 16}px`;
+		};
+		for (const part of board.querySelectorAll<HTMLElement>('.part')) {
+			part.addEventListener('mousemove', (e) => show(part, e.clientX, e.clientY));
+			part.addEventListener('mouseleave', () => (tip.hidden = true));
+			part.addEventListener('focus', () => {
+				const r = part.getBoundingClientRect();
+				show(part, r.left, r.bottom - 8);
+			});
+			part.addEventListener('blur', () => (tip.hidden = true));
+		}
+		addEventListener('scroll', () => (tip.hidden = true), { passive: true });
+	}
+</script>
+
+<style>
+	.score {
+		/* Text inside a part is near-black or white, whichever reads on its fill. */
+		--on-calx: #1e1f24;
+		--on-other: #ffffff;
+		--on-even: #1e1f24;
+	}
+	:global(:root[data-theme='dark']) .score {
+		--on-other: #0e1218;
+		--on-even: #ece6da;
+	}
+	.legend {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px 20px;
+		font-size: 14px;
+		color: var(--ink-2);
+		margin-bottom: 18px;
+	}
+	.legend i {
+		width: 12px;
+		height: 12px;
+		border-radius: 3px;
+		display: inline-block;
+		margin-right: 8px;
+		vertical-align: -1px;
+	}
+	.k-calx {
+		background: var(--calx);
+	}
+	.k-even {
+		background: var(--line-2);
+	}
+	.k-other {
+		background: var(--rust);
+	}
+	.rows {
+		display: grid;
+		gap: 14px;
+	}
+	.row {
+		display: grid;
+		grid-template-columns: 92px minmax(0, 1fr) 210px;
+		gap: 8px 20px;
+		align-items: center;
+	}
+	.who {
+		font: 600 16px var(--f-body);
+		color: var(--ink);
+		white-space: nowrap;
+	}
+	.who span {
+		font-weight: 400;
+		color: var(--ink-3);
+	}
+	.bar {
+		display: flex;
+		gap: 2px;
+		height: 28px;
+		border-radius: 4px;
+		overflow: hidden;
+	}
+	/* The bars draw in from the left when the board comes into view. The script hides them first,
+	   while the board is below the fold, so without it they're simply there. */
+	.score.pending .bar {
+		clip-path: inset(0 100% 0 0);
+	}
+	.score.reveal .bar {
+		animation: reveal 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
+		animation-delay: calc(var(--i) * 90ms);
+	}
+	@keyframes reveal {
+		from {
+			clip-path: inset(0 100% 0 0);
+		}
+		to {
+			clip-path: inset(0 0 0 0);
+		}
+	}
+	.part {
+		flex-basis: 0;
+		min-width: 26px;
+		display: flex;
+		align-items: center;
+		padding: 0 9px;
+		font: 600 13.5px/1 var(--f-body);
+		font-variant-numeric: tabular-nums;
+		cursor: default;
+		outline: none;
+	}
+	.part:hover,
+	.part:focus-visible {
+		box-shadow: inset 0 0 0 2px var(--ink);
+	}
+	.p-calx {
+		background: var(--calx);
+		color: var(--on-calx);
+	}
+	.p-even {
+		background: var(--line-2);
+		color: var(--on-even);
+		justify-content: center;
+	}
+	.p-other {
+		background: var(--rust);
+		color: var(--on-other);
+		justify-content: flex-end;
+	}
+	.mean b {
+		display: block;
+		font: 600 15px var(--f-body);
+		color: var(--ink);
+	}
+	.mean span {
+		font-size: 12.5px;
+		color: var(--ink-3);
+	}
+	.tip {
+		position: fixed;
+		z-index: 50;
+		pointer-events: none;
+		background: var(--ink);
+		color: var(--paper);
+		font: 500 12.5px/1.45 var(--f-body);
+		padding: 8px 11px;
+		border-radius: 8px;
+		box-shadow: var(--shadow);
+		max-width: 300px;
+	}
+	.tip[hidden] {
+		display: none;
+	}
+	@media (max-width: 640px) {
+		.row {
+			grid-template-columns: minmax(0, 1fr) auto;
+			gap: 6px 12px;
+		}
+		.bar {
+			grid-column: 1 / -1;
+			grid-row: 2;
+		}
+		.mean {
+			text-align: right;
+		}
+		.mean span {
+			display: none;
+		}
+	}
+</style>

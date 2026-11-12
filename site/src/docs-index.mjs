@@ -38,11 +38,11 @@ export function docsIndex() {
 
 /** Pages in the list that the site renders itself, outside Starlight (src/pages/), so the sidebar
  *  links to them instead of naming a docs entry. */
-const OWN_PAGES = new Set(['roadmap']);
+export const OWN_PAGES = new Set(['roadmap', 'performance']);
 
 /** The Starlight sidebar: one group per section. Every section after the reference starts closed,
  *  unless the page is in it, so the guide and the reference come first. */
-const CLOSED = ['standard-library', 'java-compatibility', 'design'];
+const CLOSED = ['standard-library', 'java-compatibility', 'design', 'performance'];
 export function sidebar() {
 	return docsIndex().map((section) => ({
 		label: section.title,

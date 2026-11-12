@@ -12,6 +12,7 @@ on:
       - 'site/**'
       - 'docs/**'
       - 'README.md'
+      - 'bench/results/suite-*.json'
       - 'assets/logo/**'
       - 'tools/install/**'
       - 'tools/vscode/syntaxes/**'

@@ -4,11 +4,12 @@
 import Base from '../layouts/Base.astro';
 import CodeCard from '../components/CodeCard.astro';
 import Example from '../components/Example.astro';
-import PerfChart from '../components/PerfChart.astro';
+import OsSwitch from '../components/OsSwitch.astro';
+import Scoreboard from '../components/Scoreboard.astro';
 import SiteFooter from '../components/SiteFooter.astro';
 import { docsIndex } from '../docs-index.mjs';
 import { errorOf, fences } from '../examples.mjs';
-import { buildTimes } from '../numbers.mjs';
+import { buildTimes, suite } from '../numbers.mjs';
 import { ABOUT, LANGUAGE, homeData } from '../seo.mjs';
 
 // parallel.md: its first example, the C that example compiles to (the page's first two C blocks),
@@ -35,6 +36,7 @@ const mathExample = exampleIn('reference/floats.md', '{0.1 + 0.2}');
 const ownershipExample = exampleIn('reference/ownership.md', 'was moved');
 const strictExample = exampleIn('reference/strictness.md', 'value is unused');
 const builds = buildTimes().map((r) => ({ ...r, command: r.label.match(/^calx \w+/)?.[0] ?? '' }));
+const programs = suite().groups.reduce((n, g) => n + g.rows.length, 0);
 
 // For search engines: the title says what Calx is in the words people search with, and the
 // structured data names the site Calx rather than by its domain (src/seo.mjs).
@@ -115,7 +117,7 @@ const description = ABOUT;
 				</div>
 				<div class="promise">
 					<h3>Fast to build</h3>
-					<p>Measured on the same machine as the benchmark below.</p>
+					<p>Measured on the same machine as the benchmarks below.</p>
 					<table class="times">
 						<thead>
 							<tr><th><span class="sr-only">Build</span></th><th>Windows</th><th>Linux</th></tr>
@@ -140,13 +142,19 @@ const description = ABOUT;
 			</div>
 		</section>
 
-		<section class="section" id="perf">
-			<h2 class="h">Faster than Rust, on our benchmark</h2>
-			<p class="intro">
-				We wrote the same simulation in Calx and in Rust, with the same algorithms. Both must print the same checksum, and CI
-				checks Calx's on every push.
-			</p>
-			<PerfChart />
+		<section class="section os-scope" id="perf">
+			<div class="perf-head">
+				<div>
+					<h2 class="h">Timed against C, Rust, Go and Python</h2>
+					<p class="intro">
+						{programs} programs, each written in each language with the same algorithm and printing the same output: how many Calx
+						took less time on, how many came out even, and how many took it longer.
+					</p>
+				</div>
+				<OsSwitch name="home-os" />
+			</div>
+			<div class="perf-card"><Scoreboard /></div>
+			<p class="link"><a class="more" href="/performance/">Every result, the builds, and where Calx is slower</a></p>
 		</section>
 
 		<section class="section">

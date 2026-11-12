@@ -7,8 +7,9 @@
 # deploys from main are off (vercel.json's git.deploymentEnabled).
 #
 # A push to another branch gets a preview only if it changed what the site is made from since the
-# branch's last deployment: this folder, docs/, the README's numbers, assets/logo/'s art,
-# tools/install/'s scripts, which it serves, and tools/vscode/'s grammar, which colors its code.
+# branch's last deployment: this folder, docs/, the README's numbers, the language benchmarks'
+# records in bench/results/, assets/logo/'s art, tools/install/'s scripts, which it serves, and
+# tools/vscode/'s grammar, which colors its code.
 # When there's nothing to compare with, as on a branch's first push, or when the last deployment's
 # commit is older than Vercel's shallow clone holds, it builds.
 if [ "$VERCEL_GIT_COMMIT_REF" = main ]; then
@@ -20,7 +21,7 @@ if [ -z "$prev" ] || ! git cat-file -e "$prev^{commit}" 2> /dev/null; then
     echo "No earlier deployment to compare with: building."
     exit 1
 fi
-if git diff --quiet "$prev" HEAD -- . ../docs ../README.md ../assets/logo ../tools/install ../tools/vscode/syntaxes; then
+if git diff --quiet "$prev" HEAD -- . ../docs ../README.md ../bench/results/suite-*.json ../assets/logo ../tools/install ../tools/vscode/syntaxes; then
     echo "Nothing the site is made from has changed since $prev: skipping the build."
     exit 0
 fi

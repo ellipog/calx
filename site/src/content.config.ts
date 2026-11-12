@@ -1,7 +1,8 @@
 // The docs collection is docs/ itself, not a copy (D40). Its README is the index and the writing
 // rules, so it isn't a page; the site's /docs/ overview is made from its page list instead. The
 // roadmap is a page of its own, with the board on it (src/pages/roadmap.astro), which renders
-// roadmap.md's summary itself.
+// roadmap.md's summary itself, and so is the performance overview, drawn from the recorded runs
+// (src/pages/performance.astro); performance.md is its text for GitHub and /performance.md.
 import { defineCollection } from 'astro:content';
 import { glob } from 'astro/loaders';
 import { i18nLoader } from '@astrojs/starlight/loaders';
@@ -15,7 +16,7 @@ export const collections = {
 	docs: defineCollection({
 		loader: glob({
 			base: '../docs',
-			pattern: ['**/*.md', '!README.md', '!roadmap.md'],
+			pattern: ['**/*.md', '!README.md', '!roadmap.md', '!performance.md'],
 			generateId: ({ entry }) => slugOf(entry),
 		}),
 		schema: docsSchema(),

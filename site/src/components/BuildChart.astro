@@ -1,0 +1,239 @@
+---
+// How long Calx, C, Rust and Go take to build a program, from bench/suite's build benchmarks: hello,
+// world and a 64-module program from scratch, the 64 modules again after one is edited and with
+// nothing changed, each in debug or release as the switch above says, and then how long hello takes
+// to start and how big it is. A small chart for each, on its own scale, Calx's bar in amber and the
+// others' in grey, with every time written at its bar's end. Both systems' charts are here, marked
+// data-os, for the switch of the .os-scope around it (OsSwitch.astro).
+import { BUILD_LANGS, SUITE_LANGS, SUITE_OSES, dx } from '../numbers.mjs';
+
+const MODES = ['debug', 'release'];
+const SCENES = [
+	{ id: 'hello_scratch', title: 'hello, world, from scratch' },
+	{ id: 'big_scratch', title: '64 modules, from scratch' },
+	{ id: 'big_edit', title: '64 modules, one module edited' },
+	{ id: 'big_unchanged', title: '64 modules, nothing changed' },
+];
+
+const ms = (v: number) => (v < 10 ? v.toFixed(2) : v < 100 ? v.toFixed(1) : Math.round(v).toLocaleString('en-US'));
+const kb = (bytes: number) => {
+	const k = bytes / 1024;
+	return k < 1000 ? `${Math.round(k)} KB` : `${(k / 1024).toFixed(1)} MB`;
+};
+
+type Panel = { title: string; note?: string; mode?: string; bars: { id: string; name: string; value: number; text: string; width: string }[] };
+
+function panel(title: string, langs: { id: string; name: string }[], values: Record<string, number | undefined>, text: (v: number) => string, extra: Partial<Panel> = {}): Panel {
+	const shown = langs.flatMap((l) => {
+		const value = values[l.id];
+		return value === undefined ? [] : [{ ...l, value }];
+	});
+	const max = Math.max(...shown.map((l) => l.value));
+	return {
+		title,
+		...extra,
+		bars: shown.map((l) => ({
+			id: l.id,
+			name: l.name,
+			value: l.value,
+			text: text(l.value),
+			width: `${((100 * l.value) / max).toFixed(1)}%`,
+		})),
+	};
+}
+
+const systems = SUITE_OSES.map((os) => {
+	const d = dx(os);
+	const builds: Panel[] = SCENES.flatMap((scene) =>
+		MODES.map((mode) => {
+			const b = d.builds.find((x) => x.id === `${scene.id}_${mode}`);
+			if (!b) throw new Error(`bench/results/suite-${os}.json has no build ${scene.id}_${mode}`);
+			return panel(scene.title, BUILD_LANGS, b.ms, (v) => `${ms(v)} ms`, { mode });
+		})
+	);
+	return {
+		os,
+		modules: d.modules,
+		lines: d.lines.calx,
+		rounds: d.rounds,
+		panels: [
+			...builds,
+			panel('Starting hello, world', SUITE_LANGS, d.startup, (v) => `${ms(v)} ms`, { note: 'run to the end, pinned' }),
+			panel("hello, world's size", BUILD_LANGS, d.sizes.hello, kb, { note: 'release build' }),
+		],
+	};
+});
+---
+
+<div class="builds">
+	<div class="mode" role="radiogroup" aria-label="Build mode">
+		{
+			MODES.map((m, i) => (
+				<label>
+					<input type="radio" name="build-mode" value={m} checked={i === 0} />
+					<span>{m === 'debug' ? 'Debug' : 'Release'}</span>
+				</label>
+			))
+		}
+	</div>
+	{
+		systems.map((s) => (
+			<div class="panels" data-os={s.os}>
+				{s.panels.map((p) => (
+					<figure class="panel" data-mode={p.mode}>
+						<figcaption>
+							{p.title}
+							<span>{p.mode ?? p.note}</span>
+						</figcaption>
+						{p.bars.map((b) => (
+							<div class={`bar-row${b.id === 'calx' ? ' is-calx' : ''}`}>
+								<span class="lang">{b.name}</span>
+								<span class="track">
+									<span class="fill" style={`width:${b.width}`} />
+									<span class="v">{b.text}</span>
+								</span>
+							</div>
+						))}
+					</figure>
+				))}
+			</div>
+		))
+	}
+</div>
+
+<style>
+	.builds {
+		--muted-bar: #c4baa9;
+	}
+	:global(:root[data-theme='dark']) .builds {
+		--muted-bar: #3c4756;
+	}
+	/* The other mode's charts. Browsers without :has() show both, each labeled. */
+	.builds:not(:has(input[value='release']:checked)) [data-mode='release'],
+	.builds:has(input[value='release']:checked) [data-mode='debug'] {
+		display: none;
+	}
+	.mode {
+		display: inline-flex;
+		padding: 3px;
+		gap: 2px;
+		border: 1px solid var(--line-2);
+		border-radius: 10px;
+		background: var(--sunk);
+		margin-bottom: 22px;
+	}
+	.mode label {
+		position: relative;
+		cursor: pointer;
+	}
+	.mode input {
+		position: absolute;
+		opacity: 0;
+		inset: 0;
+		margin: 0;
+		cursor: pointer;
+	}
+	.mode span {
+		display: block;
+		font: 500 13.5px/1 var(--f-body);
+		color: var(--ink-2);
+		padding: 8px 12px;
+		border-radius: 7px;
+	}
+	.mode input:checked + span {
+		background: var(--raised);
+		color: var(--ink);
+		box-shadow:
+			0 0 0 1px var(--line-2),
+			0 1px 2px rgba(0, 0, 0, 0.08);
+	}
+	.mode input:focus-visible + span {
+		outline: 2px solid var(--amber);
+		outline-offset: 1px;
+	}
+	.panels {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 16px;
+	}
+	.panel {
+		margin: 0;
+		padding: 18px 20px 16px;
+		border: 1px solid var(--line);
+		border-radius: 14px;
+		background: var(--raised);
+		display: grid;
+		gap: 9px;
+		align-content: start;
+	}
+	figcaption {
+		font: 600 14.5px var(--f-body);
+		color: var(--ink);
+		margin-bottom: 4px;
+		display: flex;
+		justify-content: space-between;
+		gap: 10px;
+	}
+	figcaption span {
+		font-weight: 400;
+		font-size: 12.5px;
+		color: var(--ink-3);
+		white-space: nowrap;
+	}
+	.bar-row {
+		display: grid;
+		grid-template-columns: 54px minmax(0, 1fr);
+		align-items: center;
+		gap: 10px;
+	}
+	.lang {
+		font-size: 13px;
+		color: var(--ink-2);
+	}
+	.is-calx .lang {
+		font-weight: 600;
+		color: var(--ink);
+	}
+	/* A bar's width is a share of the track's content box, and the padding leaves room at the end of
+	   the longest one for its time. */
+	.track {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-width: 0;
+		padding-right: 76px;
+	}
+	.fill {
+		display: block;
+		height: 12px;
+		min-width: 2px;
+		border-radius: 0 4px 4px 0;
+		background: var(--muted-bar);
+		flex: none;
+	}
+	.v {
+		flex: none;
+	}
+	.is-calx .fill {
+		background: var(--calx);
+	}
+	.v {
+		font: 500 12px var(--f-mono);
+		color: var(--ink-2);
+		white-space: nowrap;
+	}
+	.is-calx .v {
+		color: var(--ink);
+		font-weight: 600;
+	}
+	@media (max-width: 980px) {
+		.panels {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+	}
+	@media (max-width: 620px) {
+		.panels {
+			grid-template-columns: minmax(0, 1fr);
+		}
+	}
+</style>

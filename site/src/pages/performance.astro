@@ -1,0 +1,778 @@
+---
+// /performance/: the header's Performance link. Calx against C, Rust, Go and Python, drawn from the
+// recorded runs (src/numbers.mjs): a few figures, each language's wins and losses, every
+// benchmark, where Calx is slower and why, the builds, and the other benchmarks, with a switch
+// between the two systems they're recorded on. docs/performance.md is its text for GitHub and for
+// /performance.md, and the docs' Performance section lists the pages this one leads to.
+import { readFileSync } from 'node:fs';
+import Base from '../layouts/Base.astro';
+import BuildChart from '../components/BuildChart.astro';
+import OsSwitch from '../components/OsSwitch.astro';
+import Scoreboard from '../components/Scoreboard.astro';
+import SiteFooter from '../components/SiteFooter.astro';
+import SuiteChart from '../components/SuiteChart.astro';
+import { GITHUB } from '../markdown.mjs';
+import { SUITE_LANGS, SUITE_OSES, dx, scripting, suite, tally, tickLoop, versus } from '../numbers.mjs';
+import { DOCS } from '../paths.mjs';
+import { pageTitle } from '../seo.mjs';
+
+const description = readFileSync(new URL('performance.md', DOCS), 'utf8').match(/^description: (.*)$/m)?.[1];
+if (!description) throw new Error('docs/performance.md has no description');
+
+const BENCH = '/language-benchmarks/';
+const ms = (v: number) => (v < 10 ? v.toFixed(2) : v < 100 ? v.toFixed(1) : Math.round(v).toLocaleString('en-US'));
+const times = (f: number) => (f < 10 ? f.toFixed(1) : Math.round(f).toString());
+
+// Why Calx loses where it does, from the notes on the language benchmarks page. A benchmark that
+// stops being a loss drops off the list by itself; one that becomes a loss shows with a pointer
+// to its notes until it's written here.
+const WHY: Record<string, string> = {
+	compress: "Go's gzip and xz write bigger files than the others', so they do less work.",
+	logs: "Each part of a line the Calx program keeps is a copy, where C's and Go's share the line. Keeping parts as views is CLX-293.",
+	sort: 'Calx\'s <code>sort_by</code> on the doubles, which is most of it: it sorts the integers and the strings faster than Rust (CLX-292).',
+	regexredux:
+		"Rust's regex crate finds the motifs with a SIMD search for several literals at once, where Calx's lazy DFA reads nearly every byte (CLX-297).",
+	pidigits:
+		"Go's <code>math/big</code> has its inner loops in assembly and reuses a number's memory, where each <code>std.bigint</code> operation makes a new number (CLX-298).",
+	parmandel: "Its rows differ in cost, and Calx's pool hands out chunks where the others hand out a row at a time (CLX-296).",
+	parspectral: "On every processor the efficiency cores join in, and on Windows Rayon came out ahead. We haven't traced why.",
+	binarytrees: "It times the allocator: Go's collector is a little faster than Calx's allocator, and C's and Rust's are slower.",
+	nbody: "Rust's takes a little less time, which we haven't traced (CLX-301).",
+	revcomp: 'The Calx program finds line ends a byte at a time, where C uses <code>memchr</code> (CLX-299).',
+	wordcount: "C's hand-written map keeps its keys pointing into the text.",
+	text: "C's and Rust's programs gain more from Linux than Calx's do, which we haven't traced (CLX-300).",
+};
+
+const OTHERS = SUITE_LANGS.filter((l) => l.id !== 'calx');
+
+const systems = SUITE_OSES.map((os) => {
+	const s = suite(os);
+	const t = tally(os);
+	const compiled = t.filter((x) => x.id !== 'python');
+	const python = t.find((x) => x.id === 'python')!;
+	const d = dx(os);
+	const edit = d.builds.find((b) => b.id === 'big_edit_debug')!;
+	const losses = s.groups
+		.flatMap((g) =>
+			g.rows.map((r) => {
+				const against = OTHERS.flatMap((l) => {
+					if (r.ms.calx === undefined || r.ms[l.id] === undefined) return [];
+					const v = versus(r.ms.calx, r.ms[l.id]);
+					return v.kind === 'other' ? [{ name: l.name, factor: v.factor }] : [];
+				}).sort((a, b) => b.factor - a.factor);
+				return { name: r.name, label: r.label, title: r.title, group: g, against, why: WHY[r.name] };
+			})
+		)
+		.filter((x) => x.against.length)
+		.sort((a, b) => b.against[0].factor - a.against[0].factor);
+	return {
+		os,
+		system: s.system,
+		cpu: s.cpu,
+		rounds: s.rounds,
+		versions: s.versions,
+		recorded: s.recorded,
+		programs: s.groups.reduce((n, g) => n + g.rows.length, 0),
+		faster: compiled.reduce((n, x) => n + x.calx, 0),
+		even: compiled.reduce((n, x) => n + x.even, 0),
+		both: compiled.reduce((n, x) => n + x.both, 0),
+		python: { factor: 1 / python.mean, calx: python.calx, both: python.both },
+		edit: { calx: edit.ms.calx!, c: edit.ms.c!, rust: edit.ms.rust!, go: edit.ms.go! },
+		modules: d.modules,
+		losses,
+	};
+});
+const programs = systems[0].programs;
+
+// The scripting benchmarks and the tick loop, from the README's tables.
+const scripts = scripting();
+const tick = tickLoop();
+const tickOs = (platform: string) => (platform.startsWith('Windows') ? 'windows' : 'linux');
+
+const SECTIONS = [
+	{ id: 'summary', label: 'Summary' },
+	{ id: 'programs', label: 'Every program' },
+	{ id: 'slower', label: "Where it's slower" },
+	{ id: 'builds', label: 'Builds' },
+	{ id: 'more', label: 'More benchmarks' },
+	{ id: 'method', label: 'Method' },
+];
+---
+
+<Base title={pageTitle('Performance', 'performance')} description={description}>
+	<main class="perf os-scope">
+		<section class="hero" data-pagefind-body>
+			<div class="wrap">
+				<p class="kicker">Benchmarks</p>
+				<h1>Performance</h1>
+				<p class="lede">
+					Calx timed against C, Rust, Go and Python on {programs} programs, from the Benchmarks Game to JSON, CSV, sorting and
+					parallel loops, and on how long each language takes to build a program and start it. Every language runs the same
+					algorithm and must print the same output, byte for byte. These are our benchmarks, and we wrote every version
+					ourselves.
+				</p>
+			</div>
+		</section>
+
+		<nav class="bar" aria-label="On this page" data-pagefind-ignore>
+			<div class="wrap bar-in">
+				<div class="jump">
+					{SECTIONS.map((s) => <a href={`#${s.id}`}>{s.label}</a>)}
+				</div>
+				<OsSwitch name="page-os" />
+			</div>
+		</nav>
+
+		<div class="wrap">
+			{
+				systems.map((s) => (
+					<div class="tiles" data-os={s.os}>
+						<div class="tile">
+							<div class="fig">
+								{s.faster}
+								<small> of {s.both}</small>
+							</div>
+							<p>
+								times Calx ran faster than C, Rust or Go, each program against each language. {s.even} more were within 5%.
+							</p>
+						</div>
+						<div class="tile">
+							<div class="fig">{times(s.python.factor)}×</div>
+							<p>
+								Python's time over Calx's, the geometric mean of {s.python.both} programs.{' '}
+								{s.python.calx === s.python.both ? 'Calx was faster on every one.' : `Calx was faster on ${s.python.calx}.`}
+							</p>
+						</div>
+						<div class="tile">
+							<div class="fig">
+								{ms(s.edit.calx)}
+								<small> ms</small>
+							</div>
+							<p>
+								to build {s.modules} modules again after editing one, in debug. C took {ms(s.edit.c)} ms, Rust {ms(s.edit.rust)}, Go{' '}
+								{ms(s.edit.go)}.
+							</p>
+						</div>
+					</div>
+				))
+			}
+
+			<section id="summary" class="block">
+				<div class="block-head">
+					<h2>Against each language</h2>
+					<p>
+						How many programs Calx took less time on, how many came within 5% either way, and how many took it longer. Point at a
+						part of a bar for its programs.
+					</p>
+				</div>
+				<div class="card"><Scoreboard /></div>
+			</section>
+
+			<section id="programs" class="block">
+				<div class="block-head">
+					<h2>Every program</h2>
+					<p>
+						Each benchmark against each language: whose time was shorter, and how many times. Point at a cell for both times. The{' '}
+						<a class="more" href={BENCH}>language benchmarks page</a> has every median and the memory each program held, with notes
+						on each result.
+					</p>
+				</div>
+				<SuiteChart page={BENCH} switcher={false} />
+			</section>
+
+			<section id="slower" class="block">
+				<div class="block-head">
+					<h2>Where Calx is slower</h2>
+					<p>
+						Every benchmark where another language took more than 5% less time, the widest gap first, and why. The board has a card
+						for each loss Calx can do something about.
+					</p>
+				</div>
+				{
+					systems.map((s) => (
+						<ol class="losses" data-os={s.os}>
+							{s.losses.map((l) => (
+								<li>
+									<div class="loss-name">
+										<a href={`${BENCH}#${l.group.anchor}`} title={l.title}>
+											{l.label}
+										</a>
+										<span class="loss-group">{l.group.title.replace(/, on every processor$/, '')}</span>
+									</div>
+									<div class="loss-who">
+										{l.against.map((a) => (
+											<span class="chip">
+												{a.name} <b>{times(a.factor)}×</b>
+											</span>
+										))}
+									</div>
+									<p class="loss-why">
+										{l.why ? (
+											<Fragment set:html={l.why} />
+										) : (
+											<>
+												The notes under <a href={`${BENCH}#${l.group.anchor}`}>its table</a> say more.
+											</>
+										)}
+									</p>
+								</li>
+							))}
+						</ol>
+					))
+				}
+			</section>
+
+			<section id="builds" class="block">
+				<div class="block-head">
+					<h2>Building and starting</h2>
+					<p>
+						How long each compiler takes over a hello, world and over a program of 64 modules, about 10,000 lines in each
+						language, and how quickly and how small hello runs. Each chart has its own scale. Python has no build step.
+					</p>
+				</div>
+				<BuildChart />
+			</section>
+
+			<section id="more" class="block">
+				<div class="block-head">
+					<h2>More benchmarks</h2>
+					<p>Two more sets, each with a page of its own.</p>
+				</div>
+				<div class="more-grid">
+					<a class="card link-card wide" href="/scripting-benchmarks/">
+						<div class="lc-head">
+							<h3>Scripting benchmarks</h3>
+							<span>Calx against Rust and Python on what scripts do</span>
+						</div>
+						{
+							SUITE_OSES.map((os) => (
+								<table class="mini" data-os={os}>
+									<thead>
+										<tr>
+											<th>Summed best times</th>
+											<th>Calx</th>
+											<th>Rust</th>
+											<th>Python</th>
+										</tr>
+									</thead>
+									<tbody>
+										{scripts.map((r) => {
+											const t = r[os as 'windows' | 'linux']!;
+											return (
+												<tr>
+													<td>{r.label}</td>
+													<td class="calx">{t.calx}</td>
+													<td>{t.rust}</td>
+													<td>{t.python}</td>
+												</tr>
+											);
+										})}
+									</tbody>
+								</table>
+							))
+						}
+						<span class="go">The steps, CPU time and memory</span>
+					</a>
+					<a class="card link-card" href="/benchmarks/">
+						<div class="lc-head">
+							<h3>Tick-loop benchmark</h3>
+							<span>A fixed simulation, the shape of a game server's tick, in Calx and in Rust</span>
+						</div>
+						{
+							tick.platforms.map((p) => (
+								<dl class="tick" data-os={tickOs(p.platform)}>
+									<div>
+										<dt>1 worker</dt>
+										<dd>
+											<b>{p.calx1}</b> ms to Rust's {p.rust1}
+										</dd>
+									</div>
+									<div>
+										<dt>24 workers</dt>
+										<dd>
+											<b>{p.calx24}</b> ms to Rust's {p.rust24}
+										</dd>
+									</div>
+								</dl>
+							))
+						}
+						<p class="lc-note">Milliseconds a tick, the median of {tick.runs} runs of {tick.ticks} ticks. CI checks its checksum on every push.</p>
+						<span class="go">How it's built and measured</span>
+					</a>
+				</div>
+			</section>
+
+			<section id="method" class="block" data-pagefind-body>
+				<div class="block-head">
+					<h2>How it's measured</h2>
+				</div>
+				<div class="method">
+					<ul>
+						<li>
+							<b>Same work.</b> Each program is written in each language with the same algorithm, as that language usually writes it,
+							and every language must print the same output, byte for byte, or its result isn't counted.
+						</li>
+						<li>
+							<b>Same machine.</b> One Intel Core i9-13900K, under Windows 11 and under Ubuntu in WSL2. Single-threaded programs are
+							pinned to its performance cores, and a run taken while the rest of the machine was busy is run again.
+						</li>
+						<li>
+							<b>Same CPU level.</b> Every compiled language builds for x86-64-v3, with AVX2, at its usual release settings. Each uses
+							its standard library, or the package its programs usually reach for where it has none.
+						</li>
+						<li>
+							<b>Medians.</b> Each figure is the median wall time of several runs, each a fresh process timed from outside.
+						</li>
+					</ul>
+					{
+						systems.map((s) => (
+							<p class="recorded" data-os={s.os}>
+								{s.system}: median of {s.rounds} runs, recorded {s.recorded} with clang {s.versions.clang}, rustc{' '}
+								{s.versions.rustc}, Go {s.versions.go} and Python {s.versions.python}.{' '}
+								<a class="more" href={`${BENCH}#how-its-measured`}>
+									The details
+								</a>{' '}
+								<a class="more" href={`${GITHUB}/blob/main/bench/results/suite-${s.os}.json`}>
+									Every recorded run
+								</a>{' '}
+								<a class="more" href={`${GITHUB}/tree/main/bench/suite`}>
+									The programs
+								</a>
+							</p>
+						))
+					}
+				</div>
+			</section>
+		</div>
+
+		<SiteFooter />
+	</main>
+</Base>
+
+<script>
+	// The section in view is marked in the bar, as the docs' table of contents marks its heading.
+	const links = new Map([...document.querySelectorAll<HTMLAnchorElement>('.perf .jump a')].map((a) => [a.hash.slice(1), a]));
+	const seen = new Map<string, boolean>();
+	const observer = new IntersectionObserver(
+		(entries) => {
+			for (const e of entries) seen.set(e.target.id, e.isIntersecting);
+			const first = [...links.keys()].find((id) => seen.get(id));
+			for (const [id, a] of links) a.toggleAttribute('aria-current', id === first);
+		},
+		{ rootMargin: '-130px 0px -55% 0px' }
+	);
+	for (const id of links.keys()) {
+		const el = document.getElementById(id);
+		if (el) observer.observe(el);
+	}
+</script>
+
+<style>
+	.wrap {
+		max-width: 1180px;
+		margin: 0 auto;
+		padding: 0 24px;
+	}
+	.perf :focus-visible {
+		outline: 2px solid var(--amber);
+		outline-offset: 2px;
+	}
+
+	/* ---------- the top ---------- */
+	.hero {
+		padding: 64px 0 28px;
+	}
+	.kicker {
+		font: 600 13px var(--f-body);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--amber-ink);
+		margin: 0 0 10px;
+	}
+	h1 {
+		font: 600 clamp(44px, 6vw, 68px)/1.02 var(--f-head);
+		letter-spacing: -0.022em;
+		margin: 0 0 18px;
+	}
+	.lede {
+		font-size: 18.5px;
+		line-height: 1.6;
+		color: var(--ink-2);
+		max-width: 720px;
+		margin: 0;
+	}
+
+	/* The sections and the system switch, under the site's header as the page scrolls. */
+	.bar {
+		position: sticky;
+		top: 60px;
+		z-index: 20;
+		background: var(--paper);
+		border-bottom: 1px solid var(--line);
+	}
+	.bar-in {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 16px;
+		min-height: 56px;
+	}
+	.jump {
+		display: flex;
+		gap: 2px;
+		overflow-x: auto;
+		scrollbar-width: none;
+		min-width: 0;
+		margin-left: -10px;
+	}
+	.jump::-webkit-scrollbar {
+		display: none;
+	}
+	.jump a {
+		font: 500 14px/1 var(--f-body);
+		color: var(--ink-2);
+		text-decoration: none;
+		padding: 10px 10px;
+		border-radius: 8px;
+		white-space: nowrap;
+	}
+	.jump a:hover {
+		color: var(--ink);
+		background: var(--sunk);
+	}
+	.jump a[aria-current] {
+		color: var(--ink);
+		box-shadow: inset 0 -2px 0 var(--amber);
+		border-radius: 8px 8px 0 0;
+	}
+
+	/* ---------- figures ---------- */
+	.tiles {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 16px;
+		margin-top: 32px;
+	}
+	.tile {
+		padding: 24px 24px 20px;
+		border: 1px solid var(--line);
+		border-radius: 16px;
+		background: var(--raised);
+		box-shadow: var(--shadow);
+		position: relative;
+		overflow: hidden;
+	}
+	.tile::before {
+		content: '';
+		position: absolute;
+		left: 0;
+		top: 0;
+		bottom: 0;
+		width: 4px;
+		background: var(--calx);
+	}
+	.fig {
+		font: 600 54px/1 var(--f-body);
+		font-variant-numeric: proportional-nums;
+		letter-spacing: -0.03em;
+		color: var(--ink);
+	}
+	.fig small {
+		font-size: 24px;
+		font-weight: 500;
+		letter-spacing: -0.01em;
+		color: var(--ink-3);
+	}
+	.tile p {
+		margin: 12px 0 0;
+		font-size: 14.5px;
+		line-height: 1.55;
+		color: var(--ink-2);
+	}
+
+	/* ---------- sections ---------- */
+	.block {
+		padding-top: 72px;
+		scroll-margin-top: 60px;
+	}
+	.block-head {
+		display: grid;
+		grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+		gap: 8px 48px;
+		align-items: baseline;
+		margin-bottom: 22px;
+	}
+	.block-head h2 {
+		font: 600 clamp(28px, 3vw, 36px)/1.12 var(--f-head);
+		letter-spacing: -0.012em;
+		margin: 0;
+	}
+	.block-head p {
+		margin: 0;
+		font-size: 16px;
+		color: var(--ink-2);
+	}
+	.card {
+		border: 1px solid var(--line);
+		border-radius: 16px;
+		background: var(--raised);
+		padding: 28px 30px;
+		box-shadow: var(--shadow);
+	}
+	/* The chart's own top margin is for the docs page. */
+	#programs :global(.suite) {
+		margin-top: 0;
+	}
+
+	/* ---------- where Calx is slower ---------- */
+	.losses {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		border-top: 1px solid var(--line);
+	}
+	.losses li {
+		display: grid;
+		grid-template-columns: minmax(0, 3fr) minmax(0, 3fr) minmax(0, 7fr);
+		gap: 6px 24px;
+		align-items: baseline;
+		padding: 16px 4px;
+		border-bottom: 1px solid var(--line);
+	}
+	.loss-name a {
+		font: 600 16px var(--f-body);
+		color: var(--ink);
+		text-decoration: none;
+		border-bottom: 1.5px solid var(--amber);
+	}
+	.loss-name a:hover {
+		border-bottom-width: 2.5px;
+	}
+	.loss-group {
+		display: block;
+		font-size: 12.5px;
+		color: var(--ink-3);
+		margin-top: 4px;
+	}
+	.loss-who {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+	.chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font: 500 13px var(--f-body);
+		color: var(--ink-2);
+		padding: 4px 9px 4px 8px;
+		border-radius: 7px;
+		background: var(--sunk);
+		border: 1px solid var(--line);
+	}
+	.chip::before {
+		content: '';
+		width: 8px;
+		height: 8px;
+		border-radius: 2px;
+		background: var(--rust);
+	}
+	.chip b {
+		font: 600 12.5px var(--f-mono);
+		color: var(--ink);
+	}
+	.loss-why {
+		margin: 0;
+		font-size: 14.5px;
+		color: var(--ink-2);
+	}
+
+	/* ---------- the other benchmarks ---------- */
+	.more-grid {
+		display: grid;
+		grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+		gap: 16px;
+	}
+	.link-card {
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+		text-decoration: none;
+		color: inherit;
+		transition:
+			border-color 0.15s,
+			transform 0.15s;
+	}
+	.link-card:hover {
+		border-color: var(--ink-3);
+		transform: translateY(-2px);
+	}
+	.lc-head h3 {
+		font: 600 22px/1.2 var(--f-head);
+		margin: 0 0 4px;
+	}
+	.lc-head span {
+		font-size: 14.5px;
+		color: var(--ink-3);
+	}
+	.mini {
+		font-size: 13.5px;
+	}
+	.mini th,
+	.mini td {
+		padding: 7px 10px;
+	}
+	.mini th:not(:first-child),
+	.mini td:not(:first-child) {
+		text-align: right;
+		white-space: nowrap;
+		font-family: var(--f-mono);
+		font-size: 12.5px;
+	}
+	.mini th:not(:first-child) {
+		font-family: var(--f-body);
+		font-size: 13px;
+	}
+	.mini td.calx {
+		font-weight: 600;
+		color: var(--ink);
+		background: var(--amber-wash);
+	}
+	.mini td {
+		color: var(--ink-2);
+	}
+	.tick {
+		display: grid;
+		gap: 14px;
+		margin: 0;
+	}
+	.tick dt {
+		font-size: 13px;
+		color: var(--ink-3);
+	}
+	.tick dd {
+		margin: 2px 0 0;
+		font-size: 15px;
+		color: var(--ink-2);
+	}
+	.tick dd b {
+		font: 600 30px/1.1 var(--f-body);
+		letter-spacing: -0.02em;
+		color: var(--ink);
+		margin-right: 4px;
+	}
+	.lc-note {
+		margin: 0;
+		font-size: 13.5px;
+		color: var(--ink-3);
+	}
+	.go {
+		margin-top: auto;
+		font: 500 15px var(--f-body);
+		color: var(--ink);
+		align-self: flex-start;
+		border-bottom: 1.5px solid var(--amber);
+		padding-bottom: 1px;
+	}
+	.go::after {
+		content: ' →';
+	}
+
+	/* ---------- method ---------- */
+	.method ul {
+		margin: 0;
+		padding: 0;
+		list-style: none;
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 18px 40px;
+	}
+	.method li {
+		font-size: 15px;
+		color: var(--ink-2);
+		padding-left: 16px;
+		border-left: 2px solid var(--line-2);
+	}
+	.method li b {
+		display: block;
+		color: var(--ink);
+		font-weight: 600;
+		margin-bottom: 2px;
+	}
+	.recorded {
+		margin: 28px 0 0;
+		font-size: 14px;
+		color: var(--ink-3);
+		line-height: 2;
+	}
+	.recorded .more {
+		font-size: 14px;
+		margin-left: 10px;
+	}
+	.perf > :global(.foot) {
+		margin-top: 96px;
+	}
+
+	@media (max-width: 980px) {
+		.tiles {
+			grid-template-columns: minmax(0, 1fr);
+		}
+		.tile {
+			display: grid;
+			grid-template-columns: minmax(140px, auto) minmax(0, 1fr);
+			gap: 18px;
+			align-items: center;
+		}
+		.tile p {
+			margin: 0;
+		}
+		.block-head,
+		.more-grid {
+			grid-template-columns: minmax(0, 1fr);
+		}
+		.losses li {
+			grid-template-columns: minmax(0, 1fr) auto;
+		}
+		.loss-why {
+			grid-column: 1 / -1;
+		}
+	}
+	@media (max-width: 640px) {
+		.wrap {
+			padding: 0 16px;
+		}
+		.hero {
+			padding-top: 44px;
+		}
+		.lede {
+			font-size: 17px;
+		}
+		.tile {
+			grid-template-columns: minmax(0, 1fr);
+			gap: 10px;
+		}
+		.fig {
+			font-size: 48px;
+		}
+		.card {
+			padding: 22px 16px;
+		}
+		.method ul {
+			grid-template-columns: minmax(0, 1fr);
+		}
+		.bar-in {
+			gap: 8px;
+		}
+		.jump a {
+			padding: 10px 8px;
+			font-size: 13.5px;
+		}
+		/* The sections scroll sideways; the fade says there are more. */
+		.jump {
+			mask-image: linear-gradient(to right, #000 80%, transparent);
+		}
+		.losses li {
+			grid-template-columns: minmax(0, 1fr);
+		}
+	}
+</style>

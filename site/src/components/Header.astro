@@ -6,13 +6,20 @@ import Sprite from './Sprite.astro';
 import ThemeToggle from './ThemeToggle.astro';
 
 const path = Astro.url.pathname;
+// Each section's link, and the paths it's marked on. Performance is the overview and the pages it
+// leads to, which docs/README.md's Performance section lists.
 const NAV = [
-	{ label: 'Learn', href: '/guide/getting-started/', section: '/guide/' },
-	{ label: 'Reference', href: '/reference/', section: '/reference/' },
-	{ label: 'Std', href: '/std/', section: '/std/' },
-	{ label: 'Performance', href: '/benchmarks/', section: '/benchmarks/' },
-	{ label: 'Roadmap', href: '/roadmap/', section: '/roadmap/' },
-];
+	{ label: 'Learn', href: '/guide/getting-started/', sections: ['/guide/'] },
+	{ label: 'Reference', href: '/reference/', sections: ['/reference/'] },
+	{ label: 'Std', href: '/std/', sections: ['/std/'] },
+	{
+		label: 'Performance',
+		href: '/performance/',
+		sections: ['/performance/', '/language-benchmarks/', '/scripting-benchmarks/', '/benchmarks/'],
+		glyph: true,
+	},
+	{ label: 'Roadmap', href: '/roadmap/', sections: ['/roadmap/'] },
+].map((n) => ({ ...n, current: n.sections.some((s) => path.startsWith(s)) ? 'true' : undefined }));
 ---
 
 <Sprite />
@@ -21,7 +28,20 @@ const NAV = [
 		<svg viewBox="0 12 399.761 92" fill="currentColor" aria-hidden="true"><use href="#logo-shapes"></use></svg>
 	</a>
 	<nav class="nav" aria-label="Sections">
-		{NAV.map((n) => <a href={n.href} aria-current={path.startsWith(n.section) ? 'true' : undefined}>{n.label}</a>)}
+		{
+			NAV.map((n) => (
+				<a href={n.href} aria-current={n.current}>
+					{n.glyph && (
+						<svg class="glyph" viewBox="0 0 14 14" aria-hidden="true">
+							<rect x="1" y="7" width="3.2" height="6" rx="1" />
+							<rect x="5.4" y="3.5" width="3.2" height="9.5" rx="1" />
+							<rect x="9.8" y="1" width="3.2" height="12" rx="1" />
+						</svg>
+					)}
+					{n.label}
+				</a>
+			))
+		}
 	</nav>
 	<div class="find"><Search /></div>
 	<div class="end">
@@ -30,7 +50,13 @@ const NAV = [
 		<details class="menu">
 			<summary aria-label="Menu"><svg class="i" aria-hidden="true"><use href="#i-menu"></use></svg></summary>
 			<nav aria-label="Sections">
-				{NAV.map((n) => <a href={n.href} aria-current={path.startsWith(n.section) ? 'true' : undefined}>{n.label}</a>)}
+				{
+					NAV.map((n) => (
+						<a href={n.href} aria-current={n.current}>
+							{n.label}
+						</a>
+					))
+				}
 				<a href="https://github.com/ellipog/calx">GitHub</a>
 			</nav>
 		</details>
@@ -85,6 +111,47 @@ const NAV = [
 		color: var(--ink);
 		box-shadow: inset 0 -2px 0 var(--amber);
 		border-radius: 8px 8px 0 0;
+	}
+	/* Performance's three bars, in amber, which rise again when the link is pointed at. */
+	.nav a:has(.glyph) {
+		display: inline-flex;
+		align-items: center;
+		gap: 7px;
+	}
+	.glyph {
+		width: 13px;
+		height: 13px;
+		fill: var(--amber);
+		flex: none;
+	}
+	.glyph rect {
+		transform-box: fill-box;
+		transform-origin: bottom;
+	}
+	.nav a:hover .glyph rect,
+	.nav a:focus-visible .glyph rect {
+		animation: rise 0.5s cubic-bezier(0.3, 0.8, 0.3, 1.2) both;
+	}
+	.nav a:hover .glyph rect:nth-child(2),
+	.nav a:focus-visible .glyph rect:nth-child(2) {
+		animation-delay: 60ms;
+	}
+	.nav a:hover .glyph rect:nth-child(3),
+	.nav a:focus-visible .glyph rect:nth-child(3) {
+		animation-delay: 120ms;
+	}
+	@keyframes rise {
+		from {
+			transform: scaleY(0.25);
+		}
+		to {
+			transform: scaleY(1);
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.nav a .glyph rect {
+			animation: none !important;
+		}
 	}
 	.find {
 		flex: 1;
