@@ -155,34 +155,21 @@ jobs:
       - name: Tests
         shell: bash
         run: '"$CALX_BIN" run --release tests/run.calx -- --modes debug,release'
-      # While Windows on Arm's stack traces are brought up (CLX-276): what a panic's trace writes
-      # there, and what dbghelp says of each frame, with CALX_TRACE_DEBUG.
-      - name: Stack traces on Windows on Arm
-        if: always() && runner.os == 'Windows' && runner.arch == 'ARM64'
-        shell: bash
-        run: |
-          mkdir -p build/probe
-          for mode in debug release; do
-            flag=""
-            if [ "$mode" = release ]; then flag="--release"; fi
-            "$CALX_BIN" build $flag tests/panics/trace.calx -o "build/probe/trace-$mode.exe" > /dev/null 2>&1 || true
-            CALX_TRACE_DEBUG=1 "./build/probe/trace-$mode.exe" || echo "status $?"
-          done
       # While macOS's release traces are brought up (CLX-278): what the trace reader and dwarfdump
-      # each say of a panic's frames.
+      # each say of a panic's frames in Calx code.
       - name: Stack traces on macOS
         if: always() && runner.os == 'macOS'
         shell: bash
         run: |
           mkdir -p build/probe
-          for t in panics/trace_repeated thread/thread_panic; do
+          for t in panics/trace_std; do
             name=$(basename "$t")
             "$CALX_BIN" build --release "tests/$t.calx" -o "build/probe/$name" > /dev/null 2>&1 || true
             CALX_TRACE_DEBUG=1 "./build/probe/$name" > /dev/null 2> "build/probe/$name.txt" || true
             cat "build/probe/$name.txt"
-            for a in $(grep -oE 'at 0x[0-9a-f]+' "build/probe/$name.txt" | cut -c4-); do
+            for a in $(grep -E '^trace: at 0x[0-9a-f]+ .*\.calx:' "build/probe/$name.txt" | grep -oE 'at 0x[0-9a-f]+' | cut -c4- | sort -u); do
               echo "== dwarfdump --lookup=$a"
-              dwarfdump --lookup="$a" "build/probe/$name.dSYM" 2>&1 | grep -E 'DW_TAG|DW_AT_name|DW_AT_call_line|Line info' | head -24 || true
+              dwarfdump --lookup="$a" "build/probe/$name.dSYM" 2>&1 | head -60 || true
             done
           done
       # A handoff between threads that's missing its ordering fails only now and then, so on Arm

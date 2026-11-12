@@ -46,8 +46,19 @@ typedef struct {
  * `calx build --lib`, each is a pointer to the program's own, filled in when the program opens
  * the library, so the two share one allocator, one output and one way to panic. The compiler
  * reads the list from here: every function declared with `CX_FN`, in order. */
+/* A C function's name as the linker sees it, for `extern "C"` declarations: an asm label gives
+ * it, so the name Calx calls it by can't meet one a header declares. */
+#define CX_SYMBOL_2(prefix, name) #prefix name
+#define CX_SYMBOL_1(prefix, name) CX_SYMBOL_2(prefix, name)
+#define CX_SYMBOL(name) CX_SYMBOL_1(__USER_LABEL_PREFIX__, name)
 #ifdef CX_LIBRARY
 #define CX_FN(ret, name, params) extern ret(*name) params
+#elif defined(__APPLE__)
+/* On macOS each has the asm label std's `extern "C"` declarations give it too. Mach-O's names
+ * start with '_', so clang keeps a labelled name apart from a plain one, and ThinLTO took std's
+ * call by its label and the runtime's definition for two functions, and dropped the definition
+ * as one nothing calls (CLX-279). */
+#define CX_FN(ret, name, params) ret name params __asm__(CX_SYMBOL(#name))
 #else
 #define CX_FN(ret, name, params) ret name params
 #endif
@@ -62,12 +73,6 @@ typedef struct {
 #else
 #define CX_VIEW(p) ((void)__builtin_assume_aligned((p), _Alignof(__typeof__(*(p)))))
 #endif
-
-/* A C function's name as the linker sees it, for `extern "C"` declarations: an asm label gives
- * it, so the name Calx calls it by can't meet one a header declares. */
-#define CX_SYMBOL_2(prefix, name) #prefix name
-#define CX_SYMBOL_1(prefix, name) CX_SYMBOL_2(prefix, name)
-#define CX_SYMBOL(name) CX_SYMBOL_1(__USER_LABEL_PREFIX__, name)
 
 /* `String`: UTF-8 bytes. With `cap` 0 it doesn't own them: an empty string, or a string literal,
  * which costs nothing to make. Changing such a string copies it to the heap first. All zero bits

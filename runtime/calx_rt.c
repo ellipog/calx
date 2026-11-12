@@ -3057,9 +3057,10 @@ static void par_run(par_pool* p, cx_usize threads, cx_u64 n, par_body body, void
     par_home = home;
 }
 
-/* Never inlined, so a stack trace finds where a loop starts. A loop inside a chunk runs on the
- * chunk's pool, and one inside a loop this thread runs alone on that loop's. */
-__attribute__((noinline)) void cx_parallel(cx_u64 n, void (*body)(void* ctx, cx_u64 begin, cx_u64 end), void* ctx) {
+/* Never inlined, and it calls on rather than jumping, so its frame stays on the stack and a stack
+ * trace finds where a loop starts. A loop inside a chunk runs on the chunk's pool, and one inside
+ * a loop this thread runs alone on that loop's. */
+__attribute__((noinline, disable_tail_calls)) void cx_parallel(cx_u64 n, void (*body)(void* ctx, cx_u64 begin, cx_u64 end), void* ctx) {
     if (n == 0) return;
     par_pool* p = par_cur ? par_cur->pool : par_home ? par_home : &par_main;
     /* The main pool is the main thread's, so a thread `Thread.spawn` started runs its loops alone,
@@ -3091,8 +3092,9 @@ static void par_give(par_pool* p) {
 /* `parallel(pool) for` (CLX-71): the loop on the program's pool `pool`, a `par_pool*` as a number
  * in std.pool's `Pool`. Inside a chunk it runs as any loop there does, on the chunk's pool, so
  * its output and its panics go where the chunk's do, and inside a loop this thread runs alone it
- * runs on that loop's pool. Never inlined, so a stack trace finds where the loop starts. */
-__attribute__((noinline)) void cx_parallel_on(cx_u64 pool, cx_u64 n, void (*body)(void* ctx, cx_u64 begin, cx_u64 end), void* ctx) {
+ * runs on that loop's pool. Never inlined, and it calls on rather than jumping, so a stack trace
+ * finds where the loop starts. */
+__attribute__((noinline, disable_tail_calls)) void cx_parallel_on(cx_u64 pool, cx_u64 n, void (*body)(void* ctx, cx_u64 begin, cx_u64 end), void* ctx) {
     if (n == 0) return;
     if (par_cur || par_home) {
         cx_parallel(n, body, ctx);

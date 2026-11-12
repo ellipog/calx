@@ -1,0 +1,21 @@
+// A panic in a `parallel(pool) for` body shows the body, then the loop and the frames outside it,
+// as one on the program's own threads does.
+
+import std.pool.{Pool}
+
+fn halve(pool: Pool, xs: mut List<i32>) {
+    parallel(pool) for k in 0..xs.len() {
+        xs[k] = 100 / (i32.wrap(k) - 5)    // panic: division by zero
+    }
+}
+
+fn main() {
+    let pool = Pool.new(4)
+    var xs: List<i32> = [0; 16]
+    halve(pool, mut xs)
+    pool.close()
+}
+
+// trace: trace_pool.halve:8
+// trace: trace_pool.halve:7
+// trace: trace_pool.main:15

@@ -117,6 +117,7 @@ typedef struct {
     found_frame* list;
     int n;
     char cwd[4096];
+    char split[256]; /* the function the last call's was split from, or "" */
 } found;
 
 static void frame(found* f, const char* c_name, const char* file, unsigned long long line) {
@@ -131,6 +132,22 @@ static void frame(found* f, const char* c_name, const char* file, unsigned long 
 static int is_named(const char* c, const char* name) {
     size_t n = strlen(name);
     return strncmp(c, name, n) == 0 && (c[n] == 0 || c[n] == '.');
+}
+
+/* Whether to show the call on the stack in the function `c`, the one out from the last. LLVM may
+ * move the code of a function X that seldom runs, such as a panic's, into a function of its own,
+ * `X.cold.1`, which X calls, as Apple's clang does (CLX-278). That call's frames go out to X
+ * already, each inlined call at its line, so X's own call, the next, is the same line again and is
+ * left out. One split off for its place in memory, `X.cold`, is jumped to, not called. */
+static int keep_call(found* f, const char* c) {
+    int keep = !(f->split[0] && is_named(c, f->split));
+    f->split[0] = 0;
+    const char* cold = strstr(c, ".cold.");
+    if (cold && cold[6] >= '0' && cold[6] <= '9' && (size_t)(cold - c) < sizeof f->split) {
+        memcpy(f->split, c, (size_t)(cold - c));
+        f->split[cold - c] = 0;
+    }
+    return keep;
 }
 
 /* After a frame, the same frame `n` more times, as a recursion makes: once more is written again,
@@ -201,7 +218,8 @@ static int find(const found* f, int from, const char* name) {
  *   0, no chunk on this thread: every frame.
  *   1, a panic in a chunk: the frames down to the chunk's body.
  *   2, on the thread that started the outermost loop: the frames outside it. Its chunks may be
- *      on the stack, so the loop is the first `cx_parallel` from the outermost `par_claim` on.
+ *      on the stack, so the loop is the first `cx_parallel` or `cx_parallel_on` from the
+ *      outermost `par_claim` on.
  *   3, on the thread that started an inner loop, which ran in the chunk of the loop around it:
  *      the frames from the inner loop to that chunk's body. `ending` is how many inner loops this
  *      thread is reporting a panic in, this one too, each with a `par_inner` on the stack, so
@@ -210,6 +228,7 @@ void cx_trace_write(void (*text)(const char*), int mode, int ending) {
     found f;
     f.n = 0;
     f.cwd[0] = 0;
+    f.split[0] = 0;
     f.list = malloc(MAX_FOUND * sizeof *f.list);
     if (!f.list) return;
     found_frames(&f);
@@ -221,7 +240,10 @@ void cx_trace_write(void (*text)(const char*), int mode, int ending) {
     } else if (mode == 2) {
         int claim = -1;
         for (int i = find(&f, 0, "par_claim"); i >= 0; i = find(&f, i + 1, "par_claim")) claim = i;
+        /* `cx_parallel`, or `cx_parallel_on` for a loop on a pool of the program's. */
         int loop = find(&f, claim >= 0 ? claim : 0, "cx_parallel");
+        int on = find(&f, claim >= 0 ? claim : 0, "cx_parallel_on");
+        if (on >= 0 && (loop < 0 || on < loop)) loop = on;
         if (loop >= 0) show_range(text, &f, loop + 1, f.n);
     } else {
         int inner = -1;
@@ -243,6 +265,7 @@ void cx_trace_frames(void (*text)(const char*), void* const* frames, int n) {
     found f;
     f.n = 0;
     f.cwd[0] = 0;
+    f.split[0] = 0;
     f.list = malloc(MAX_FOUND * sizeof *f.list);
     if (!f.list) return;
     name_frames(&f, frames, n);
@@ -395,6 +418,13 @@ static void name_frames(found* f, void* const* frames, int n) {
                     moduled ? (int)m.SymType : -1, moduled ? m.LoadedPdbName : L"?",
                     inline_count ? (unsigned long)inline_count(process, at) : 0ul);
         }
+        /* The function the call is in, first, to know whether it's shown. */
+        symbol outer;
+        clear_symbol(&outer);
+        if (!from_addr(process, at, &offset, &outer.info)) continue;
+        char outer_name[768];
+        utf8_path(outer.info.Name, outer_name, sizeof outer_name);
+        if (!keep_call(f, outer_name)) continue;
         /* The calls inlined at this address, innermost first, each at its own line. */
         DWORD inlined = inline_count && inline_query && inline_from && inline_line ? inline_count(process, at) : 0;
         DWORD context = 0, index = 0;
@@ -409,13 +439,10 @@ static void name_frames(found* f, void* const* frames, int n) {
                 }
             }
         }
-        clear_symbol(&sym);
         memset(&line, 0, sizeof line);
         line.SizeOfStruct = sizeof line;
-        if (from_addr(process, at, &offset, &sym.info)) {
-            if (!line_of(process, at, &column, &line)) line.FileName = NULL;
-            add(f, &sym, &line);
-        }
+        if (!line_of(process, at, &column, &line)) line.FileName = NULL;
+        add(f, &outer, &line);
     }
 done:
     ReleaseSRWLockExclusive(&trace_lock);
@@ -1131,7 +1158,7 @@ static void dwarf_frames(found* f, const dwarf* d, cx_u64 at, const char* name, 
     char path[4096];
     cx_u64 line;
     if (!find_line(d, at, path, sizeof path, &line)) {
-        if (name && *name) frame(f, name, "", 0);
+        if (name && *name && keep_call(f, name)) frame(f, name, "", 0);
         return;
     }
     level levels[MAX_INLINED];
@@ -1147,9 +1174,10 @@ static void dwarf_frames(found* f, const dwarf* d, cx_u64 at, const char* name, 
     }
     if (depth > 0 && levels[0].name && (dwarf_name || !name)) name = levels[0].name;
     if (!name) name = "";
-    if (depth <= 1) {
+    int keep = keep_call(f, name);
+    if (keep && depth <= 1) {
         frame(f, name, path, line);
-    } else {
+    } else if (keep) {
         frame(f, levels[depth - 1].name ? levels[depth - 1].name : "", path, line);
         for (int j = depth - 1; j >= 1; j--) {
             char call[4096];
