@@ -1195,6 +1195,19 @@ fn md_row(label: String, cells: List<(f64, f64)?>, memory: bool) -> String {
     return row
 }
 
+// Times within this factor of each other are even, as on the site's chart.
+const EVEN: f64 = 1.05
+
+// Where a benchmark's times are in its record: its own, or a parallel loop's at the most threads.
+fn widest(r: own Json) -> Json {
+    let counts = r.get("threads") ?? Json.Null
+    var last = Json.Null
+    for t in counts.keys() {
+        last = counts.get(t.copy()) ?? Json.Null
+    }
+    return if last.is_null() { r } else { last }
+}
+
 fn md_head(first: str, langs: List<String>) {
     var head = "| {first} |"
     var line = String("| --- |")
@@ -1264,6 +1277,38 @@ fn print_tables(root: String) {
             println(row)
             println("")
         }
+        // Calx against each language as the site's chart counts it: within 5% either way is even,
+        // and a parallel loop counts at the most threads.
+        var faster = [0u32; 4]
+        var even = [0u32; 4]
+        var slower = [0u32; 4]
+        for name in results.keys() {
+            let at = widest(results.get(name.copy()) ?? Json.Null)
+            let calx = timing(at.get("calx")) else {
+                continue
+            }
+            for i in 0usize..4 {
+                let other = timing(at.get(all[i + 1].copy())) else {
+                    continue
+                }
+                let r = calx.0 / other.0
+                if r <= 1.0 / EVEN {
+                    faster[i] += 1
+                } else if r >= EVEN {
+                    slower[i] += 1
+                } else {
+                    even[i] += 1
+                }
+            }
+        }
+        println("{os}, Calx against each language:")
+        println("")
+        println("| Against | Calx faster | Even | Calx slower |")
+        println("| --- | --- | --- | --- |")
+        for i in 0usize..4 {
+            println("| {lang_name(all[i + 1].copy())}, on {faster[i] + even[i] + slower[i]} | {faster[i]} | {even[i]} | {slower[i]} |")
+        }
+        println("")
         let dx = results.get("dx") ?? Json.Null
         if dx.is_null() {
             continue
