@@ -155,23 +155,6 @@ jobs:
       - name: Tests
         shell: bash
         run: '"$CALX_BIN" run --release tests/run.calx -- --modes debug,release'
-      # While macOS's release traces are brought up (CLX-278): what the trace reader and dwarfdump
-      # each say of a panic's frames in Calx code.
-      - name: Stack traces on macOS
-        if: always() && runner.os == 'macOS'
-        shell: bash
-        run: |
-          mkdir -p build/probe
-          for t in panics/trace_std; do
-            name=$(basename "$t")
-            "$CALX_BIN" build --release "tests/$t.calx" -o "build/probe/$name" > /dev/null 2>&1 || true
-            CALX_TRACE_DEBUG=1 "./build/probe/$name" > /dev/null 2> "build/probe/$name.txt" || true
-            cat "build/probe/$name.txt"
-            for a in $(grep -E '^trace: at 0x[0-9a-f]+ .*\.calx:' "build/probe/$name.txt" | grep -oE 'at 0x[0-9a-f]+' | cut -c4- | sort -u); do
-              echo "== dwarfdump --lookup=$a"
-              dwarfdump --lookup="$a" "build/probe/$name.dSYM" 2>&1 | head -60 || true
-            done
-          done
       # A handoff between threads that's missing its ordering fails only now and then, so on Arm
       # the parallel and thread tests run 20 more times (CLX-274).
       - name: Threads, again and again

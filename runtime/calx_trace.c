@@ -1144,6 +1144,10 @@ static int inline_levels(const dwarf* d, cx_u64 at, level* levels, line_header* 
         }
         int ok = n > 0 && read_header(d, u.stmt_list, h) == 0;
         free_abbrevs(&u.ab);
+        /* A unit's one range can take in other units' code: on macOS the linker puts a function's
+         * split-off part, `X.cold.1`, at the end of the program, and the unit's range reaches it
+         * over every unit between. One with no function at `at` isn't the one. */
+        if (n == 0) continue;
         return ok ? n : 0;
     }
     return 0;
