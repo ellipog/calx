@@ -489,12 +489,22 @@ cx_usize cx_arg_count(void) { return arg_count; }
 const cx_u8* cx_arg(cx_usize i) { return args[i].ptr; }
 cx_usize cx_arg_len(cx_usize i) { return args[i].len; }
 
-/* Declared by std/env.calx: the system the program was built for, 1 for Windows and 2 for Linux. */
+/* Declared by std/env.calx: the system the program was built for, 1 for Windows, 2 for Linux and
+   3 for macOS, and its processor, 1 for x86-64 and 2 for Arm64 (D612). */
 cx_u32 cx_env_os(void) {
-#ifdef _WIN32
+#if defined(_WIN32)
     return 1;
+#elif defined(__APPLE__)
+    return 3;
 #else
     return 2;
+#endif
+}
+cx_u32 cx_env_arch(void) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    return 2;
+#else
+    return 1;
 #endif
 }
 

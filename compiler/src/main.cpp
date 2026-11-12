@@ -26,6 +26,7 @@
 #include "parser.h"
 #include "record.h"
 #include "source.h"
+#include "target.h"
 #include "toolchain.h"
 #include "update.h"
 #include "doctor.h"
@@ -50,11 +51,7 @@ void print_version() {
     // In a terminal, beside the mark, with where this calx is.
     const term::Caps& c = term::out();
     if (c.color) {
-#ifdef _WIN32
-        const char* platform = "Windows, x64";
-#else
-        const char* platform = "Linux, x64";
-#endif
+        std::string platform = target_label(kTarget);
         std::string built = CALX_COMMIT[0] ? std::string(CALX_COMMIT) + ", " + CALX_DATE : "built from source";
         std::printf("\n%s\n", term::beside_mark(c, {"", "", term::bold(c, "calx ") + term::accent(c, CALX_VERSION),
                                                     term::dim(c, built + " \xC2\xB7 " + platform),

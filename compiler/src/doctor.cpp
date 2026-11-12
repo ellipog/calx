@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "target.h"
 #include "term.h"
 #include "toolchain.h"
 
@@ -19,11 +20,7 @@ namespace calx {
 
 namespace {
 
-#ifdef _WIN32
-constexpr const char* kExe = ".exe";
-#else
-constexpr const char* kExe = "";
-#endif
+constexpr const char* kExe = exe_suffix(kTarget.os);
 
 int failures = 0;
 
@@ -227,6 +224,11 @@ int run_doctor() {
         ok(std::string("calx ") + CALX_VERSION + ", built from source, at " + self.string(), "calx",
            std::string(CALX_VERSION) + term::dim(c, "  built from source"), self.string());
     }
+    // What it builds programs for, and the processor a release build counts on (D612).
+    std::string cpu = release_cpu_flag(kTarget);
+    cpu = cpu.substr(cpu.find('=') + 1);
+    ok("builds for " + target_name(kTarget) + " (" + target_label(kTarget) + "), release builds for " + cpu, "target",
+       target_name(kTarget) + term::dim(c, "  " + target_label(kTarget) + ", release builds for " + cpu));
     std::string home_error;
     std::string home = find_home(home_error);
     if (home.empty()) {

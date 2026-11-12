@@ -121,7 +121,7 @@ extern const std::chrono::minutes kCacheGrace;
 // file whose name starts with the same 32-digit hash.
 void trim_cache(const std::string& dir, std::size_t keep, std::uintmax_t budget);
 
-// What a built library's file name ends with: `.dll` or `.so`.
+// What a built library's file name ends with: `.dll`, `.so` or `.dylib`.
 const char* library_suffix();
 
 // Copies what `build_program` built to `out`, for `calx build`. On Windows its PDB goes beside it

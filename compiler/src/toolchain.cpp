@@ -1,4 +1,5 @@
 #include "toolchain.h"
+#include "target.h"
 #include "term.h"
 
 #include <algorithm>
@@ -30,6 +31,9 @@
 #include <csignal>
 #include <sys/prctl.h>
 #endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 extern char** environ;
 #endif
 
@@ -46,15 +50,13 @@ std::string env(const char* name) {
 
 #ifdef _WIN32
 constexpr char kPathSep = ';';
-constexpr const char* kExe = ".exe";
-constexpr const char* kLib = ".dll";
-// What clang builds for with mingw-w64's headers and libraries and the UCRT (CLX-110).
-constexpr const char* kMingwTarget = "--target=x86_64-w64-windows-gnu";
 #else
 constexpr char kPathSep = ':';
-constexpr const char* kExe = "";
-constexpr const char* kLib = ".so";
 #endif
+constexpr const char* kExe = exe_suffix(kTarget.os);
+constexpr const char* kLib = lib_suffix(kTarget.os);
+// What clang builds for with mingw-w64's headers and libraries and the UCRT (CLX-110).
+[[maybe_unused]] constexpr const char* kMingwTarget = mingw_target_flag(kTarget.arch);
 
 }  // namespace
 
@@ -355,6 +357,17 @@ fs::path self_exe() {
         }
         w.resize(w.size() * 2);
     }
+#elif defined(__APPLE__)
+    std::string b(1024, '\0');
+    uint32_t n = static_cast<uint32_t>(b.size());
+    if (_NSGetExecutablePath(b.data(), &n) != 0) {
+        b.resize(n);  // too small: n is the size it needs
+        if (_NSGetExecutablePath(b.data(), &n) != 0) return {};
+    }
+    b.resize(std::strlen(b.c_str()));
+    std::error_code ec;
+    fs::path p = fs::canonical(b, ec);  // the path it was started by, which may be a link
+    return ec ? fs::path(b) : p;
 #else
     std::error_code ec;
     return fs::read_symlink("/proc/self/exe", ec);
@@ -447,7 +460,7 @@ bool find_toolchain(Toolchain& tc, std::string& error) {
     // llvm-mingw's layout: the target's headers and libraries in a folder named for it, beside bin.
     // Its clang drives lld as ld.lld, with GNU ld's options.
     std::error_code dir_ec;
-    tc.mingw = fs::is_directory(dir.parent_path() / "x86_64-w64-mingw32", dir_ec);
+    tc.mingw = fs::is_directory(dir.parent_path() / mingw_dir(kTarget.arch), dir_ec);
     if (tc.mingw) {
         tc.lld_beside = (dir / "ld.lld.exe").string();
         tc.lld_path = plain_file(tc.lld_beside) ? tc.lld_beside : "";
@@ -462,7 +475,9 @@ bool find_toolchain(Toolchain& tc, std::string& error) {
     tc.lld = !tc.lld_path.empty();
     auto size = fs::file_size(clang_path, ec);
     auto time = fs::last_write_time(clang_path, ec).time_since_epoch().count();
-    tc.identity = tc.clang + "|" + std::to_string(size) + "|" + std::to_string(time);
+    // The target too, so an x64 calx and an Arm64 one sharing a cache, as on Windows on Arm, never
+    // take each other's files, whatever flags they pass.
+    tc.identity = target_name(kTarget) + "|" + tc.clang + "|" + std::to_string(size) + "|" + std::to_string(time);
     // The toolchain a release carries names itself in VERSION beside its bin/, since its files
     // come with the archive's fixed dates: a release with another clang compiles everything again.
     std::string version;
@@ -1590,7 +1605,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
 #endif
     } else {
         flags.push_back("-O3");
-        flags.push_back("-march=x86-64-v3");
+        flags.push_back(release_cpu_flag(kTarget));
     }
     // `CALX_PROFILE=1` keeps every function's frame pointer, so a sampling profiler such as perf
     // walks the stack from its samples without unwind tables. It costs a register, so it's off.
@@ -1814,7 +1829,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         if (tc.mingw) {
             // mingw's lld takes ld.lld's options, and the optimization level from the driver.
             link_flags.push_back("-O3");
-            link_flags.push_back("-march=x86-64-v3");
+            link_flags.push_back(release_cpu_flag(kTarget));
             for (const std::string& f : {std::string("--thinlto-cache-policy=cache_size_bytes=512m"),
                                          "--thinlto-cache-dir=" + lto_cache}) {
                 link_flags.push_back("-Xlinker");
@@ -1831,7 +1846,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         }
 #else
         link_flags.push_back("-O3");
-        link_flags.push_back("-march=x86-64-v3");
+        link_flags.push_back(release_cpu_flag(kTarget));
         for (const std::string& f : {std::string("--thinlto-cache-policy=cache_size_bytes=512m"),
                                      "--thinlto-cache-dir=" + lto_cache}) {
             link_flags.push_back("-Xlinker");

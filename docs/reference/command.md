@@ -328,6 +328,7 @@ The cache keeps the 64 programs and 1024 compiled files used most recently, and 
 calx doctor
 
   ok    calx 0.2.0 (3f9c2a1b7d4e, 2026-11-01) at C:\Users\you\.calx\bin\calx.exe
+  ok    builds for x86_64-windows (Windows, x64), release builds for x86-64-v3
   ok    runtime and standard library in C:\Users\you\.calx
   ok    clang 23.1.5 at C:\Users\you\.calx\toolchain\bin\clang.exe (the one Calx carries), building for mingw-w64 and the UCRT
   ok    lld, which links faster and optimizes across modules in release builds
@@ -340,7 +341,7 @@ calx doctor
 Everything works.
 ```
 
-It finds clang as a build does: `CALX_CC`, then the toolchain the installation carries, then `PATH`, and says if the toolchain the release builds with isn't the one installed, which `calx update --toolchain` mends. The real test is building a program, in debug and release, which is what everything else is for. When that fails, it shows what clang said and names what's missing: on Windows, mingw-w64's headers and libraries beside the toolchain's clang, or with another clang, the C runtime and SDK from Visual Studio's Build Tools; on Linux, the C library's headers. It exits with 1 if something needs fixing, and 0 if not. A failed build points at it too.
+The target is the system and processor it builds programs for, which is the one it runs on, and the processor a release build counts on: x86-64-v3, with AVX2, on x86; the M1's, which every Apple Silicon Mac has, on macOS; and ARMv8.2 on Arm Linux and Windows. It finds clang as a build does: `CALX_CC`, then the toolchain the installation carries, then `PATH`, and says if the toolchain the release builds with isn't the one installed, which `calx update --toolchain` mends. The real test is building a program, in debug and release, which is what everything else is for. When that fails, it shows what clang said and names what's missing: on Windows, mingw-w64's headers and libraries beside the toolchain's clang, or with another clang, the C runtime and SDK from Visual Studio's Build Tools; on Linux, the C library's headers. It exits with 1 if something needs fixing, and 0 if not. A failed build points at it too.
 
 ## Updating
 
