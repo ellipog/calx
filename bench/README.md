@@ -110,7 +110,7 @@ calx run --release bench/digest/digest.calx
 python -I bench/digest/digest.py
 ```
 
-The [bench workflow](../.github/workflows/bench.yml) runs both on GitHub's Arm and x64 runners with the newest nightly, installed as a user installs it: `gh workflow run bench`. The speed sections of [std.hash](../docs/std/hash.md#speed), [std.crypto](../docs/std/crypto.md) and [std.zlib](../docs/std/zlib.md) give its numbers, with the machine each is from.
+The [bench workflow](../.github/workflows/bench.yml) runs both on GitHub's Arm and x64 runners with the newest nightly, installed as a user installs it: `gh workflow run bench`. With `-f checkout=true`, it also builds them with the nightly's compiler and the pushed commit's runtime and std, and times the two in turn on each runner, so a change to the runtime's C is measured on Arm before a nightly has it. Their `total` lines must match. The speed sections of [std.hash](../docs/std/hash.md#speed), [std.crypto](../docs/std/crypto.md) and [std.zlib](../docs/std/zlib.md) give its numbers, with the machine each is from.
 
 ## Pushing onto a list
 

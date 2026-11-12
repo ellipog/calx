@@ -352,9 +352,9 @@ SHA_TARGET static void sha256_blocks_ni(cx_u32* h, const cx_u8* p, cx_usize n) {
  * state before, which sits in memory's order, A and E in lane 0. Each writes over its first
  * operand, so the old ABCD is copied for sha256h2. Left to clang, sha256h worked on the copy,
  * which put the copy on ABCD's chain every four rounds: written out, sha256h works in place and
- * the copy delays only EFGH, which waits on ABCD every other time, as OpenSSL's does it. That was
- * 19% behind OpenSSL on a Neoverse N2 (CLX-288). sha256su0 adds sigma0 of the next four words, and
- * sha256su1 the words seven back and sigma1. */
+ * the copy delays only EFGH, which waits on ABCD every other time, as OpenSSL's does it. That took
+ * it from 1667 to 2025 MiB/s on a Neoverse N2, where OpenSSL does 2065 (CLX-288). sha256su0 adds
+ * sigma0 of the next four words, and sha256su1 the words seven back and sigma1. */
 static inline __attribute__((always_inline, target("sha2"))) void sha256_rounds4(uint32x4_t* abcd, uint32x4_t* efgh, uint32x4_t wk) {
     uint32x4_t before;
     __asm__("mov %[t].16b, %[a].16b\n\t"

@@ -90,7 +90,7 @@ Why bytes don't inflate, as `Error`:
 | Copying a match | 16 bytes at a time when the distance is 16 or more. For shorter distances, the pattern is built once and then copied 8 bytes at a time |
 | Compressing | Hash chains on 4 bytes, searched further at each level. From level 4, as libdeflate does: matches of 3 bytes too, within 8 KiB, from a table of their own; before a match is taken, the next position searched half as hard, and its match taken if it's longer by more than its distance costs; and a block ended where the kinds of its symbols change. From level 4 the match at the last match's distance is tried too, which finds an image's row above when the chains are too full of commoner strings to reach it. Each block is written stored, with the fixed codes or with its own codes, whichever is smallest |
 | Adler-32 | 32 bytes a step with AVX2 where the processor has it, and with NEON on Arm64. Otherwise a byte at a time, 8 to a loop |
-| CRC-32 | From 64 bytes on, folded 64 bytes at a time with carry-less multiplies: PCLMUL on x86, PMULL on Arm64. Then the last bytes, and shorter inputs, with Arm64's CRC32 instructions, 8 bytes each, or otherwise 8 tables, 8 bytes a step |
+| CRC-32 | From 64 bytes on, folded with carry-less multiplies: PCLMUL on x86, in four lanes, 64 bytes a step, and PMULL on Arm64, in eight, 128 bytes a step. Then the last bytes, and shorter inputs, with Arm64's CRC32 instructions, 8 bytes each, or otherwise 8 tables, 8 bytes a step |
 | The output | `decompress` guesses the length from how the first bytes inflated, and for gzip, from the length in its trailer, so most streams inflate in one call without copying |
 
 On an i9-13900K, one run each over the corpus (level 1 and inflating; the lazy levels have been rebuilt since, and are measured below):
@@ -113,14 +113,14 @@ The checksums, from [bench/digest](../../bench/README.md#hashes-checksums-and-ae
 
 The tables alone did CRC-32 at 2,600 MiB/s, before it was folded with PCLMUL (CLX-281).
 
-On GitHub's Arm runners, from the [bench workflow](../../.github/workflows/bench.yml) with the nightly of 2026-11-12 (5847f42): the better of two rounds. They're shared virtual machines, so the numbers are rough.
+On GitHub's Arm runners, from the [bench workflow](../../.github/workflows/bench.yml), run on 2026-11-12 with this repository's runtime at d8c8e49: the best of three rounds, Calx and Python taking turns. They're shared virtual machines, so the numbers are rough.
 
 | | Calx, Neoverse N2 | zlib 1.3 | Calx, Apple M1 | Apple's zlib 1.2.12 |
 | --- | --- | --- | --- | --- |
-| CRC-32 | 16,200 MiB/s | 3,800 MiB/s | 24,200 MiB/s | 29,600 MiB/s |
-| Adler-32 | 16,500 MiB/s | 3,000 MiB/s | 32,100 MiB/s | 15,800 MiB/s |
+| CRC-32 | 16,400 MiB/s | 3,800 MiB/s | 35,300 MiB/s | 25,600 MiB/s |
+| Adler-32 | 17,300 MiB/s | 3,000 MiB/s | 29,600 MiB/s | 14,100 MiB/s |
 
-The N2 is Azure's Cobalt 100, under Ubuntu 24.04, whose Python 3.12 links Ubuntu's zlib 1.3. Windows on the same processor gave Calx the same numbers, within 5%. Apple's zlib folds CRC-32 faster than these four lanes do: CLX-288.
+The N2 is Azure's Cobalt 100, under Ubuntu 24.04, whose Python 3.12 links Ubuntu's zlib 1.3. Each core there reads about 16 GB/s, which is why its two checksums are level. Windows on the same processor gave Calx up to 12% more. Four lanes did CRC-32 at 21,300 MiB/s on the M1 in the same run, behind Apple's zlib, and eight took it to 35,300 (CLX-288).
 
 Minecraft's region files, compressed again: 2,000 of the chunks vanilla 26.3 saved, 68.9 MB inflated, each deflated as a zlib stream on one P-core, best of five runs for Calx and of up to three for Java 25's `Deflater`. Java's level 6 gives back vanilla's own bytes exactly.
 

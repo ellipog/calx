@@ -85,15 +85,15 @@ On our benchmark, hashing 64 MiB at once on one P-core of an i9-13900K, the best
 
 SHA-512 is the one Python is still ahead on, by about 3%. Its row was taken again for CLX-151 on a quiet machine, best of six rounds of ten, where the runtime before it did 1032 MiB/s. In WSL on the same P-core, Calx does about 1070 MiB/s to `hashlib`'s 1110 (Python 3.14, OpenSSL 3.5.5). CLX-151 took it from about 12% behind, with the two-block schedule, the rounds' sums in order, the `andn` majority and the first block's schedule mixed in with its rounds. What's left is in how the instructions are scheduled: on this core a round with no schedule work takes 7 cycles, though its chain of waits is 4 long, and OpenSSL's rounds are assembly ordered by hand. Before CLX-149, Calx did MD5 at 635 MiB/s, SHA-1 at 600 and SHA-256 at 400.
 
-On GitHub's Arm runners, from the [bench workflow](../../.github/workflows/bench.yml) with the nightly of 2026-11-12 (5847f42): the better of two rounds, each the best of 5 over 64 MiB. They're shared virtual machines, so the numbers are rough. The M1's two rounds differed by up to 10%.
+On GitHub's Arm runners, from the [bench workflow](../../.github/workflows/bench.yml), run on 2026-11-12 with this repository's runtime at d8c8e49: the best of three rounds, each the best of 5 over 64 MiB, Calx and Python taking turns. They're shared virtual machines, so the numbers are rough. The M1 ran a quarter slower in some runs than in others, so compare only within a column pair.
 
 | Hash | Calx, Neoverse N2 | Python, Neoverse N2 | Calx, Apple M1 | Python, Apple M1 |
 | --- | --- | --- | --- | --- |
-| MD5 | 704 MiB/s | 537 MiB/s | 664 MiB/s | 663 MiB/s |
-| SHA-1 | 1966 MiB/s | 1985 MiB/s | 2084 MiB/s | 2155 MiB/s |
-| SHA-256 | 1666 MiB/s | 2064 MiB/s | 2098 MiB/s | 2333 MiB/s |
-| SHA-512 | 1239 MiB/s | 1265 MiB/s | 1379 MiB/s | 1372 MiB/s |
+| MD5 | 706 MiB/s | 537 MiB/s | 514 MiB/s | 555 MiB/s |
+| SHA-1 | 1968 MiB/s | 1986 MiB/s | 1991 MiB/s | 1820 MiB/s |
+| SHA-256 | 2025 MiB/s | 2065 MiB/s | 1869 MiB/s | 1938 MiB/s |
+| SHA-512 | 1214 MiB/s | 1265 MiB/s | 1147 MiB/s | 1168 MiB/s |
 
-The Neoverse N2 is Azure's Cobalt 100, under Ubuntu 24.04, with Python 3.12 and OpenSSL 3.0. The M1 is macOS's, virtual, with Python 3.15 and OpenSSL 4.1. Windows on the same Cobalt 100 gave Calx the same numbers, within 1%. Its Python did SHA-256 at 319 MiB/s, a sixth of what Linux's does on that processor, so it's left out. SHA-256 is behind OpenSSL on both machines, by 19% on the N2 and 10% on the M1, and SHA-1 by up to 3%: CLX-288.
+The Neoverse N2 is Azure's Cobalt 100, under Ubuntu 24.04, with Python 3.12 and OpenSSL 3.0. The M1 is macOS's, virtual, with Python 3.15 and OpenSSL 4.1. Windows on the same Cobalt 100 gave Calx the same numbers, within 1%. Its Python did SHA-256 at 318 MiB/s, a sixth of what Linux's does on that processor, so it's left out. SHA-256 was 19% behind OpenSSL on the N2 until its rounds went in OpenSSL's order, which took it from 1667 to 2025 MiB/s in the same run (CLX-288).
 
 `std.hash` is written in Calx over those runtime calls: [std/hash.calx](../../std/hash.calx).

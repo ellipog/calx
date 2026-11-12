@@ -157,8 +157,8 @@ __attribute__((target("aes"))) static inline uint64x2_t crc_fold(uint64x2_t x, u
 }
 
 /* From 128 bytes, eight lanes, 128 bytes a step, then folded onto four, 64 bytes on: each lane
- * waits on its multiply and two adds in a row, which four lanes can't hide on an Apple M1, where
- * Apple's zlib did 29.6 GB/s to these four's 24 (CLX-288). */
+ * waits on its multiply and two adds in a row, which four lanes couldn't hide on an Apple M1.
+ * Eight took it from 21 to 35 GB/s there, where Apple's zlib does 26 (CLX-288). */
 __attribute__((target("aes"))) static cx_u32 crc32_pmull(cx_u32 crc, const cx_u8* p, cx_usize n, int has_crc32) {
     static const cx_u64 ks[10] = {0x653d982200000000ull, 0xcad38e8f00000000ull, 0x69ccfc0d00000000ull, 0x2a28386200000000ull,
                                   0x9570d49500000000ull, 0x01b5fd1d00000000ull, 0x65673b4600000000ull, 0x9ba54c6f00000000ull,
