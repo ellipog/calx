@@ -1,0 +1,27 @@
+// std.fs.disk_usage: the room on the file system a folder or a file is on, and the errors for a
+// path that's missing or can't be one (CLX-319).
+import std.fs.{DiskUsage, FsError, disk_usage, write, remove_dir_all, temp_dir}
+
+fn sane(d: DiskUsage) -> bool {
+    return d.total > 0 and d.used <= d.total and d.available <= d.total and d.used + d.available <= d.total
+}
+
+fn main() {
+    let dir = temp_dir()!
+    write("{dir}/a.txt", [1, 2, 3])!
+    let folder = unsafe { disk_usage(dir) }!
+    let file = unsafe { disk_usage("{dir}/a.txt") }!
+    println("{sane(folder)} {sane(file)}")    // out: true true
+    // A file is asked about by the folder it's in, so it's on the same file system.
+    println("{folder.total == file.total}")    // out: true
+    println("{sane(unsafe { disk_usage(".") }!)}")    // out: true
+    match unsafe { disk_usage("{dir}/missing/b") } {
+        ok(_) => println("found"),
+        err(e) => println("{e == FsError.NotFound}"),    // out: true
+    }
+    match unsafe { disk_usage("{dir}/a\0b") } {
+        ok(_) => println("found"),
+        err(e) => println("{e}"),    // out: not a valid path
+    }
+    remove_dir_all(dir)!
+}

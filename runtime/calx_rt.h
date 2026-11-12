@@ -1216,6 +1216,7 @@ CX_FN(cx_i32, cx_fs_seek, (cx_i64 h, cx_u64 at));
 CX_FN(cx_u8, cx_fs_separator, (void));
 CX_FN(cx_i32, cx_fs_set_current_dir, (const cx_u8* path, cx_usize len));
 CX_FN(cx_i32, cx_fs_set_mode, (const cx_u8* path, cx_usize len, cx_u32 mode));
+CX_FN(cx_i32, cx_fs_disk_usage, (const cx_u8* path, cx_usize len, cx_u64* out));
 CX_FN(cx_i32, cx_fs_set_modified, (const cx_u8* path, cx_usize len, cx_i64 ms));
 CX_FN(cx_i64, cx_fs_size, (cx_i64 h));
 CX_FN(cx_i32, cx_fs_stat, (const cx_u8* path, cx_usize len));

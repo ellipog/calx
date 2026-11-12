@@ -25,9 +25,12 @@
 #include <unistd.h>
 #ifdef __APPLE__
 #include <copyfile.h>
+#include <sys/mount.h>
 /* macOS names stat's times so. */
 #define st_atim st_atimespec
 #define st_mtim st_mtimespec
+#else
+#include <sys/statvfs.h>
 #endif
 #endif
 #include <stdint.h>
@@ -478,6 +481,47 @@ cx_i32 cx_fs_stat(const cx_u8* path, size_t len) {
 /* The stat of a file kept open, which on Windows saves opening it again: a file opened right
  * after it was closed waits for the antivirus to look at it again. */
 cx_i32 cx_fs_handle_stat(cx_i64 h) { return stat_handle((HANDLE)(intptr_t)h); }
+
+/* The volume that holds the path: its size, what's used of it, and what this user may still
+ * write, in bytes, into `out`, from GetDiskFreeSpaceExW. It takes only a folder, so a file's path
+ * asks for the folder it's in, as Python's `shutil.disk_usage` does, and a share's root, which
+ * must end in a backslash, gets one. */
+cx_i32 cx_fs_disk_usage(const cx_u8* path, size_t len, cx_u64* out) {
+    wchar_t* w = wide_long(path, len);
+    if (!w) return 0;
+    size_t units = wcslen(w);
+    /* Room for a backslash, or for ".\" in place of a bare name. */
+    wchar_t* dir = (wchar_t*)malloc((units + 3) * sizeof(wchar_t));
+    if (!dir) fs_out_of_memory();
+    memcpy(dir, w, (units + 1) * sizeof(wchar_t));
+    free(w);
+    if (units >= 2 && (dir[0] == L'\\' || dir[0] == L'/') && (dir[1] == L'\\' || dir[1] == L'/') &&
+        dir[units - 1] != L'\\' && dir[units - 1] != L'/') {
+        dir[units] = L'\\';
+        dir[units + 1] = 0;
+    }
+    ULARGE_INTEGER avail, total, free_all;
+    BOOL ok = GetDiskFreeSpaceExW(dir, &avail, &total, &free_all);
+    if (!ok && GetLastError() == ERROR_DIRECTORY) {
+        /* A file: the folder it's in, up to its last separator, or the current one. */
+        size_t cut = units;
+        while (cut > 0 && dir[cut - 1] != L'\\' && dir[cut - 1] != L'/' && dir[cut - 1] != L':') cut--;
+        if (cut == 0) {
+            dir[0] = L'.';
+            dir[1] = L'\\';
+            cut = 2;
+        }
+        dir[cut] = 0;
+        ok = GetDiskFreeSpaceExW(dir, &avail, &total, &free_all);
+    }
+    if (!ok) fail_win(GetLastError());
+    free(dir);
+    if (!ok) return 0;
+    out[0] = total.QuadPart;
+    out[1] = total.QuadPart - free_all.QuadPart;
+    out[2] = avail.QuadPart;
+    return 1;
+}
 
 cx_i32 cx_fs_set_mode(const cx_u8* path, size_t len, cx_u32 mode) {
     wchar_t* w = wide_long(path, len);
@@ -1195,6 +1239,42 @@ cx_i32 cx_fs_handle_stat(cx_i64 h) {
         return 0;
     }
     stat_from(&st);
+    return 1;
+}
+
+/* The file system that holds the path: its size, what's used of it, and what a user without
+ * root may still write, in bytes, into `out`, as Python's `shutil.disk_usage` and `df` count
+ * them. What the file system keeps back for root counts in neither used nor free, so the two can
+ * add up to less than the size. statvfs on Linux, and statfs on macOS, whose statvfs has only 32
+ * bits for a count of blocks. */
+cx_i32 cx_fs_disk_usage(const cx_u8* path, size_t len, cx_u64* out) {
+    char* s = cpath(path, len);
+    if (!s) return 0;
+#ifdef __APPLE__
+    struct statfs st;
+    int r;
+    while ((r = statfs(s, &st)) != 0 && errno == EINTR) {
+    }
+#else
+    struct statvfs st;
+    int r;
+    while ((r = statvfs(s, &st)) != 0 && errno == EINTR) {
+    }
+#endif
+    int e = errno;
+    free(s);
+    if (r != 0) {
+        fail_errno(e);
+        return 0;
+    }
+#ifdef __APPLE__
+    cx_u64 unit = (cx_u64)st.f_bsize;
+#else
+    cx_u64 unit = st.f_frsize ? (cx_u64)st.f_frsize : (cx_u64)st.f_bsize;
+#endif
+    out[0] = (cx_u64)st.f_blocks * unit;
+    out[1] = ((cx_u64)st.f_blocks - (cx_u64)st.f_bfree) * unit;
+    out[2] = (cx_u64)st.f_bavail * unit;
     return 1;
 }
 

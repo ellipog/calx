@@ -166,6 +166,7 @@ fn main() ! Error {
 | `shutil.copy`, `shutil.rmtree` | `copy`, `remove_dir_all` |
 | `os.path.join`, `pathlib.Path(p).suffix` | `path.join`, `path.file_extension` |
 | `tempfile.mkdtemp()` | `temp_dir()` |
+| `shutil.disk_usage("/")` | `unsafe { disk_usage("/") }`, with `total`, `used` and `available` |
 | `subprocess.run(["git", "status"], check=True)` | `Command.new("git").arg("status").run()` |
 | `subprocess.check_output(...)` | `Command.new(...).read()`, its output as text |
 | `subprocess.run(..., capture_output=True)` | `Command.new(...).output()`, with the status and both streams |
