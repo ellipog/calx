@@ -5139,6 +5139,12 @@ $dropall    m->len = 0;
     }
 
     std::string expr_value(Expr* e) {
+        if (e->moves && e->own_view) {
+            // A `var` String that may hold a view: the bytes get an owner where it moves (CLX-310).
+            std::string p = local_name(e->local), v = tmp();
+            std::string zeroed = e->local->clear_on_move ? p + " = " + zero(e->type) + "; " : "";
+            return "({ cx_String " + v + " = " + p + "; " + zeroed + "cx_string_owned(" + v + "); })";
+        }
         if (e->moves && e->kind == ExprKind::field) {
             // A field moved out of a local: it's zeroed, so dropping the local frees the rest.
             std::string p = place_or_value(e), v = tmp();
@@ -6599,7 +6605,13 @@ $dropall    m->len = 0;
     // A `List<String>` the runtime built, as a `cx_StringList`, in the list type's own layout.
     // A part of text, `view`, a `cx_str`, as a `String` that's kept: a copy, or a `String` that
     // views the same bytes where the ownership pass saw that's safe (CLX-293).
-    static std::string keep_part(const Expr* e, const std::string& view) {
+    // A part of the `var` String it's given to is a view while the var holds one, and a copy while
+    // it owns its bytes, which the assignment frees (CLX-310).
+    std::string keep_part(const Expr* e, const std::string& view) {
+        if (e->part_of_var) {
+            std::string v = tmp();
+            return "({ cx_str " + v + " = " + view + "; cx_string_part_of(" + v + ", " + local_name(e->part_of_var) + ".cap); })";
+        }
         return (e->view_parts ? "cx_str_view(" : "cx_string_from(") + view + ")";
     }
 
@@ -6901,6 +6913,9 @@ $dropall    m->len = 0;
         if (t->kind == TypeKind::library) return library_method(e);
         if (e->bmethod == BMethod::copy) {
             if (is_copy(t)) return expr(recv);  // a generic instance's `T` that's `Copy`
+            // A copy a `var` String keeps, of text that outlives it: a view of the same bytes
+            // (CLX-310).
+            if (e->view_parts && t->kind == TypeKind::string) return "cx_str_view(cx_sv(*" + address(recv) + "))";
             return copy_fn(t) + "(" + address(recv) + ")";
         }
         if (e->bmethod == BMethod::opt_map) return optional_map(e);

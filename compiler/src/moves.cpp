@@ -327,6 +327,8 @@ private:
         set(l, moved);
         moved_at_[id(l)] = e->span;
         e->moves = true;
+        // A `var` that may hold a view gives the bytes an owner where it moves (CLX-310).
+        e->own_view = !scan_ && var_views_.count(l);
     }
 
     // A pattern takes the whole value of `l` apart.
@@ -589,9 +591,12 @@ private:
             if (s->local) {
                 s->local->owns = true;
                 declare(s->local);
-                if (!scan_) {
+                if (scan_) {
+                    given(s->local, s->value);
+                } else {
                     keep_parts(s->value, p, s->local);
                     split_first(s->value, s->local);
+                    var_views(s->local);
                 }
                 // An arena list holds its arena until its scope ends (D114).
                 Expr* v = s->value;
@@ -775,6 +780,94 @@ private:
         if (it != indexed_.end()) v->split_first = it->second;
     }
 
+    // --- a `var` String that holds a view (CLX-310) ----------------------------------------------
+    //
+    // `var path = parts[1].copy()`, then `path = path[..q]`, copies the line's bytes once for the
+    // var and again for its part. A var that's never changed in place, read by a closure or taken
+    // apart can hold a view instead, as a `let`'s part can: of text in a local that nothing moves
+    // or changes in the function and that was in scope where the var was declared, so it outlives
+    // the var. A part of the var itself is a view while the var holds one, and a copy while it owns
+    // its bytes, which the assignment frees; any other value it's given it owns, as before. Where
+    // the var moves, a view's bytes are copied into a string of its own, so it can outlive the
+    // text. A view frees nothing and its copy copies the bytes, so drops and copies are as before.
+
+    // From the scan: a value given to `l`, as it's declared or assigned to.
+    void given(const Local* l, Expr* v) {
+        if (l->is_var && l->type && l->type->kind == TypeKind::string && v) var_values_[l].push_back(v);
+    }
+
+    // The local `x` is in, where it's a String in a local through fields, list, array and map
+    // elements and optionals, whose bytes stay where they are while the local doesn't change.
+    static Local* stable_root(Expr* x) {
+        for (int hops = 0; x && hops < 32; hops++) {
+            switch (x->kind) {
+                case ExprKind::name: return x->ref == Ref::local ? x->local : nullptr;
+                case ExprKind::field:
+                    if (x->ref == Ref::variant || x->ref == Ref::const_ || x->has_bits || !x->lhs || x->lhs->ref == Ref::type) return nullptr;
+                    x = x->lhs;
+                    break;
+                case ExprKind::index: {
+                    if (x->from_index || x->box_value || !x->lhs->type) return nullptr;
+                    TypeKind k = x->lhs->type->kind;
+                    if (k != TypeKind::list && k != TypeKind::array && k != TypeKind::map) return nullptr;
+                    x = x->lhs;
+                    break;
+                }
+                case ExprKind::unwrap: x = x->lhs; break;
+                default: return nullptr;
+            }
+        }
+        return nullptr;
+    }
+
+    // Whether text in `r` stays as it is, where it is, for the whole function and outlives `var`,
+    // which is being declared: `r` is a name that can't change, nothing moves or changes it, and
+    // it's in scope here.
+    bool outlasts(const Local* r, const Local* var) const {
+        if (!r || r == var || r->is_var || touched(r) || kept_whole_.count(r)) return false;
+        auto v = view_of_.find(r);
+        // Views that can't change while they're in scope; not `mut` ones, nor a closure's captures.
+        if (v != view_of_.end() && v->second != ViewOf::none && v->second != ViewOf::read_param && v->second != ViewOf::element &&
+            v->second != ViewOf::part) {
+            return false;
+        }
+        for (const auto& scope : scopes_) {
+            for (const Local* x : scope) {
+                if (x == r) return true;
+            }
+        }
+        return false;
+    }
+
+    // The real walk, at the `var` `l` just declared: whether it can hold a view, and if so, which
+    // of the values the scan saw it given are views, and which are parts of it.
+    void var_views(Local* l) {
+        var_views_.erase(l);
+        auto it = var_values_.find(l);
+        if (it == var_values_.end() || !l->is_var || kept_whole_.count(l)) return;
+        // Only a var given a view needs its parts and moves looked at.
+        std::vector<Expr*> views, own_parts;
+        for (Expr* v : it->second) {
+            v->part_of_var = nullptr;
+            if (v->kind == ExprKind::call && v->call == CallKind::builtin_method && v->bmethod == BMethod::copy) {
+                Expr* x = v->callee->lhs;
+                v->view_parts = false;
+                if (x->type && x->type->kind == TypeKind::string && outlasts(stable_root(x), l)) views.push_back(v);
+                continue;
+            }
+            Expr* text = part_base(v);
+            if (!text || !v->type || v->type->kind != TypeKind::string) continue;
+            while (Expr* b = part_base(text)) text = b;
+            Local* r = stable_root(text);
+            if (r == l) own_parts.push_back(v);
+            else if (outlasts(r, l)) views.push_back(v);
+        }
+        if (views.empty()) return;
+        for (Expr* v : views) v->view_parts = true;
+        for (Expr* v : own_parts) v->part_of_var = l;
+        var_views_.insert(l);
+    }
+
     // A part of text, `e`, kept in a temporary for the statement: a view, unless its text's local
     // moves or changes anywhere in the statement, which the statement's end looks at. One a
     // `mut` argument before it changes counts, since the call changes it while it reads the part.
@@ -810,7 +903,10 @@ private:
     // still hold what it was and free it again.
     void decide_let(Stmt* s) {
         s->consumes = !s->by_mut && binds_moved(s->pattern);
-        if (s->consumes && is_local_name(s->value)) moved_any_.insert(s->value->local);
+        if (s->consumes && is_local_name(s->value)) {
+            moved_any_.insert(s->value->local);
+            kept_whole_.insert(s->value->local);  // its names take its value as it is (CLX-310)
+        }
     }
 
     bool binds_moved(const Pattern* p) const {
@@ -889,6 +985,7 @@ private:
             Local* l = t->local;
             if (scan_) {
                 touched_.insert(l);
+                given(l, s->value);
                 return;
             }
             changed(l);
@@ -1185,8 +1282,11 @@ private:
                 if (e->item) {
                     for (Local* l : e->item->captures) {
                         // Its own pass sees how it uses them, so a list it captures is needed
-                        // whole (CLX-309).
-                        if (scan_) whole_.insert(l);
+                        // whole (CLX-309), and a `var` it reads doesn't hold a view (CLX-310).
+                        if (scan_) {
+                            whole_.insert(l);
+                            kept_whole_.insert(l);
+                        }
                         if (!scan_) use(e, l);
                         borrows_.push_back({l, nullptr, e->span, nullptr, {}, false, false, true});
                     }
@@ -1266,6 +1366,8 @@ private:
             // Moving or changing any of it: text in it can't have parts a `let` keeps as views,
             // and a name that keeps parts can't be one (CLX-293).
             if (keep || u == Use::change) touched_.insert(l);
+            // A `var` changed in place writes to its bytes, so it can't hold a view (CLX-310).
+            if (u == Use::change) kept_whole_.insert(l);
             // A list looked at only as `l[0]`, `l[1]` and so on: how many elements those reach,
             // for a `split` to stop at; any other use needs the whole list (CLX-309).
             if (!keep && u != Use::change && e->kind == ExprKind::index && is_local_name(e->lhs) && e->lhs->local == l &&
@@ -1520,7 +1622,10 @@ private:
             if (e->else_) expr(e->else_, bu);
             e->let_consumes = !by_mut && binds_moved(e->let_pattern);
             bool whole = root && is_local_name(v);
-            if (e->let_consumes && whole) moved_any_.insert(root);
+            if (e->let_consumes && whole) {
+                moved_any_.insert(root);
+                kept_whole_.insert(root);  // its names take its value as it is (CLX-310)
+            }
             expr(v, by_mut ? Use::change : root ? Use::view : Use::consume);
             return;
         }
@@ -1582,7 +1687,10 @@ private:
                 a.consumes = !by_mut && binds_moved(a.pattern);
                 any = any || a.consumes;
             }
-            if (any && root && is_local_name(v)) moved_any_.insert(root);
+            if (any && root && is_local_name(v)) {
+                moved_any_.insert(root);
+                kept_whole_.insert(root);  // its names take its value as it is (CLX-310)
+            }
             expr(v, by_mut ? Use::change : root ? Use::view : Use::consume);
             return;
         }
@@ -1649,6 +1757,11 @@ private:
     // any other way, which `split_first` needs whole (CLX-309).
     std::unordered_map<const Local*, std::uint32_t> indexed_;
     std::unordered_set<const Local*> whole_;
+    // From the scan: the values each `var` String is given, and the locals changed in place, read
+    // by a closure or taken apart; then the vars that may hold a view (CLX-310).
+    std::unordered_map<const Local*, std::vector<Expr*>> var_values_;
+    std::unordered_set<const Local*> kept_whole_;
+    std::unordered_set<const Local*> var_views_;
     struct LiveView {
         Expr* parts;
         Local* root;

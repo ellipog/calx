@@ -326,6 +326,12 @@ struct Expr {
     // split: when a `let` keeps the list and its only uses are indexes by literals to look at a
     // part, how many parts those reach, where the split stops; 0 for all of them (CLX-309).
     std::uint32_t split_first = 0;
+    // A `var` String that may hold a view (CLX-310). On a part of text given to it, the var itself:
+    // the part is a view where the var holds one, and a copy where it owns its bytes. On the var's
+    // name where it moves: a view becomes a string of its own. `view_parts` on `x.copy()` given
+    // to it makes the copy a view of `x`.
+    const Local* part_of_var = nullptr;
+    bool own_view = false;
     Local* hidden = nullptr;     // match, if let: the new value matched, held for the arms
     bool drop_hidden = false;    // match, if let: `hidden` is dropped when it ends
     bool let_consumes = false;   // if let: the first branch takes the value apart

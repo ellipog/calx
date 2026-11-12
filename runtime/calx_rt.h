@@ -446,6 +446,22 @@ CX_INLINE void cx_drop_String(cx_String* s) {
 CX_FN(cx_String, cx_copy_String, (const cx_String* s));
 /* A `String` that owns a copy of the bytes. */
 CX_FN(cx_String, cx_string_from, (cx_str s));
+/* A `var` String that may hold a view of text that outlives it (CLX-310). Where it moves, a view's
+ * bytes are copied into a string of its own, so it can outlive the text too; one that owns its
+ * bytes, or a literal's, moves as it is. */
+CX_INLINE cx_String cx_string_owned(cx_String s) {
+    return (cx_i64)s.cap < 0 ? cx_string_from(cx_sv(s)) : s;
+}
+/* A part, `v`, of such a var, whose capacity is `cap`, given back to it: a view where the var is a
+ * view or a literal, whose bytes outlast it, and a copy where it owns them, as the assignment frees
+ * them. */
+CX_INLINE cx_String cx_string_part_of(cx_str v, cx_usize cap) {
+    if (cap == 0) {
+        cx_String lit = {(cx_u8*)v.ptr, v.len, 0};
+        return lit;
+    }
+    return (cx_i64)cap < 0 ? cx_str_view(v) : cx_string_from(v);
+}
 /* `s.interned()`: a `String` with a capacity of 0, as a literal's, sharing one copy of a short
  * text that's never freed with every other interned string of it, or a copy past the limits. */
 CX_FN(cx_String, cx_string_interned, (cx_str s));

@@ -1,0 +1,121 @@
+// A `var` String given a copy or a part of text that outlives it holds a view of the text, as a
+// `let`'s part does, and a part of itself is a view while it holds one (CLX-310). Where it moves,
+// the bytes get an owner, so they outlive the text. Each case here frees the text the var viewed,
+// then fills the freed memory with other strings, so a var that kept a view past its text would
+// show their bytes, not its own.
+
+// Strings the size of those freed, filling the memory they were in.
+fn churn() {
+    var junk: List<String> = []
+    for i in 0..2000 {
+        junk.push("#################{i}")
+        junk.push("##########{i}")
+    }
+}
+
+// The var moves out, by `return`, after a part of itself.
+fn first(text: String) -> String {
+    let words = "{text} and some more".split(" ")
+    var w = words[0].copy()
+    if let q = w.find("?") {
+        w = w[..q]
+    }
+    return w
+}
+
+// The var moves into a list that outlives the text.
+fn keep(out: mut List<String>, line: String) {
+    let parts = "{line}".split(",")
+    var p = parts[1].copy()
+    p = p.trim()
+    out.push(p)
+}
+
+// The var moves into another declared before the text.
+fn last_of(lines: List<String>) -> String {
+    var last = String()
+    for line in lines {
+        let made = "{line}"
+        let cells = made.split(" ")
+        var cell = cells[0].copy()
+        cell = cell[1..]
+        last = cell
+    }
+    return last
+}
+
+// The var is given text whose local is declared after it: a copy, as the text ends first.
+fn after(lines: List<String>) -> String {
+    var last = String()
+    for line in lines {
+        let cells = "{line}".split(" ")
+        last = cells[1].copy()
+    }
+    churn()
+    return last
+}
+
+fn main() {
+    let a = first("alpha?x=1")
+    let b = first("beta")
+    churn()
+    println("{a} {b}")    // out: alpha beta
+
+    var kept: List<String> = []
+    keep(mut kept, "x, padded value ,y")
+    keep(mut kept, "x,plain,y")
+    churn()
+    println("[{kept[0]}] [{kept[1]}]")    // out: [padded value] [plain]
+
+    let lines: List<String> = ["one two", "three four", "five six"]
+    let l = last_of(lines.copy())
+    churn()
+    println("{l}")    // out: ive
+    println("{after(lines)}")    // out: six
+
+    // A part of the var while it owns its bytes, after a new string, is a copy; a map takes the
+    // var's bytes as its own.
+    var paths = Map<String, i64>()
+    let text = String("/a/1?q /b/22 /a/3 /c?z")
+    for word in text.split(" ") {
+        let pieces = word.split("?")
+        var path = pieces[0].copy()
+        if let slash = path.find_last("/") {
+            if path[slash + 1..].len() > 0 and path[slash + 1..].to_bytes().all(|c| c >= b'0' and c <= b'9') {
+                path = "{path[..slash + 1]}\{id\}"
+                path = path[..path.len() - 1]
+            }
+        }
+        if let n = mut paths.find(path) {
+            n += 1
+        } else {
+            paths.insert(path, 1)
+        }
+    }
+    churn()
+    var names: List<String> = []
+    for (k, v) in paths {
+        names.push("{k}={v}")
+    }
+    names.sort()
+    println("{names}")    // out: [/a/{id=2, /b/{id=1, /c=1]
+
+    // Changed in place, the var owns its bytes, and the text is as it was.
+    let base = String("left right")
+    let halves = base.split(" ")
+    var grown = halves[0].copy()
+    grown.push_str("!")
+    println("{grown} {base}")    // out: left! left right
+
+    // Taken apart by a pattern, the var's value is the name's.
+    let source = String("taken whole")
+    let bits = source.split(" ")
+    var whole = bits[0].copy()
+    whole = whole[1..]
+    var held: List<String> = []
+    match whole {
+        s => held.push(s),
+    }
+    churn()
+    println("{held}")    // out: [aken]
+}
