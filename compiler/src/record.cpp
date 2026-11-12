@@ -64,7 +64,12 @@ Stamp stamp_of(const std::string& path) {
     struct stat st;
     if (::stat(path.c_str(), &st) != 0) return s;
     s.size = static_cast<std::uint64_t>(st.st_size);
-    s.time = static_cast<std::int64_t>(st.st_mtim.tv_sec) * 1'000'000'000 + st.st_mtim.tv_nsec;
+#ifdef __APPLE__
+    const struct timespec& m = st.st_mtimespec;
+#else
+    const struct timespec& m = st.st_mtim;
+#endif
+    s.time = static_cast<std::int64_t>(m.tv_sec) * 1'000'000'000 + m.tv_nsec;
 #endif
     s.ok = true;
     return s;

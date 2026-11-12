@@ -319,7 +319,9 @@ pid_t start_bound(const std::vector<std::string>& argv, const std::string& name)
     for (const std::string& a : argv) args.push_back(const_cast<char*>(a.c_str()));
     if (!name.empty()) args[0] = const_cast<char*>(name.c_str());
     args.push_back(nullptr);
+#ifdef __linux__
     pid_t parent = getpid();
+#endif
     pid_t pid = fork();
     if (pid == 0) {
 #ifdef __linux__
@@ -476,7 +478,8 @@ bool find_toolchain(Toolchain& tc, std::string& error) {
 #endif
     tc.lld = !tc.lld_path.empty();
     auto size = fs::file_size(clang_path, ec);
-    auto time = fs::last_write_time(clang_path, ec).time_since_epoch().count();
+    // A long long, as libc++ counts file times in a 128-bit integer to_string has no form for.
+    auto time = static_cast<long long>(fs::last_write_time(clang_path, ec).time_since_epoch().count());
     // The target too, so an x64 calx and an Arm64 one sharing a cache, as on Windows on Arm, never
     // take each other's files, whatever flags they pass.
     tc.identity = target_name(kTarget) + "|" + tc.clang + "|" + std::to_string(size) + "|" + std::to_string(time);
@@ -1306,7 +1309,7 @@ std::string compiler_hash(const Toolchain& tc) {
     std::error_code ec;
     auto size = fs::file_size(exe, ec);
     if (ec) return {};
-    auto time = fs::last_write_time(exe, ec).time_since_epoch().count();
+    auto time = static_cast<long long>(fs::last_write_time(exe, ec).time_since_epoch().count());
     if (ec) return {};
     std::string id = exe.string() + "|" + std::to_string(size) + "|" + std::to_string(time);
     fs::path saved = fs::path(tc.cache) / "abi" / (hash_hex({"compiler", id}) + ".txt");
@@ -1734,7 +1737,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         fs::path src = runtime / "sqlite" / "sqlite3.c";
         r.inputs.push_back(src.string());
         auto size = fs::file_size(src, ec);
-        auto time = ec ? 0 : fs::last_write_time(src, ec).time_since_epoch().count();
+        auto time = ec ? 0LL : static_cast<long long>(fs::last_write_time(src, ec).time_since_epoch().count());
         if (ec) parts_ok = false;
         for (const std::string& f : flags) {
             if (f != "-O0" && f != "-O3" && f != "-flto=thin" && f != "-DCX_DEBUG" && f != "-gline-tables-only") {
