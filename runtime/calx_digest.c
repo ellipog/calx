@@ -10,7 +10,8 @@
  * code, which is the fallback. MD5 is written out round by round, with each round's function in
  * the form that waits least on the round before. SHA-512 works in 64-bit words, eight rounds to a
  * loop so no variables are shuffled between them, and with AVX2 works out the words of two blocks
- * at once.
+ * at once. On Arm64, SHA-1 and SHA-256 use the SHA instructions most Arm64 processors have, and
+ * SHA-512 Armv8.2's, which Apple's and recent Neoverse ones have (CLX-281).
  *
  * A context is CX_DIGEST_CTX bytes the caller owns, a `List<u8>` in std.hash, so they're copied
  * in and out of a struct here and need no alignment. */
@@ -22,6 +23,9 @@
 #include <cpuid.h>
 #include <immintrin.h>
 #define CX_X86 1
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
+#define CX_ARM 1
 #endif
 
 enum { MD5, SHA1, SHA256, SHA512, SHA384 };
@@ -232,6 +236,37 @@ SHA_TARGET static void sha1_blocks_ni(cx_u32* h, const cx_u8* p, cx_usize n) {
 }
 #endif
 
+#ifdef CX_ARM
+/* CLX-281: Arm64's SHA-1 instructions, four rounds each, as SHA-NI's are. ABCD sits in one
+ * register with A in lane 0, as it is in memory, and E apart: sha1h works out the next four
+ * rounds' E from A before them. sha1su0 and sha1su1 make the next four words from the sixteen
+ * before. The rounds' function is sha1c, sha1p, sha1m and sha1p again, a fifth of the way each. */
+__attribute__((target("sha2"))) static void sha1_blocks_arm(cx_u32* h, const cx_u8* p, cx_usize n) {
+    static const cx_u32 k[4] = {0x5a827999, 0x6ed9eba1, 0x8f1bbcdc, 0xca62c1d6};
+    uint32x4_t abcd = vld1q_u32(h);
+    cx_u32 e = h[4];
+    for (; n; n--, p += 64) {
+        uint32x4_t abcd0 = abcd, w[4];
+        cx_u32 e0 = e;
+        for (int g = 0; g < 4; g++) w[g] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(p + 16 * g)));
+        _Pragma("clang loop unroll(full)")
+        for (int g = 0; g < 20; g++) {
+            if (g >= 4) w[g & 3] = vsha1su1q_u32(vsha1su0q_u32(w[g & 3], w[(g + 1) & 3], w[(g + 2) & 3]), w[(g + 3) & 3]);
+            uint32x4_t wk = vaddq_u32(w[g & 3], vdupq_n_u32(k[g / 5]));
+            cx_u32 next = vsha1h_u32(vgetq_lane_u32(abcd, 0));
+            if (g < 5) abcd = vsha1cq_u32(abcd, e, wk);
+            else if (g < 10 || g >= 15) abcd = vsha1pq_u32(abcd, e, wk);
+            else abcd = vsha1mq_u32(abcd, e, wk);
+            e = next;
+        }
+        abcd = vaddq_u32(abcd, abcd0);
+        e += e0;
+    }
+    vst1q_u32(h, abcd);
+    h[4] = e;
+}
+#endif
+
 /* --- SHA-256 ------------------------------------------------------------------------------- */
 
 static const cx_u32 sha256_k[64] = {
@@ -309,6 +344,31 @@ SHA_TARGET static void sha256_blocks_ni(cx_u32* h, const cx_u8* p, cx_usize n) {
     __m128i dchg = _mm_shuffle_epi32(cdgh, 0xb1);
     _mm_storeu_si128((__m128i*)h, _mm_blend_epi16(feba, dchg, 0xf0));
     _mm_storeu_si128((__m128i*)(h + 4), _mm_alignr_epi8(dchg, feba, 8));
+}
+#endif
+
+#ifdef CX_ARM
+/* Four rounds at a time: sha256h works out the new ABCD and sha256h2 the new EFGH, both from the
+ * state before, which sits in memory's order, A and E in lane 0. sha256su0 adds sigma0 of the
+ * next four words, and sha256su1 the words seven back and sigma1. */
+__attribute__((target("sha2"))) static void sha256_blocks_arm(cx_u32* h, const cx_u8* p, cx_usize n) {
+    uint32x4_t abcd = vld1q_u32(h), efgh = vld1q_u32(h + 4);
+    for (; n; n--, p += 64) {
+        uint32x4_t abcd0 = abcd, efgh0 = efgh, w[4];
+        for (int g = 0; g < 4; g++) w[g] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(p + 16 * g)));
+        _Pragma("clang loop unroll(full)")
+        for (int g = 0; g < 16; g++) {
+            if (g >= 4) w[g & 3] = vsha256su1q_u32(vsha256su0q_u32(w[g & 3], w[(g + 1) & 3]), w[(g + 2) & 3], w[(g + 3) & 3]);
+            uint32x4_t wk = vaddq_u32(w[g & 3], vld1q_u32(sha256_k + 4 * g));
+            uint32x4_t before = abcd;
+            abcd = vsha256hq_u32(abcd, efgh, wk);
+            efgh = vsha256h2q_u32(efgh, before, wk);
+        }
+        abcd = vaddq_u32(abcd, abcd0);
+        efgh = vaddq_u32(efgh, efgh0);
+    }
+    vst1q_u32(h, abcd);
+    vst1q_u32(h + 4, efgh);
 }
 #endif
 
@@ -593,6 +653,51 @@ static void sha512_blocks(cx_u64* hs, const cx_u8* p, cx_usize n) {
 }
 #endif
 
+#ifdef CX_ARM
+/* CLX-281: Armv8.2's SHA-512 instructions, two rounds each pair. The state is in four registers
+ * in memory's order, ab, cd, ef and gh, each word of a pair in the lane it has in memory. sha512h
+ * works out both rounds' T1: it takes h + K + W of the first round in the high lane and g + K + W
+ * of the second in the low, so the pair's words with their constants go in swapped, then f and g,
+ * and d and e, each straddling two registers. sha512h2 adds Maj and Sigma0 for the new a of both
+ * rounds, from a, b and c. After them the new ef is cd plus both T1s, and the other pairs move
+ * along one. sha512su0 and sha512su1 make words 2j and 2j + 1 from the pairs before, kept eight
+ * at a time in `w`. */
+__attribute__((target("sha3"))) static void sha512_blocks_arm(cx_u64* hs, const cx_u8* p, cx_usize n) {
+    uint64x2_t ab = vld1q_u64(hs), cd = vld1q_u64(hs + 2), ef = vld1q_u64(hs + 4), gh = vld1q_u64(hs + 6);
+    for (; n; n--, p += 128) {
+        uint64x2_t ab0 = ab, cd0 = cd, ef0 = ef, gh0 = gh, w[8];
+        /* Through a volatile asm, which clang can't move out of the loop as it can `KEEP`'s, so the
+         * constants are loaded in the rounds: it otherwise loads all 40 pairs before the loop,
+         * more than there are registers, and stores them on the stack. */
+        const cx_u64* k = sha512_k;
+        __asm__ volatile("" : "+r"(k));
+        for (int j = 0; j < 8; j++) w[j] = vreinterpretq_u64_u8(vrev64q_u8(vld1q_u8(p + 16 * j)));
+        _Pragma("clang loop unroll(full)")
+        for (int j = 0; j < 40; j++) {
+            if (j >= 8) {
+                uint64x2_t x7 = vextq_u64(w[(j + 4) & 7], w[(j + 5) & 7], 1);
+                w[j & 7] = vsha512su1q_u64(vsha512su0q_u64(w[j & 7], w[(j + 1) & 7]), w[(j + 7) & 7], x7);
+            }
+            uint64x2_t wk = vaddq_u64(w[j & 7], vld1q_u64(k + 2 * j));
+            uint64x2_t t1 = vsha512hq_u64(vaddq_u64(gh, vextq_u64(wk, wk, 1)), vextq_u64(ef, gh, 1), vextq_u64(cd, ef, 1));
+            uint64x2_t next = vsha512h2q_u64(t1, cd, ab);
+            gh = ef;
+            ef = vaddq_u64(cd, t1);
+            cd = ab;
+            ab = next;
+        }
+        ab = vaddq_u64(ab, ab0);
+        cd = vaddq_u64(cd, cd0);
+        ef = vaddq_u64(ef, ef0);
+        gh = vaddq_u64(gh, gh0);
+    }
+    vst1q_u64(hs, ab);
+    vst1q_u64(hs + 2, cd);
+    vst1q_u64(hs + 4, ef);
+    vst1q_u64(hs + 6, gh);
+}
+#endif
+
 /* --- every hash, through one context ------------------------------------------------------- */
 
 static cx_usize block_size(const digest* d) { return d->kind >= SHA512 ? 128 : 64; }
@@ -604,6 +709,10 @@ static void blocks(digest* d, const cx_u8* p, cx_usize n) {
         case SHA1: if (d->ni) sha1_blocks_ni(d->h.w, p, n); else sha1_blocks(d->h.w, p, n); break;
         case SHA256: if (d->ni) sha256_blocks_ni(d->h.w, p, n); else sha256_blocks(d->h.w, p, n); break;
         default: if (d->ni) sha512_blocks_avx2(d->h.q, p, n); else sha512_blocks(d->h.q, p, n); break;
+#elif defined(CX_ARM)
+        case SHA1: if (d->ni) sha1_blocks_arm(d->h.w, p, n); else sha1_blocks(d->h.w, p, n); break;
+        case SHA256: if (d->ni) sha256_blocks_arm(d->h.w, p, n); else sha256_blocks(d->h.w, p, n); break;
+        default: if (d->ni) sha512_blocks_arm(d->h.q, p, n); else sha512_blocks(d->h.q, p, n); break;
 #else
         case SHA1: sha1_blocks(d->h.w, p, n); break;
         case SHA256: sha256_blocks(d->h.w, p, n); break;
@@ -620,6 +729,9 @@ static void start(digest* d, cx_u32 kind) {
     d->kind = kind;
 #ifdef CX_X86
     d->ni = kind == SHA1 || kind == SHA256 ? sha_ni() : kind != MD5 && has_avx2();
+#elif defined(CX_ARM)
+    cx_u32 arm = cx_arm_features();
+    d->ni = kind == SHA1 || kind == SHA256 ? (arm & CX_ARM_SHA2) != 0 : kind != MD5 && (arm & CX_ARM_SHA512);
 #endif
     switch (kind) {
         case MD5: memcpy(d->h.w, md5_h, sizeof md5_h); break;
