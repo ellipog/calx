@@ -1,8 +1,9 @@
 /// Python's `repr` of strings and floats, written as CPython 3.14 writes them, for messages that
-/// quote values as Python would: `Regex.python`'s errors and std.json.schema's.
+/// quote values as Python would: `Regex.python`'s errors and std.json.schema's; and Python's
+/// `str.lower`, for std.html.
 module std.text.python
 
-import std.text.ucd.{PY_PRINT, PY_PRINT_LEN, PY_SPACE, PY_SPACE_LEN}
+import std.text.ucd.{PY_CASED, PY_CASED_LEN, PY_CASE_IGNORABLE, PY_CASE_IGNORABLE_LEN, PY_PRINT, PY_PRINT_LEN, PY_SPACE, PY_SPACE_LEN}
 
 /// Whether Python's `str.isspace` is true for `r`: what `strip`, `split()` and `re`'s `\s` take
 /// as white space.
@@ -188,4 +189,127 @@ pub fn repr_float_into(out: mut String, f: f64) {
         out.push('0')
     }
     out.push_str("{a}")
+}
+
+/// `s` lowercased as Python's `str.lower` does it. That's what `to_lower_root` gives, Java's
+/// `toLowerCase(Locale.ROOT)`, but for the capital sigma, `Σ`: Python makes it the final `ς` when a
+/// Cased rune comes before it and none after, looking past the Case_Ignorable runes between, where
+/// Java looks for them in the word it's in. So `script7Σ` lowercases to `script7σ` here, where Java
+/// gives `script7ς`.
+pub fn lower(s: String) -> String {
+    let first = s.find("Σ") else return s.to_lower_root()
+    var out = String()
+    out.reserve(s.len())
+    var from: usize = 0
+    var at = first
+    loop {
+        out.push_str(s[from..at].to_lower_root())
+        out.push(if final_sigma(s, at) { 'ς' } else { 'σ' })
+        from = at + 2
+        at = match s[from..].find("Σ") {
+            some(k) => from + k,
+            none => break,
+        }
+    }
+    out.push_str(s[from..].to_lower_root())
+    return out
+}
+
+// Whether the capital sigma at `at` is in Unicode's Final_Sigma context, as CPython's
+// `handle_capital_sigma` finds it: a Cased rune before it and none after, past Case_Ignorable runes.
+fn final_sigma(s: String, at: usize) -> bool {
+    var j = at
+    var before: u32? = none
+    while j > 0 {
+        j -= 1
+        while j > 0 and (s.byte_at(j) & 0xC0) == 0x80 {
+            j -= 1
+        }
+        let r = rune_at(s, j)
+        if not case_ignorable(r) {
+            before = some(r)
+            break
+        }
+    }
+    let c = before else return false
+    if not cased(c) {
+        return false
+    }
+    var k = at + 2
+    while k < s.len() {
+        let r = rune_at(s, k)
+        if not case_ignorable(r) {
+            return not cased(r)
+        }
+        k += utf8_len(s.byte_at(k))
+    }
+    return true
+}
+
+// The rune whose first byte is at `i`.
+fn rune_at(s: String, i: usize) -> u32 {
+    let c = u32(s.byte_at(i))
+    if c < 0x80 {
+        return c
+    }
+    if c < 0xE0 {
+        return ((c & 0x1F) << 6) | (u32(s.byte_at(i + 1)) & 0x3F)
+    }
+    if c < 0xF0 {
+        return ((c & 0x0F) << 12) | ((u32(s.byte_at(i + 1)) & 0x3F) << 6) | (u32(s.byte_at(i + 2)) & 0x3F)
+    }
+    let high = ((c & 0x07) << 18) | ((u32(s.byte_at(i + 1)) & 0x3F) << 12)
+    return high | ((u32(s.byte_at(i + 2)) & 0x3F) << 6) | (u32(s.byte_at(i + 3)) & 0x3F)
+}
+
+fn utf8_len(c: u8) -> usize {
+    if c < 0x80 {
+        return 1
+    }
+    if c < 0xE0 {
+        return 2
+    }
+    if c < 0xF0 {
+        return 3
+    }
+    return 4
+}
+
+// Whether `r` is Cased: a letter in either case or title case, or Other_Lowercase or
+// Other_Uppercase, such as `ª` or `Ⓐ`.
+fn cased(r: u32) -> bool {
+    if r < 0x80 {
+        return (r >= 65 and r <= 90) or (r >= 97 and r <= 122)
+    }
+    var lo: usize = 0
+    var hi = PY_CASED_LEN / 2
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if r > PY_CASED[2 * mid + 1] {
+            lo = mid + 1
+        } else if r < PY_CASED[2 * mid] {
+            hi = mid
+        } else {
+            return true
+        }
+    }
+    return false
+}
+
+// Whether `r` is Case_Ignorable: a mark, a format rune, a modifier, or one that can be inside a
+// word, such as `'`, `.` or `:`.
+fn case_ignorable(r: u32) -> bool {
+    var lo: usize = 0
+    var hi = PY_CASE_IGNORABLE_LEN / 2
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if r > PY_CASE_IGNORABLE[2 * mid + 1] {
+            lo = mid + 1
+        } else if r < PY_CASE_IGNORABLE[2 * mid] {
+            hi = mid
+        } else {
+            return true
+        }
+    }
+    return false
 }
