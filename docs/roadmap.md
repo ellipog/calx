@@ -29,6 +29,7 @@ The [spec](CALX_SPEC.md) has the design of each of these:
 
 ## Later
 
+- **More platforms**: macOS on Apple Silicon, and Windows and Linux on Arm processors, each with its own release, install and CI, and Arm's own instructions where the runtime has fast paths for x86.
 - **Plugins as WebAssembly**, built from the same source, for hosts that run code they don't trust.
 - **A language server**, so editors other than VS Code get errors, completion and go-to-definition, and `calx` commands for building and testing plugins.
 - **Limits on plugins' time**: checks the compiler puts in plugin builds, so a plugin that runs too long can be stopped.
