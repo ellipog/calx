@@ -475,6 +475,12 @@ bool find_toolchain(Toolchain& tc, std::string& error) {
     const char* lld_name = kTarget.os == Os::macos ? "ld64.lld" : "ld.lld";
     tc.lld_beside = (dir / lld_name).string();
     tc.lld_path = plain_file(tc.lld_beside) ? tc.lld_beside : find_on_path(lld_name);
+    if (kTarget.os == Os::macos) {
+        for (const char* name : {"dsymutil", "llvm-dsymutil"}) {
+            if (tc.dsymutil.empty() && plain_file(dir / name)) tc.dsymutil = (dir / name).string();
+        }
+        if (tc.dsymutil.empty()) tc.dsymutil = find_on_path("dsymutil");
+    }
 #endif
     tc.lld = !tc.lld_path.empty();
     auto size = fs::file_size(clang_path, ec);
@@ -1115,6 +1121,14 @@ bool link_program(const Toolchain& tc, const std::vector<std::string>& inputs, c
     driver.push_back("-o");
     driver.push_back(output);
     driver.insert(driver.end(), link_flags.begin(), link_flags.end());
+#ifdef __APPLE__
+    // ThinLTO's objects kept in a folder beside the output, as the debug map dsymutil reads names
+    // them; otherwise they're all /tmp/lto.tmp, and gone. lld hardlinks them from its cache. Named
+    // for the output, so the saved command below stands for every link.
+    if (std::find(link_flags.begin(), link_flags.end(), "-flto=thin") != link_flags.end()) {
+        driver.push_back("-Wl,-object_path_lto," + output + ".lto");
+    }
+#endif
 
     std::vector<std::string> key_text = {"link", tc.identity};
     key_text.insert(key_text.end(), link_flags.begin(), link_flags.end());
@@ -1485,6 +1499,15 @@ bool place_build(const std::string& built, const std::string& out, std::string& 
         return true;
     };
 #ifndef _WIN32
+#ifdef __APPLE__
+    // The DWARF beside the program in the cache goes in the bundle debuggers look for beside it,
+    // `out.dSYM`, where the runtime's traces read it too (CLX-278).
+    if (file_exists(built + ".dwarf")) {
+        fs::path dwarf = fs::path(out + ".dSYM") / "Contents" / "Resources" / "DWARF";
+        make_dirs(dwarf.string());
+        if (!put((dwarf / fs::path(out).filename()).string(), built + ".dwarf")) return false;
+    }
+#endif
     if (same_file(out, built)) {
         fs::last_write_time(long_path(out), fs::file_time_type::clock::now(), ec);
         return true;
@@ -1591,6 +1614,10 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // that overflows always reaches the page kept below it and panics, never stepping over it
     // into other memory. Windows' code does this already, through __chkstk.
     flags.push_back("-fstack-clash-protection");
+#ifdef __APPLE__
+    // DWARF 5, which the runtime's trace reader takes, where clang for macOS may write 4.
+    flags.push_back("-gdwarf-5");
+#endif
 #else
     // With mingw-w64's headers and libraries beside it, clang builds for them, whatever its own
     // default target: LLVM's release builds for Visual Studio's unless told, and loads the
@@ -2013,6 +2040,21 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         return r;
     }
     std::error_code ec;
+#ifdef __APPLE__
+    // The DWARF the objects hold, in one file beside the program, `<program>.dwarf`, which the
+    // runtime's traces read and the cache trims with it: macOS's linker leaves it in the objects.
+    // It goes in first, so a program in the cache always has its file. Without dsymutil, traces
+    // name no lines.
+    if (!tc.dsymutil.empty()) {
+        std::vector<std::string> gather = {tc.dsymutil, "--flat", "-o", temp_exe + ".dwarf", temp_exe};
+        if (verbose) print_command(gather);
+        if (run_to_file(gather, temp_exe + ".log") == 0) fs::rename(temp_exe + ".dwarf", r.exe + ".dwarf", ec);
+        fs::remove(temp_exe + ".dwarf", ec);
+        fs::remove(temp_exe + ".log", ec);
+    }
+    // ThinLTO's objects, which only dsymutil read: the folder link_program named for this link.
+    fs::remove_all(temp_exe + ".lto", ec);
+#endif
     fs::rename(temp_exe, r.exe, ec);
     if (ec && !file_exists(r.exe)) {
         std::fprintf(stderr, "calx: can't write %s\n", r.exe.c_str());
