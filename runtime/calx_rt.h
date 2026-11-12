@@ -1181,9 +1181,15 @@ CX_INLINE cx_u64 cx_hash_str(cx_str s) { return cx_hash_bytes(s.ptr, s.len); }
 #define CX_NOT_FOUND ((cx_usize)-1)
 
 /* Where the first byte that's `a` or `b` is in `p` up to `end`, or `end`: sixteen bytes at a time
- * with SSE2, which every x86-64 has, so a short part costs no call, as memchr's would. */
+ * with SSE2, which every x86-64 has, or NEON, which every Arm64 has, so a short part costs no call,
+ * as memchr's would. NEON has no pmovmskb: the 16 compares, as eight 16-bit lanes shifted down 4
+ * and cut to their low bytes, which is shrn, give 4 bits a byte (CLX-281). */
 #if defined(__x86_64__)
 typedef char cx_v16 __attribute__((vector_size(16)));
+#elif defined(__aarch64__)
+typedef cx_u8 cx_v16 __attribute__((vector_size(16)));
+typedef cx_u16 cx_v16h __attribute__((vector_size(16)));
+typedef cx_u8 cx_v8 __attribute__((vector_size(8)));
 #endif
 CX_INLINE const cx_u8* cx_find2(const cx_u8* p, const cx_u8* end, cx_u8 a, cx_u8 b) {
 #if defined(__x86_64__)
@@ -1193,6 +1199,17 @@ CX_INLINE const cx_u8* cx_find2(const cx_u8* p, const cx_u8* end, cx_u8 a, cx_u8
         __builtin_memcpy(&v, p, 16);
         int m = __builtin_ia32_pmovmskb128((cx_v16)((v == va) | (v == vb)));
         if (m) return p + __builtin_ctz((unsigned)m);
+        p += 16;
+    }
+#elif defined(__aarch64__)
+    cx_v16 va = (cx_v16){0} + a, vb = (cx_v16){0} + b;
+    while (end - p >= 16) {
+        cx_v16 v;
+        __builtin_memcpy(&v, p, 16);
+        cx_v8 nibbles = __builtin_convertvector((cx_v16h)((v == va) | (v == vb)) >> 4, cx_v8);
+        cx_u64 m;
+        __builtin_memcpy(&m, &nibbles, 8);
+        if (m) return p + (__builtin_ctzll(m) >> 2);
         p += 16;
     }
 #endif
