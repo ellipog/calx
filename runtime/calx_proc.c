@@ -666,6 +666,26 @@ static HANDLE open_null(int reads) {
     return h == INVALID_HANDLE_VALUE ? NULL : h;
 }
 
+/* Takes the process `h` out of power throttling, EcoQoS, so Windows doesn't move it to the
+ * efficiency cores, or run them slower, to save power: ProcessPowerThrottling, 4, at version 1,
+ * the execution speed's control, off. SetProcessInformation is Windows 8's, which headers built
+ * for older Windows don't declare, so it's looked up, once. */
+typedef BOOL(WINAPI* set_info_fn)(HANDLE, int, LPVOID, DWORD);
+
+static void full_speed_win(HANDLE h) {
+    static set_info_fn set_info;
+    static volatile LONG looked;
+    if (!InterlockedCompareExchange(&looked, 0, 0)) {
+        HMODULE k = GetModuleHandleW(L"kernel32.dll");
+        set_info = k ? (set_info_fn)(void*)GetProcAddress(k, "SetProcessInformation") : NULL;
+        InterlockedExchange(&looked, 1);
+    }
+    struct {
+        ULONG version, control, state;
+    } speed = {1, 1, 0};
+    if (set_info) set_info(h, 4, &speed, sizeof speed);
+}
+
 static void fail_win(DWORD e) {
     switch (e) {
     case ERROR_FILE_NOT_FOUND:
@@ -1097,13 +1117,7 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
             fail_win(e);
             goto done;
         }
-        if (sp->full_speed) {
-            /* Out of power throttling, EcoQoS: version 1, the execution speed's control, off. So
-             * Windows doesn't move it to the efficiency cores, or run them slower, to save power.
-             * ProcessPowerThrottling is 4; older SDKs don't name it. */
-            struct { ULONG version, control, state; } speed = {1, 1, 0};
-            SetProcessInformation(pi.hProcess, (PROCESS_INFORMATION_CLASS)4, &speed, sizeof speed);
-        }
+        if (sp->full_speed) full_speed_win(pi.hProcess);
         ResumeThread(pi.hThread);
     }
     CloseHandle(pi.hThread);
@@ -2238,8 +2252,7 @@ cx_i32 cx_proc_set_affinity(const cx_u32* cpus, cx_usize n) {
  * there's none to take it out of. */
 void cx_proc_full_speed(void) {
 #ifdef _WIN32
-    struct { ULONG version, control, state; } speed = {1, 1, 0};
-    SetProcessInformation(GetCurrentProcess(), (PROCESS_INFORMATION_CLASS)4, &speed, sizeof speed);
+    full_speed_win(GetCurrentProcess());
 #endif
 }
 
