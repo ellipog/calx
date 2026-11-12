@@ -9,9 +9,9 @@ import { GITHUB } from '../markdown.mjs';
 	<div>
 		<svg class="mark" viewBox="0 0 128 128" fill="currentColor" aria-hidden="true"><use href="#mark"></use></svg>
 		<p>
-			Calx is a general-purpose compiled language under the MIT license. This site is built from <code>calx/docs</code>{
-				COMMIT && <> at commit <a href={`${GITHUB}/commit/${COMMIT}`}>{COMMIT}</a></>
-			}.
+			Calx is a general-purpose compiled language under the MIT license. This site is built from <a
+				href={`${GITHUB}/tree/${COMMIT || 'main'}/docs`}>calx/docs</a
+			>{COMMIT && <> at commit <a href={`${GITHUB}/commit/${COMMIT}`}>{COMMIT}</a></>}.
 		</p>
 	</div>
 	<div>
@@ -57,18 +57,34 @@ import { GITHUB } from '../markdown.mjs';
 		font-size: 13.5px;
 		max-width: 320px;
 	}
+	/* The source the site is built from, in the sentence: in the code font, underlined as the
+	   docs' links in running text are. */
+	p a {
+		font-family: var(--f-mono);
+		font-size: 0.93em;
+		color: var(--ink-2);
+		text-decoration: underline;
+		text-decoration-color: var(--amber);
+		text-underline-offset: 3px;
+		text-decoration-thickness: 1.5px;
+		white-space: nowrap;
+	}
+	p a:hover {
+		color: var(--amber-ink);
+	}
 	h2 {
 		font: 600 13.5px var(--f-body);
 		color: var(--ink);
 		margin: 4px 0 10px;
 	}
-	a {
+	/* The columns' links, one to a line. */
+	div > a {
 		display: block;
 		text-decoration: none;
 		color: var(--ink-2);
 		padding: 3px 0;
 	}
-	a:hover {
+	div > a:hover {
 		color: var(--ink);
 	}
 	.studio {
