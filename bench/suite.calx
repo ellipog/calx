@@ -36,6 +36,7 @@
 // What it builds and the inputs it writes go in a folder of its own in the temp folder, removed at
 // the end unless --keep. --record writes bench/results/suite-<os>.json with the machine, the
 // toolchains and the commit; with --only or --groups, the benchmarks left out keep their results.
+import dx.{MODULES, c_flags, edit_big, write_big, write_hello, write_ninja}
 import inputs.{make_input}
 import machine.{commit, compiler, exe, machine, now_utc, output_of, repo_root, round_to}
 import std.bytes
@@ -47,6 +48,7 @@ import std.json.{Json, parse, pretty}
 import std.process
 import std.process.{Command}
 import std.stats
+import std.thread
 import std.time.{Instant}
 
 /// Times Calx against C, Rust, Go and Python on the same programs.
@@ -139,6 +141,25 @@ fn benches() -> List<Bench> {
     b.push(bench("csv", "realistic", "CSV report: a million rows summed by group", ["@csv"], ["@csv"]))
     b.push(bench("logs", "realistic", "Log analysis: a million access-log lines", ["@log"], ["@log"]))
     b.push(bench("wordcount", "realistic", "Word count: 5 million words", ["@words"], ["@words"]))
+    b.push(bench("sort", "realistic", "Sorting: 5M integers, 5M doubles, 1M strings", ["@numbers"], ["@numbers"]))
+    b.push(bench("hashmap", "realistic", "Hash maps: 2M integer keys, 500,000 strings", ["@numbers", "2000000"], ["@numbers", "5000"]))
+    b.push(bench("objects", "realistic", "Many small objects: 4M records", ["20", "200000"], ["2", "1000"]))
+    b.push(bench("text", "realistic", "Building and splitting text: a million lines", ["1000000"], ["1000"]))
+    b.push(bench("files", "realistic", "Files: 2,000 written, read and removed", ["@scratch", "2000"], ["@scratch", "50"]))
+    b.push(bench("compress", "realistic", "Compression: gzip, zstd and xz round trips", ["@corpus"], ["@corpus"]))
+    b.push(bench("hash", "realistic", "Hashing: SHA-256 and CRC-32 of 270 MB", ["@corpus"], ["@corpus"]))
+    b.push(bench("png", "realistic", "PNG: a 2,048 by 2,048 image encoded and decoded", ["@rgb", "2048", "2048"], ["@rgb", "256", "256"]))
+    // The parallel ones build C with OpenMP.
+    var par: List<Bench> = []
+    par.push(bench("parmandel", "parallel", "mandelbrot, 6,000 by 6,000", ["6000", "@threads"], ["200", "@threads"]))
+    par.push(bench("parspectral", "parallel", "spectral-norm, n = 5,500", ["5500", "@threads"], ["100", "@threads"]))
+    par.push(bench("parsum", "parallel", "π as a float sum, 2 billion terms", ["2000000000", "@threads"], ["100000", "@threads"]))
+    for p in mut par {
+        p.cflags = ["-fopenmp"]
+    }
+    for p in par {
+        b.push(p.copy())
+    }
     return b
 }
 
@@ -639,12 +660,15 @@ fn why_none(name: String, lang: String) -> String {
         if name == "json" {
             return String("C's standard library has no JSON")
         }
-        if name == "compress" {
+        if name == "compress" or name == "hash" {
             return String("C's standard library has no compression or hashes")
         }
-        if name == "image" {
+        if name == "png" {
             return String("C's standard library has no image formats")
         }
+    }
+    if lang == "python" and name == "png" {
+        return String("Python's standard library has no image formats; Pillow, the usual choice, isn't part of Python")
     }
     if lang == "python" and name.starts_with("par") {
         return String("CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core")
@@ -750,6 +774,380 @@ fn chosen(option: String, all: List<String>, what: String) -> List<String> {
     return if want.is_empty() { all.copy() } else { want }
 }
 
+// Removes a folder this run made under `work`, and nothing else.
+fn remove_mine(path: String, work: String) {
+    if work.len() < 8 or not path.starts_with("{work}/") {
+        stop("won't remove {path}: it isn't in {work}")
+    }
+    if fs.is_dir(path.copy()) {
+        fs.remove_dir_all(path)!
+    }
+}
+
+// Waits, up to 5 s, for a quarter of a second when the rest of the machine used at most BUSY of
+// it, and gives how busy the last quarter was. A build starts programs of its own, whose CPU time
+// can't be told from other programs' while it runs, so builds look before they start instead.
+fn settle() -> f64 {
+    var load = 1.0
+    for _ in 0..20 {
+        let before = cpu_times()
+        unsafe { thread.sleep(250000000) }
+        let after = cpu_times()
+        load = if after.1 > before.1 { f64.nearest(after.0 - before.0) / f64.nearest(after.1 - before.1) } else { 0.0 }
+        if load <= BUSY {
+            return load
+        }
+    }
+    return load
+}
+
+// One timed build: its wall time in ms and how busy the machine was just before, or what went
+// wrong.
+fn build_once(cmd: List<String>, dir: String, envs: List<(String, String)>) -> (f64, f64) ! String {
+    var rest: List<String> = []
+    for k in 1usize..cmd.len() {
+        rest.push(cmd[k].copy())
+    }
+    var c = Command.new(cmd[0].copy()).args(rest).dir(dir).timeout(1800000)
+    for (k, v) in envs {
+        c = c.env(k.copy(), v.copy())
+    }
+    let load = settle()
+    let t0 = unsafe { Instant.now() }
+    let out = match c.output() {
+        ok(o) => o,
+        err(e) => fail "can't run {cmd[0]}: {e}",
+    }
+    let wall = f64.nearest(unsafe { Instant.now() }.nanos_since(t0)) / 1e6
+    if not out.status.success() {
+        let why = "{out.text()}{out.error_text()}".trim()
+        fail "{cmd.join(" ")} {out.status}: {why[..why.len().min(2000usize)]}"
+    }
+    return (wall, load)
+}
+
+// What one build of the dx group needs: the command, where it runs, its environment, and where
+// the program it makes ends up.
+struct BuildCmd {
+    cmd: List<String>
+    dir: String
+    envs: List<(String, String)>
+    made: String
+}
+
+// The build of `lang`'s hello or large program, in debug or release mode, with its caches and
+// objects in `cache`, to `out`.
+fn build_cmd(lang: String, size: String, mode: String, dir: String, cache: String, out: String, calx: String) -> BuildCmd {
+    let release = mode == "release"
+    if lang == "calx" {
+        var cmd: List<String> = [calx.copy(), "build"]
+        if release {
+            cmd.push("--release")
+        }
+        cmd.push(if size == "hello" { "{dir}/hello.calx" } else { "{dir}/main.calx" })
+        cmd.push("-o")
+        cmd.push(out.copy())
+        return BuildCmd { cmd: cmd, dir: dir.copy(), envs: [(String("CALX_CACHE"), cache.copy())], made: out.copy() }
+    }
+    if lang == "c" {
+        if size == "big" {
+            let ninja = write_ninja(dir.copy(), cache.copy(), mode.copy(), out.copy())
+            return BuildCmd { cmd: ["ninja", "--quiet", "-f", ninja], dir: dir.copy(), envs: [], made: out.copy() }
+        }
+        var cmd: List<String> = ["clang"]
+        for f in c_flags(mode.copy()).split(" ") {
+            cmd.push(f.copy())
+        }
+        cmd.push("-fuse-ld=lld")
+        cmd.push("-o")
+        cmd.push(out.copy())
+        cmd.push("{dir}/hello.c")
+        return BuildCmd { cmd: cmd, dir: dir.copy(), envs: [], made: out.copy() }
+    }
+    if lang == "rust" {
+        var cmd: List<String> = ["cargo", "build", "--quiet"]
+        if release {
+            cmd.push("--release")
+        }
+        cmd.push("--manifest-path")
+        cmd.push("{dir}/Cargo.toml")
+        let made = "{cache}/{if release { "release" } else { "debug" }}/{size}{exe()}"
+        return BuildCmd { cmd: cmd, dir: dir.copy(), envs: [(String("CARGO_TARGET_DIR"), cache.copy()), (String("RUSTFLAGS"), String("-C target-cpu=x86-64-v3"))], made: made }
+    }
+    var cmd: List<String> = ["go", "build"]
+    if not release {
+        cmd.push("-gcflags=all=-N -l")
+    }
+    cmd.push("-o")
+    cmd.push(out.copy())
+    cmd.push(".")
+    let envs: List<(String, String)> = [(String("GOCACHE"), cache.copy()), (String("GOAMD64"), String("v3")), (String("CGO_ENABLED"), String("0")), (String("GOTOOLCHAIN"), String("local"))]
+    return BuildCmd { cmd: cmd, dir: dir.copy(), envs: envs, made: out.copy() }
+}
+
+// The dx group's builds: (key, title, size, mode, kind), where kind is how the build starts:
+// "scratch" with every cache empty, "edit" after module 0 changed, "unchanged" with nothing
+// changed.
+fn dx_rows() -> List<(String, String, String, String, String)> {
+    var rows: List<(String, String, String, String, String)> = []
+    for mode in ["debug", "release"] {
+        rows.push(("hello_scratch_{mode}", "hello, from scratch, {mode}", String("hello"), String(mode), String("scratch")))
+    }
+    for kind in ["scratch", "edit", "unchanged"] {
+        for mode in ["debug", "release"] {
+            let how = if kind == "scratch" { String("from scratch") } else if kind == "edit" { String("one module edited") } else { String("nothing changed") }
+            rows.push(("big_{kind}_{mode}", "{MODULES} modules, {how}, {mode}", String("big"), String(mode), String(kind)))
+        }
+    }
+    return rows
+}
+
+// Times building, and starting, small and large programs: the dx group. Gives its record.
+fn dx_group(work: String, langs: List<String>, calx: String, python: String, rounds: u32, processors: u32, single: Pin) -> Json {
+    let base = "{work}/dx"
+    var build_langs: List<String> = []
+    for l in langs {
+        if l != "python" {
+            build_langs.push(l.copy())
+        }
+    }
+    var lines = LinkedMap<String, Json>()
+    for l in build_langs {
+        _ = write_hello(l.copy(), "{base}/{l}/hello")
+        lines.insert(l.copy(), Json.Int(i64.wrap(write_big(l.copy(), "{base}/{l}/big"))))
+    }
+    let py_hello = write_hello(String("python"), "{base}/python/hello")
+
+    // Builds use every processor, as they would on a developer's machine.
+    apply_pin(pin_for(processors, processors))
+    var builds = LinkedMap<String, Json>()
+    var table_rows: List<(String, LinkedMap<String, List<f64>>)> = []
+    var sizes = LinkedMap<String, Json>()
+    var made = LinkedMap<String, String>()
+    var failed = LinkedMap<String, String>()
+    var fresh: u32 = 0
+    var tweak: u32 = 0
+    for (key, title, size, mode, kind) in dx_rows() {
+        println("{title}")
+        if kind == "unchanged" {
+            // calx records the files a build read only once they're 2 s old, in case one was
+            // still being written, so a build right after an edit can't skip yet.
+            unsafe { thread.sleep(3000000000) }
+        }
+        var times = LinkedMap<String, List<f64>>()
+        var loads = LinkedMap<String, List<f64>>()
+        if kind != "scratch" {
+            for l in build_langs {
+                let dir = "{base}/{l}/{size}"
+                let b = build_cmd(l.copy(), size.copy(), mode.copy(), dir, "{base}/{l}/warm-{mode}", "{base}/{l}/warm-{mode}{exe()}", calx.copy())
+                match build_once(b.cmd.copy(), b.dir.copy(), b.envs.copy()) {
+                    ok(_) => {}
+                    err(e) => {
+                        failed.insert("{key}/{l}", e.copy())
+                        eprintln("suite: {title}: {lang_name(l.copy())} didn't build: {e}")
+                    }
+                }
+            }
+        }
+        for r in 0u32..rounds {
+            var order: List<String> = []
+            for k in 0usize..build_langs.len() {
+                order.push(build_langs[if r % 2 == 0 { k } else { build_langs.len() - 1 - k }].copy())
+            }
+            if kind == "edit" {
+                tweak += 1
+            }
+            for l in order {
+                if failed.contains("{key}/{l}") {
+                    continue
+                }
+                let dir = "{base}/{l}/{size}"
+                var cache = "{base}/{l}/warm-{mode}"
+                var out = "{base}/{l}/warm-{mode}{exe()}"
+                if kind == "scratch" {
+                    fresh += 1
+                    cache = "{base}/{l}/scratch-{fresh}"
+                    out = "{base}/{l}/{size}-{mode}{exe()}"
+                }
+                if kind == "edit" {
+                    edit_big(l.copy(), dir.copy(), tweak)
+                }
+                let b = build_cmd(l.copy(), size.copy(), mode.copy(), dir, cache.copy(), out.copy(), calx.copy())
+                match build_once(b.cmd.copy(), b.dir.copy(), b.envs.copy()) {
+                    ok(got) => {
+                        var t: List<f64> = times.remove(l.copy()) ?? []
+                        t.push(got.0)
+                        times.insert(l.copy(), t)
+                        var ld: List<f64> = loads.remove(l.copy()) ?? []
+                        ld.push(got.1)
+                        loads.insert(l.copy(), ld)
+                        if kind == "scratch" {
+                            if b.made != out {
+                                fs.copy(b.made.copy(), out.copy())!
+                            }
+                            made.insert("{size}-{mode}/{l}", out.copy())
+                        }
+                    }
+                    err(e) => {
+                        failed.insert("{key}/{l}", e.copy())
+                        eprintln("suite: {title}: {lang_name(l.copy())} didn't build: {e}")
+                    }
+                }
+                if kind == "scratch" {
+                    remove_mine(cache, work.copy())
+                }
+            }
+        }
+        var row = LinkedMap<String, Json>()
+        row.insert("title", Json.Str(title.copy()))
+        for l in build_langs {
+            var m = LinkedMap<String, Json>()
+            if let e = failed.find("{key}/{l}") {
+                m.insert("status", Json.Str("failed"))
+                m.insert("why", Json.Str(e.copy()))
+            } else {
+                let t: List<f64> = if let v = times.find(l.copy()) { v.copy() } else { [] }
+                m.insert("status", Json.Str("ok"))
+                m.insert("median_ms", Json.Float(round_to(median(t.copy()), 1)))
+                m.insert("best_ms", Json.Float(round_to(best_of(t.copy()), 1)))
+                m.insert("wall_ms", Json.Array(t.map(|v| Json.Float(round_to(v, 1)))))
+                let ld: List<f64> = if let v = loads.find(l.copy()) { v.copy() } else { [] }
+                m.insert("machine_busy", Json.Array(ld.map(|v| Json.Float(round_to(v, 3)))))
+                println("  {lang_name(l.copy())}: {ms(median(t.copy()))} median, {ms(best_of(t.copy()))} best")
+            }
+            row.insert(l.copy(), Json.Object(m))
+        }
+        builds.insert(key.copy(), Json.Object(row))
+        table_rows.push((title.copy(), times))
+    }
+
+    // What the release builds made: their sizes, and that the large program prints the same in
+    // every language.
+    var outputs = LinkedMap<String, String>()
+    var size_of = LinkedMap<String, u64>()
+    for size in ["hello", "big"] {
+        var s = LinkedMap<String, Json>()
+        for l in build_langs {
+            if let p = made.find("{size}-release/{l}") {
+                let size_bytes = fs.metadata(p.copy())!.size
+                size_of.insert("{size}/{l}", size_bytes)
+                s.insert(l.copy(), Json.Int(i64.wrap(size_bytes)))
+                if size == "big" {
+                    if let text = output_of(Command.new(p.copy())) {
+                        outputs.insert(l.copy(), text.trim())
+                    }
+                }
+            }
+        }
+        sizes.insert(String(size), Json.Object(s))
+    }
+    var counts = LinkedMap<String, u32>()
+    for (_, o) in outputs {
+        counts.insert(o.copy(), (counts.get(o.copy()) ?? 0) + 1)
+    }
+    var want = String()
+    var most: u32 = 0
+    for (o, n) in counts {
+        if n > most {
+            most = n
+            want = o.copy()
+        }
+    }
+    var agrees = LinkedMap<String, Json>()
+    for (l, o) in outputs {
+        agrees.insert(l.copy(), Json.Bool(o == want))
+        if o != want {
+            eprintln("suite: the {MODULES}-module program printed {o} in {lang_name(l.copy())}, and {want} in the others")
+        }
+    }
+
+    // Starting: the release hello programs, and Python's, pinned as the single-threaded
+    // benchmarks are.
+    apply_pin(single.copy())
+    var progs: List<Prog> = []
+    for l in langs {
+        if l == "python" {
+            progs.push(new_prog(l.copy(), [python.copy(), "-I", py_hello.copy()], []))
+        } else if let p = made.find("hello-release/{l}") {
+            progs.push(new_prog(l.copy(), [p.copy()], []))
+        }
+    }
+    println("hello, started and run to the end")
+    measure(mut progs, work.copy(), single.copy(), rounds.max(20), String("hello"))
+    var startup = LinkedMap<String, Json>()
+    for p in progs {
+        startup.insert(p.lang.copy(), prog_json(p.copy()))
+        if p.status == "ok" and not p.runs.is_empty() {
+            println("  {lang_name(p.lang.copy())}: {ms(median(walls(p)))} median, {ms(best_of(walls(p)))} best, {mb(median(peaks(p)))}")
+        }
+    }
+
+    println("")
+    println("Builds, the median wall time")
+    println("")
+    var head = String("| Build |")
+    var line = String("| --- |")
+    for l in build_langs {
+        head.push_str(" {lang_name(l.copy())} |")
+        line.push_str(" --- |")
+    }
+    println(head)
+    println(line)
+    for (title, times) in table_rows {
+        var row = "| {title} |"
+        for l in build_langs {
+            if let t = times.find(l.copy()) {
+                row.push_str(" {ms(median(t.copy()))} |")
+            } else {
+                row.push_str(" failed |")
+            }
+        }
+        println(row)
+    }
+    println("")
+    println("Release programs' sizes")
+    println("")
+    println(head.replace("Build", "Program"))
+    println(line)
+    for size in ["hello", "big"] {
+        var row = "| {if size == "hello" { String("hello") } else { "{MODULES} modules" }} |"
+        for l in build_langs {
+            if let n = size_of.get("{size}/{l}") {
+                row.push_str(" {f64.nearest(n) / 1024.0:,.0} KB |")
+            } else {
+                row.push_str(" — |")
+            }
+        }
+        println(row)
+    }
+
+    var r = LinkedMap<String, Json>()
+    r.insert("title", Json.Str("Building and starting programs"))
+    r.insert("group", Json.Str("dx"))
+    r.insert("modules", Json.Int(i64(MODULES)))
+    r.insert("lines", Json.Object(lines))
+    r.insert("builds", Json.Object(builds))
+    r.insert("sizes_bytes", Json.Object(sizes))
+    r.insert("big_output", Json.Str(want))
+    r.insert("big_output_agrees", Json.Object(agrees))
+    r.insert("startup", Json.Object(startup))
+    return Json.Object(r)
+}
+
+// The suite's files that differ from the commit checked out, so a record says when what it
+// measured isn't exactly that commit's.
+fn uncommitted(root: String) -> List<String> {
+    let text = output_of(Command.new("git").args(["status", "--porcelain", "--", "bench/suite", "bench/suite.calx", "bench/inputs.calx", "bench/dx.calx", "bench/machine.calx"]).dir(root)) ?? String()
+    var files: List<String> = []
+    // Each line is a status, then the path; output_of trimmed the first line's leading space.
+    for line in text.lines() {
+        if let parts = line.trim().split_once(" ") {
+            files.push(parts.1.trim())
+        }
+    }
+    return files
+}
+
 // The results `path` holds, if it's there and reads as a record.
 fn kept(path: String) -> Json {
     let ok(read) = fs.read_text(path) else {
@@ -802,6 +1200,12 @@ fn main() {
         }
     }
 
+    // A record names the commit it measured, so it should be measuring exactly that commit.
+    let changed = uncommitted(root.copy())
+    if a.record and not changed.is_empty() {
+        eprintln("suite: recording with uncommitted changes to {changed.join(", ")}; the record lists them")
+    }
+
     let work = fs.temp_dir()!.replace("\\", "/")
     let single = pin_for(1, processors)
     apply_pin(single.copy())
@@ -844,8 +1248,77 @@ fn main() {
         rows.insert(b.group.copy(), g)
     }
 
+    // The parallel benchmarks, at each thread count, pinned to as many processors, and whether
+    // each language printed the same at every count, its `info` lines too.
+    var par_rows: List<(String, List<Prog>)> = []
+    for b in list {
+        if b.group != "parallel" {
+            continue
+        }
+        var r = LinkedMap<String, Json>()
+        r.insert("title", Json.Str(b.title.copy()))
+        r.insert("group", Json.Str(b.group.copy()))
+        r.insert("args", Json.Array((if a.quick { b.quick.copy() } else { b.args.copy() }).map(|s| Json.Str(s.copy()))))
+        r.insert("recorded", Json.Str(now_utc()))
+        r.insert("commit", commit(root.copy()))
+        var by_count = LinkedMap<String, Json>()
+        var outs = LinkedMap<String, List<String>>()
+        for t in thread_counts {
+            let pin = pin_for(t, processors)
+            apply_pin(pin.copy())
+            let args = resolve(if a.quick { b.quick.copy() } else { b.args.copy() }, mut inputs, work.copy(), a.quick, "{t}")
+            var progs = progs_for(b.copy(), langs.copy(), built.copy(), python.copy(), args, t)
+            let title = if t == 1 { "{b.title}, 1 thread" } else { "{b.title}, {t} threads" }
+            println(title)
+            measure(mut progs, work.copy(), pin.copy(), rounds, title.copy())
+            var per = LinkedMap<String, Json>()
+            for p in progs {
+                if p.status == "ok" and not p.runs.is_empty() {
+                    println("  {lang_name(p.lang.copy())}: {ms(median(walls(p)))} median, {ms(best_of(walls(p)))} best, {mb(median(peaks(p)))}, {p.runs.len()} runs, {p.again} repeated")
+                    var seen: List<String> = outs.remove(p.lang.copy()) ?? []
+                    seen.push(p.out.copy())
+                    outs.insert(p.lang.copy(), seen)
+                }
+                per.insert(p.lang.copy(), prog_json(p.copy()))
+            }
+            by_count.insert("{t}", Json.Object(per))
+            par_rows.push((title, progs))
+        }
+        var same = LinkedMap<String, Json>()
+        for (l, seen) in outs {
+            if seen.len() == thread_counts.len() {
+                var all_same = true
+                for o in seen {
+                    if o != seen[0] {
+                        all_same = false
+                    }
+                }
+                same.insert(l.copy(), Json.Bool(all_same))
+                println("  {lang_name(l.copy())}: {if all_same { "the same output at every thread count" } else { "output that changes with the thread count" }}")
+            }
+        }
+        r.insert("threads", Json.Object(by_count))
+        r.insert("same_output_at_every_count", Json.Object(same))
+        results.insert(b.name.copy(), Json.Object(r))
+    }
+    apply_pin(single.copy())
+
+    var dx_record = Json.Null
+    if groups.contains("dx") and a.only.is_empty() {
+        dx_record = dx_group(work.copy(), langs.copy(), calx.copy(), python.copy(), rounds, processors, single.copy())
+    }
+
     for (group, g) in rows {
         table(if group == "compute" { String("Classic compute") } else { String("Realistic programs") }, g.copy(), langs.copy())
+    }
+    if not par_rows.is_empty() {
+        var par_langs: List<String> = []
+        for l in langs {
+            if l != "python" {
+                par_langs.push(l.copy())
+            }
+        }
+        table(String("Parallel loops"), par_rows, par_langs)
     }
 
     if a.record and not a.quick {
@@ -864,9 +1337,17 @@ fn main() {
                 }
             }
         }
+        if dx_record != Json.Null {
+            merged.insert("dx", dx_record)
+        } else if let j = old.get("dx") {
+            merged.insert("dx", j)
+        }
         var r = LinkedMap<String, Json>()
         r.insert("recorded", Json.Str(now_utc()))
         r.insert("commit", commit(root.copy()))
+        if not changed.is_empty() {
+            r.insert("uncommitted", Json.Array(changed.map(|f| Json.Str(f.copy()))))
+        }
         r.insert("machine", machine())
         r.insert("toolchain", toolchains(calx.copy(), python.copy()))
         r.insert("rounds", Json.Int(i64(a.rounds)))

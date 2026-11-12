@@ -20,6 +20,13 @@ regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 csv = "1"
+flate2 = "1"
+zstd = "0.13"
+xz2 = "0.1"
+sha2 = "0.10"
+crc32fast = "1"
+png = "0.17"
+rayon = "1"
 
 [[bin]]
 name = "nbody"
@@ -76,3 +83,47 @@ path = "../logs/logs.rs"
 [[bin]]
 name = "wordcount"
 path = "../wordcount/wordcount.rs"
+
+[[bin]]
+name = "sort"
+path = "../sort/sort.rs"
+
+[[bin]]
+name = "hashmap"
+path = "../hashmap/hashmap.rs"
+
+[[bin]]
+name = "objects"
+path = "../objects/objects.rs"
+
+[[bin]]
+name = "text"
+path = "../text/text.rs"
+
+[[bin]]
+name = "files"
+path = "../files/files.rs"
+
+[[bin]]
+name = "compress"
+path = "../compress/compress.rs"
+
+[[bin]]
+name = "hash"
+path = "../hash/hash.rs"
+
+[[bin]]
+name = "png"
+path = "../png/png.rs"
+
+[[bin]]
+name = "parmandel"
+path = "../parmandel/parmandel.rs"
+
+[[bin]]
+name = "parspectral"
+path = "../parspectral/parspectral.rs"
+
+[[bin]]
+name = "parsum"
+path = "../parsum/parsum.rs"

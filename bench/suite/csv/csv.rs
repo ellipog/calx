@@ -16,8 +16,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut reader = csv::Reader::from_path(path)?;
     let mut groups: HashMap<String, Group> = HashMap::new();
     let mut months = [0.0f64; 13];
-    for result in reader.records() {
-        let row = result?;
+    // One record, read into again for each row, as Calx's reader reads into one list.
+    let mut row = csv::StringRecord::new();
+    while reader.read_record(&mut row)? {
         let quantity: i64 = row[3].parse()?;
         let revenue = quantity as f64 * row[4].parse::<f64>()?;
         let g = groups.entry(format!("{}|{}", &row[1], &row[2])).or_default();

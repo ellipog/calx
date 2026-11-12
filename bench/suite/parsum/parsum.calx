@@ -1,0 +1,32 @@
+// Parallel float sum: π by the midpoint rule, 4 / (1 + x²) over n strips, the classic OpenMP
+// reduction example, summed on the given number of threads. A `parallel for` can't add to a shared
+// total, so the idiom gives each of 1,024 chunks its own sum and adds those in order after the
+// loop. The split is the program's, not the runtime's, so the bits are the same at any thread
+// count. Rust uses Rayon's `sum`, C an OpenMP `reduction`, and Go one partial sum per goroutine.
+import std.env.{args}
+import std.pool
+
+const CHUNKS: usize = 1024
+
+fn main() {
+    let given = args()
+    let n = usize.parse(given[0].copy()) ?? 1000
+    pool.set_workers(usize.parse(given[1].copy()) ?? 1)
+    let step = 1.0 / f64.nearest(n)
+    var sums: List<f64> = [0.0; CHUNKS]
+    parallel for c in 0usize..CHUNKS {
+        var s = 0.0
+        for i in c * n / CHUNKS..(c + 1) * n / CHUNKS {
+            let x = (f64.nearest(i) + 0.5) * step
+            s += 4.0 / (1.0 + x * x)
+        }
+        sums[c] = s
+    }
+    var total = 0.0
+    for s in sums {
+        total += s
+    }
+    let pi = total * step
+    println("{pi:.6}")
+    println("info bits {pi.to_bits():016x}")
+}

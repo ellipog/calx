@@ -1,0 +1,42 @@
+// Many files: 2,000 files of 1 to 16 KB written into 20 folders, read back and their bytes added
+// up, then removed with their folders, through the language's own file functions.
+import std.env.{args}
+import std.fs
+
+fn main() {
+    let given = args()
+    let root = "{given[0]}/run"
+    let files = usize.parse(given[1].copy()) ?? 2000
+    var pattern: List<u8> = []
+    for j in 0usize..16384 + 251 {
+        pattern.push(u8.wrap(j % 251))
+    }
+    fs.make_dir(root.copy())!
+    for d in 0..20 {
+        fs.make_dir("{root}/d{d}")!
+    }
+    var written: usize = 0
+    for i in 0usize..files {
+        let size = 1024 + (i * 7919) % 15000
+        let from = i % 251
+        fs.write("{root}/d{i % 20}/f{i}.bin", pattern[from..from + size])!
+        written += size
+    }
+    var sum: u64 = 0
+    var read: usize = 0
+    for i in 0usize..files {
+        let data = fs.read("{root}/d{i % 20}/f{i}.bin")!
+        read += data.len()
+        for b in data {
+            sum += u64(b)
+        }
+    }
+    for i in 0usize..files {
+        fs.remove_file("{root}/d{i % 20}/f{i}.bin")!
+    }
+    for d in 0..20 {
+        fs.remove_dir("{root}/d{d}")!
+    }
+    fs.remove_dir(root)!
+    println("files {files}\nwritten {written}\nread {read}\nsum {sum}")
+}

@@ -22,10 +22,73 @@ pub fn make_input(kind: String, dir: String, quick: bool) -> String {
         fs.write_text(path.copy(), access_log(if quick { 2000 } else { 1000000 }))!
     } else if kind == "words" {
         fs.write_text(path.copy(), words(if quick { 20000 } else { 5000000 }))!
+    } else if kind == "numbers" {
+        // A folder: ints.bin and floats.bin, each n little-endian 8-byte numbers, and strings.txt,
+        // a line each.
+        let folder = "{dir}/numbers{if quick { "-quick" } else { "" }}"
+        numbers(folder.copy(), if quick { 20000 } else { 5000000 }, if quick { 5000 } else { 1000000 })
+        return folder
+    } else if kind == "corpus" {
+        // What the compressors and hashes take: 130,000 lines of access log, about 17 MB.
+        fs.write_text(path.copy(), access_log(if quick { 2000 } else { 130000 }))!
+    } else if kind == "rgb" {
+        // An image's pixels, three bytes each, row by row: 2,048 by 2,048, or 256 by 256.
+        fs.write(path.copy(), rgb(if quick { 256 } else { 2048 }))!
+    } else if kind == "scratch" {
+        // An empty folder for a program to write files in, and remove them from.
+        let folder = "{dir}/scratch"
+        fs.make_dir_all(folder.copy())!
+        return folder
     } else {
         stop("there's no input `{kind}`")
     }
     return path
+}
+
+fn numbers(folder: String, n: u64, strings: u64) {
+    fs.make_dir_all(folder.copy())!
+    var rng = Rng { s: 5150 }
+    var ints: List<u8> = []
+    var floats: List<u8> = []
+    ints.reserve(usize.wrap(n * 8))
+    floats.reserve(usize.wrap(n * 8))
+    for _ in 0u64..n {
+        let v = rng.next() >> 1
+        for k in 0u64..8 {
+            ints.push(u8.wrap(v >> (k * 8)))
+        }
+        let f = f64.nearest(rng.next() >> 11) / 9007199254740992.0 * 1000000.0
+        let bits = f.to_bits()
+        for k in 0u64..8 {
+            floats.push(u8.wrap(bits >> (k * 8)))
+        }
+    }
+    fs.write("{folder}/ints.bin", ints)!
+    fs.write("{folder}/floats.bin", floats)!
+    var text = String()
+    for _ in 0u64..strings {
+        let len = 8 + rng.below(9)
+        for _ in 0u64..len {
+            text.push(rune(u8.wrap(97 + rng.below(26))))
+        }
+        text.push('\n')
+    }
+    fs.write_text("{folder}/strings.txt", text)!
+}
+
+fn rgb(size: usize) -> List<u8> {
+    var rng = Rng { s: 2048 }
+    var px: List<u8> = []
+    px.reserve(size * size * 3)
+    for y in 0usize..size {
+        for x in 0usize..size {
+            let noise = rng.next() >> 62
+            px.push(u8.wrap(u64(x) + noise))
+            px.push(u8.wrap(y))
+            px.push(u8.wrap(u64((x * x + y * y) >> 6) + noise))
+        }
+    }
+    return px
 }
 
 // xorshift64*, from a seed, for the inputs: the same numbers everywhere.

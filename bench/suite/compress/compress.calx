@@ -1,0 +1,24 @@
+// Compression: 17 MB of access log compressed and decompressed with gzip at level 6 and zstd at
+// level 3, and its first 4 MiB with xz at preset 6, each checked against the original. The sizes
+// differ by library, so they're printed as `info` lines, which the runner keeps but doesn't
+// compare. Calx uses std.zlib, std.zstd and std.xz; Rust flate2, the zstd crate and xz2; Go
+// compress/gzip, klauspost/compress and ulikunitz/xz; Python gzip, compression.zstd and lzma.
+import std.env.{args}
+import std.fs
+import std.xz
+import std.zlib
+import std.zlib.{Format}
+import std.zstd
+
+fn main() {
+    let data = fs.read(args()[0].copy())!
+    let gz = zlib.compress(data, Format.Gzip, 6)
+    let gz_back = zlib.decompress(gz, Format.Gzip, data.len())!
+    let zs = zstd.compress(data, 3)
+    let zs_back = zstd.decompress(zs)!
+    let part = data[..4194304usize.min(data.len())]
+    let x = xz.compress(part, 6)
+    let x_back = xz.decompress(x)!
+    println("gzip {gz_back == data}\nzstd {zs_back == data}\nxz {x_back == part}")
+    println("info gzip {gz.len()}\ninfo zstd {zs.len()}\ninfo xz {x.len()}")
+}

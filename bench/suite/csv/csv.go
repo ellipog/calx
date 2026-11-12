@@ -26,6 +26,8 @@ func main() {
 	}
 	defer f.Close()
 	reader := csv.NewReader(bufio.NewReader(f))
+	// One row, read into again for each row, as Calx's reader reads into one list.
+	reader.ReuseRecord = true
 	if _, err := reader.Read(); err != nil {
 		panic(err)
 	}

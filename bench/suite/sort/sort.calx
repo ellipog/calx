@@ -1,0 +1,35 @@
+// Sorting: 5 million 64-bit integers and 5 million doubles read from binary files, and a million
+// strings read a line each, each list sorted with the language's own sort and eleven evenly
+// spaced elements printed.
+import std.bytes
+import std.env.{args}
+import std.fs
+
+fn main() {
+    let dir = args()[0].copy()
+    let ib = fs.read("{dir}/ints.bin")!
+    var ints: List<i64> = []
+    ints.reserve(ib.len() / 8)
+    for i in 0usize..ib.len() / 8 {
+        ints.push(bytes.i64_le(ib, i * 8))
+    }
+    let fb = fs.read("{dir}/floats.bin")!
+    var floats: List<f64> = []
+    floats.reserve(fb.len() / 8)
+    for i in 0usize..fb.len() / 8 {
+        floats.push(bytes.f64_le(fb, i * 8))
+    }
+    let text = fs.read_text("{dir}/strings.txt")! ?? String()
+    var strings = text.lines()
+
+    ints.sort()
+    floats.sort_by(|a, b| a.total_cmp(b))
+    strings.sort()
+
+    for k in 0usize..11 {
+        let i = (k * ints.len() / 10).min(ints.len() - 1)
+        let f = (k * floats.len() / 10).min(floats.len() - 1)
+        let s = (k * strings.len() / 10).min(strings.len() - 1)
+        println("{ints[i]} {floats[f]:.6} {strings[s]}")
+    }
+}

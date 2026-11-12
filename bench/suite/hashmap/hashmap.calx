@@ -1,0 +1,61 @@
+// Hash maps: 2 million integer keys inserted, 4 million looked up, half of them missing, every
+// other key removed and all looked up again, and the values summed; then 500,000 string keys
+// inserted and a million looked up. Each language uses its standard map with its default hash.
+import std.bytes
+import std.env.{args}
+import std.fs
+
+fn main() {
+    let dir = args()[0].copy()
+    let ib = fs.read("{dir}/ints.bin")!
+    var ints: List<i64> = []
+    for i in 0usize..ib.len() / 8 {
+        ints.push(bytes.i64_le(ib, i * 8))
+    }
+    let n = usize.parse(args()[1].copy()) ?? 2000000
+    var m = Map<i64, i64>()
+    for i in 0usize..n {
+        m.insert(ints[i], i64.wrap(i))
+    }
+    var hits: i64 = 0
+    var sum: i64 = 0
+    for i in 0usize..2 * n {
+        if let v = m.find(ints[i]) {
+            hits += 1
+            sum += v
+        }
+    }
+    println("inserted {m.len()}\nfound {hits} {sum}")
+    for i in 0usize..n {
+        if i % 2 == 0 {
+            _ = m.remove(ints[i])
+        }
+    }
+    hits = 0
+    for i in 0usize..n {
+        if m.contains(ints[i]) {
+            hits += 1
+        }
+    }
+    var total: i64 = 0
+    for (_, v) in m {
+        total += v
+    }
+    println("left {m.len()} {hits} {total}")
+
+    let text = fs.read_text("{dir}/strings.txt")! ?? String()
+    let strings = text.lines()
+    var s = Map<String, i64>()
+    for i in 0usize..strings.len() / 2 {
+        s.insert(strings[i].copy(), i64.wrap(i))
+    }
+    hits = 0
+    sum = 0
+    for w in strings {
+        if let v = s.find(w) {
+            hits += 1
+            sum += v
+        }
+    }
+    println("strings {s.len()} {hits} {sum}")
+}

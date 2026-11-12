@@ -1,0 +1,45 @@
+// Parallel spectral-norm: the Benchmarks Game's power method at n = 5,500, each of its 40
+// matrix-vector products split by rows across the given number of threads. Each element is summed
+// in order by one thread, so every language gets the same digits at any thread count. Calx uses
+// `parallel for`, Rust Rayon, Go goroutines and C OpenMP.
+import std.env.{args}
+import std.pool
+
+fn a(i: usize, j: usize) -> f64 {
+    let ij = i + j
+    return 1.0 / f64.nearest(ij * (ij + 1) / 2 + i + 1)
+}
+
+fn times(v: List<f64>, out: mut List<f64>, transposed: bool) {
+    let n = v.len()
+    parallel for i in 0usize..n {
+        var s = 0.0
+        for j in 0usize..n {
+            s += (if transposed { a(j, i) } else { a(i, j) }) * v[j]
+        }
+        out[i] = s
+    }
+}
+
+fn main() {
+    let given = args()
+    let n = usize.parse(given[0].copy()) ?? 100
+    pool.set_workers(usize.parse(given[1].copy()) ?? 1)
+    var u: List<f64> = [1.0; n]
+    var v: List<f64> = [0.0; n]
+    var tmp: List<f64> = [0.0; n]
+    for _ in 0..10 {
+        times(u, mut tmp, false)
+        times(tmp, mut v, true)
+        times(v, mut tmp, false)
+        times(tmp, mut u, true)
+    }
+    var vbv = 0.0
+    var vv = 0.0
+    for i in 0usize..n {
+        vbv += u[i] * v[i]
+        vv += v[i] * v[i]
+    }
+    println("{(vbv / vv).sqrt():.9}")
+    println("info bits {(vbv / vv).sqrt().to_bits():016x}")
+}

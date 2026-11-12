@@ -1,0 +1,65 @@
+// Parallel mandelbrot: the Benchmarks Game's bitmap, 6,000 by 6,000, its rows computed at once on
+// the given number of threads, and the bitmap's FNV-1a hash printed. Calx uses `parallel for`,
+// Rust Rayon, Go goroutines and C OpenMP.
+import std.env.{args}
+import std.pool
+
+fn row(y: usize, n: usize) -> List<u8> {
+    let size = f64.nearest(n)
+    let ci = 2.0 * f64.nearest(y) / size - 1.0
+    var bits: List<u8> = [0; (n + 7) / 8]
+    var acc: u32 = 0
+    var count: u32 = 0
+    var at: usize = 0
+    for x in 0usize..n {
+        let cr = 2.0 * f64.nearest(x) / size - 1.5
+        var zr = 0.0
+        var zi = 0.0
+        var tr = 0.0
+        var ti = 0.0
+        var i = 0
+        while i < 50 and tr + ti <= 4.0 {
+            zi = 2.0 * zr * zi + ci
+            zr = tr - ti + cr
+            tr = zr * zr
+            ti = zi * zi
+            i += 1
+        }
+        acc = acc << 1
+        if tr + ti <= 4.0 {
+            acc |= 1
+        }
+        count += 1
+        if count == 8 {
+            bits[at] = u8.wrap(acc)
+            at += 1
+            acc = 0
+            count = 0
+        } else if x == n - 1 {
+            bits[at] = u8.wrap(acc << u32.wrap(8 - n % 8))
+            acc = 0
+            count = 0
+        }
+    }
+    return bits
+}
+
+fn main() {
+    let given = args()
+    let n = usize.parse(given[0].copy()) ?? 200
+    pool.set_workers(usize.parse(given[1].copy()) ?? 1)
+    var rows: List<List<u8>> = []
+    for _ in 0usize..n {
+        rows.push([])
+    }
+    parallel for y in 0usize..n {
+        rows[y] = row(y, n)
+    }
+    var h: u64 = 0xcbf29ce484222325
+    for r in rows {
+        for b in r {
+            h = (h ^ u64(b)) * 0x100000001b3
+        }
+    }
+    println("P4 {n} {n}\nfnv1a {h:016x}")
+}

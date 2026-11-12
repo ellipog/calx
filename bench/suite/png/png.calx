@@ -1,0 +1,18 @@
+// PNG: a 2,048 by 2,048 RGB image, 12 MB of pixels, encoded as a PNG at the library's default
+// setting and decoded again, and the pixels checked against the original. The files' sizes differ
+// by library, so they're printed as an `info` line. Calx uses std.image.png, Rust the png crate,
+// and Go image/png. Python has no PNG in its standard library.
+import std.env.{args}
+import std.fs
+import std.image.png
+
+fn main() {
+    let given = args()
+    let pixels = fs.read(given[0].copy())!
+    let width = usize.parse(given[1].copy()) ?? 0
+    let height = usize.parse(given[2].copy()) ?? 0
+    let file = png.encode(width, height, 3, pixels)
+    let back = png.decode(file)!
+    println("png {back.width}x{back.height} {back.pixels == pixels}")
+    println("info png {file.len()}")
+}

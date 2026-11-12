@@ -1,0 +1,44 @@
+// Many small objects: 20 rounds of 200,000 records, each with an id, a name made with formatting
+// and a list of 1 to 8 numbers, three allocations a record. Each round's records are summed, one
+// in 16 kept for the rest of the run, and the others freed.
+import std.env.{args}
+
+struct Record {
+    id: i64
+    name: String
+    values: List<i64>
+}
+
+fn main() {
+    let given = args()
+    let rounds = i64.parse(given[0].copy()) ?? 20
+    let per = i64.parse(given[1].copy()) ?? 200000
+    var kept: List<Record> = []
+    var total: i64 = 0
+    for round in 0i64..rounds {
+        var batch: List<Record> = []
+        for i in 0i64..per {
+            let id = round * per + i
+            var values: List<i64> = []
+            for k in 1i64..2 + id % 8 {
+                values.push(id * k)
+            }
+            batch.push(Record { id: id, name: "item-{id}", values: values })
+        }
+        for r in batch {
+            total += r.values.sum() + i64.wrap(r.name.len())
+        }
+        while let r = batch.pop() {
+            if r.id % 16 == 0 {
+                kept.push(r)
+            }
+        }
+    }
+    var names: usize = 0
+    var values: i64 = 0
+    for r in kept {
+        names += r.name.len()
+        values += r.values.sum()
+    }
+    println("total {total}\nkept {kept.len()} {names} {values}")
+}

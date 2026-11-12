@@ -1,0 +1,21 @@
+// Hashing: 17 MB of access log fed 16 times, 270 MB in all, through SHA-256 and through CRC-32,
+// each carried on from one pass to the next. Calx uses std.hash and std.zlib's crc32; Rust the sha2
+// and crc32fast crates; Go crypto/sha256 and hash/crc32; Python hashlib and zlib.crc32.
+import std.env.{args}
+import std.bytes
+import std.fs
+import std.hash.{Algorithm, Digest}
+import std.zlib.{crc32_range}
+
+fn main() {
+    let data = fs.read(args()[0].copy())!
+    var d = Digest.new(Algorithm.Sha256)
+    for _ in 0..16 {
+        d.add(data)
+    }
+    var crc: u32 = 0
+    for _ in 0..16 {
+        crc = crc32_range(data, 0, data.len(), crc)
+    }
+    println("sha256 {bytes.hex(d.finish())}\ncrc32 {crc:08x}")
+}

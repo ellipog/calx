@@ -1,0 +1,563 @@
+// The programs bench/suite.calx's dx group builds, in Calx, C, Rust and Go: a hello program, and a
+// large one of 64 modules of about 150 lines each, the shape bench/build.calx gives Calx alone.
+//
+// Each module m<i> has a struct with a list of strings and two methods, an enum with three kinds
+// and a match on it, and eight small hashing loops, and its `score` calls the one in the module
+// before it, so the program needs every module. Each language writes the same code its own way: a
+// module is a Calx module, a C file with its header, a Rust module in one crate, and a Go file in
+// one package, since a Go package, not a file, is what Go compiles at once. The program prints
+// `score63(40)`, which every language must agree on.
+//
+// An edit rewrites module 0 with a different constant in its hashing loops, so the program built
+// after it is different.
+import std.fs
+
+pub const MODULES: u32 = 64
+
+// The release profile bench/suite/rust uses, and the dev profile as Cargo has it.
+const RUST_PROFILE: str = #"
+    [profile.release]
+    opt-level = 3
+    lto = "thin"
+    codegen-units = 1
+    panic = "abort"
+    "#
+
+// The release flags bench/suite builds C with, and those of a debug build.
+pub fn c_flags(mode: String) -> String {
+    return if mode == "release" {
+        String("-O3 -march=x86-64-v3 -ffp-contract=off -fno-math-errno -flto=thin")
+    } else {
+        String("-O0 -g")
+    }
+}
+
+fn calx_module(i: u32, tweak: u32) -> String {
+    var s = String()
+    if i > 0 {
+        s.push_str(#"import m#{i - 1}.{score#{i - 1}}"#)
+        s.push_str("\n\n")
+    }
+    let head = #"
+        pub struct Thing#{i} {
+            pub id: i32,
+            pub weight: f64,
+            pub tags: List<String>,
+        }
+
+        enum Kind#{i} {
+            Small
+            Large(i32)
+            Named(String)
+        }
+
+        impl Thing#{i} {
+            pub fn new(id: i32) -> Thing#{i} {
+                var tags = List<String>()
+                tags.push("t{id}")
+                return Thing#{i} { id: id, weight: f64(id) * 1.5, tags: tags }
+            }
+
+            pub fn heavier(self, other: Thing#{i}) -> bool {
+                return self.weight > other.weight
+            }
+        }
+
+        fn kind_of(n: i32) -> Kind#{i} {
+            if n < 10 {
+                return Kind#{i}.Small
+            }
+            if n < 100 {
+                return Kind#{i}.Large(n)
+            }
+            return Kind#{i}.Named("n{n}")
+        }
+
+        fn rank(k: Kind#{i}) -> i32 {
+            return match k {
+                Small => 1,
+                Large(n) => n % 7,
+                Named(s) => i32.wrap(s.len()),
+            }
+        }
+        "#
+    s.push_str(head)
+    s.push_str("\n")
+    for j in 0u32..8 {
+        let helper = #"
+
+            fn mix#{j}(x: i64, k: i64) -> i64 {
+                var h = x
+                for r in 0i64..k {
+                    h = (h ^ (r + #{j + tweak})) % 1000003 * 31
+                    if h % 3 == 0 {
+                        h += r
+                    }
+                }
+                return h
+            }
+            "#
+        s.push_str(helper)
+        s.push_str("\n")
+    }
+    let score = #"
+
+        pub fn score#{i}(n: i32) -> i64 {
+            var total: i64 = 0
+            var things = List<Thing#{i}>()
+            for j in 0..n {
+                things.push(Thing#{i}.new(j))
+            }
+            for j in 0usize..things.len() {
+                total += i64(rank(kind_of(things[j].id))) + i64.saturate(things[j].weight)
+                if j > 0 and things[j].heavier(things[j - 1]) {
+                    total += i64.wrap(things[j].tags.len())
+                }
+            }
+        "#
+    s.push_str(score)
+    s.push_str("\n")
+    if i > 0 {
+        s.push_str("    total += score{i - 1}(n / 2)\n")
+    }
+    for j in 0u32..8 {
+        s.push_str("    total = mix{j}(total, i64(n))\n")
+    }
+    s.push_str("    return total\n\}\n")
+    return s
+}
+
+fn c_module(i: u32, tweak: u32) -> String {
+    var s = String("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n")
+    s.push_str("#include \"m{i}.h\"\n")
+    if i > 0 {
+        s.push_str("#include \"m{i - 1}.h\"\n")
+    }
+    let head = #"
+
+        typedef struct {
+            int id;
+            double weight;
+            char **tags;
+            size_t ntags;
+        } Thing#{i};
+
+        enum { SMALL, LARGE, NAMED };
+
+        typedef struct {
+            int tag;
+            int n;
+            char *s;
+        } Kind;
+
+        static char *format_int(const char *prefix, int n) {
+            char buf[32];
+            int len = snprintf(buf, sizeof buf, "%s%d", prefix, n);
+            char *s = malloc((size_t)len + 1);
+            memcpy(s, buf, (size_t)len + 1);
+            return s;
+        }
+
+        static Thing#{i} thing_new(int id) {
+            Thing#{i} t;
+            t.id = id;
+            t.weight = (double)id * 1.5;
+            t.tags = malloc(sizeof(char *));
+            t.tags[0] = format_int("t", id);
+            t.ntags = 1;
+            return t;
+        }
+
+        static int thing_heavier(const Thing#{i} *t, const Thing#{i} *other) {
+            return t->weight > other->weight;
+        }
+
+        static void thing_free(Thing#{i} *t) {
+            for (size_t k = 0; k < t->ntags; k++) free(t->tags[k]);
+            free(t->tags);
+        }
+
+        static Kind kind_of(int n) {
+            Kind k = {SMALL, 0, NULL};
+            if (n < 10) return k;
+            if (n < 100) {
+                k.tag = LARGE;
+                k.n = n;
+                return k;
+            }
+            k.tag = NAMED;
+            k.s = format_int("n", n);
+            return k;
+        }
+
+        static int rank(Kind k) {
+            switch (k.tag) {
+            case SMALL:
+                return 1;
+            case LARGE:
+                return k.n % 7;
+            default: {
+                int len = (int)strlen(k.s);
+                free(k.s);
+                return len;
+            }
+            }
+        }
+        "#
+    s.push_str(head)
+    s.push_str("\n")
+    for j in 0u32..8 {
+        let helper = #"
+
+            static long long mix#{j}(long long x, long long k) {
+                long long h = x;
+                for (long long r = 0; r < k; r++) {
+                    h = (h ^ (r + #{j + tweak})) % 1000003 * 31;
+                    if (h % 3 == 0) h += r;
+                }
+                return h;
+            }
+            "#
+        s.push_str(helper)
+        s.push_str("\n")
+    }
+    let score = #"
+
+        long long score#{i}(int n) {
+            long long total = 0;
+            Thing#{i} *things = malloc(sizeof(Thing#{i}) * (size_t)(n > 0 ? n : 1));
+            for (int j = 0; j < n; j++) things[j] = thing_new(j);
+            for (int j = 0; j < n; j++) {
+                total += (long long)rank(kind_of(things[j].id)) + (long long)things[j].weight;
+                if (j > 0 && thing_heavier(&things[j], &things[j - 1])) total += (long long)things[j].ntags;
+            }
+            for (int j = 0; j < n; j++) thing_free(&things[j]);
+            free(things);
+        "#
+    s.push_str(score)
+    s.push_str("\n")
+    if i > 0 {
+        s.push_str("    total += score{i - 1}(n / 2);\n")
+    }
+    for j in 0u32..8 {
+        s.push_str("    total = mix{j}(total, n);\n")
+    }
+    s.push_str("    return total;\n\}\n")
+    return s
+}
+
+fn rust_module(i: u32, tweak: u32) -> String {
+    var s = String()
+    if i > 0 {
+        s.push_str("use crate::m{i - 1}::score{i - 1};\n\n")
+    }
+    let head = #"
+        pub struct Thing#{i} {
+            pub id: i32,
+            pub weight: f64,
+            pub tags: Vec<String>,
+        }
+
+        enum Kind#{i} {
+            Small,
+            Large(i32),
+            Named(String),
+        }
+
+        impl Thing#{i} {
+            pub fn new(id: i32) -> Thing#{i} {
+                let mut tags = Vec::new();
+                tags.push(format!("t{}", id));
+                Thing#{i} { id, weight: id as f64 * 1.5, tags }
+            }
+
+            pub fn heavier(&self, other: &Thing#{i}) -> bool {
+                self.weight > other.weight
+            }
+        }
+
+        fn kind_of(n: i32) -> Kind#{i} {
+            if n < 10 {
+                return Kind#{i}::Small;
+            }
+            if n < 100 {
+                return Kind#{i}::Large(n);
+            }
+            Kind#{i}::Named(format!("n{}", n))
+        }
+
+        fn rank(k: Kind#{i}) -> i32 {
+            match k {
+                Kind#{i}::Small => 1,
+                Kind#{i}::Large(n) => n % 7,
+                Kind#{i}::Named(s) => s.len() as i32,
+            }
+        }
+        "#
+    s.push_str(head)
+    s.push_str("\n")
+    for j in 0u32..8 {
+        let helper = #"
+
+            fn mix#{j}(x: i64, k: i64) -> i64 {
+                let mut h = x;
+                for r in 0..k {
+                    h = (h ^ (r + #{j + tweak})) % 1000003 * 31;
+                    if h % 3 == 0 {
+                        h += r;
+                    }
+                }
+                h
+            }
+            "#
+        s.push_str(helper)
+        s.push_str("\n")
+    }
+    let score = #"
+
+        pub fn score#{i}(n: i32) -> i64 {
+            let mut total: i64 = 0;
+            let mut things = Vec::new();
+            for j in 0..n {
+                things.push(Thing#{i}::new(j));
+            }
+            for j in 0..things.len() {
+                total += rank(kind_of(things[j].id)) as i64 + things[j].weight as i64;
+                if j > 0 && things[j].heavier(&things[j - 1]) {
+                    total += things[j].tags.len() as i64;
+                }
+            }
+        "#
+    s.push_str(score)
+    s.push_str("\n")
+    if i > 0 {
+        s.push_str("    total += score{i - 1}(n / 2);\n")
+    }
+    for j in 0u32..8 {
+        s.push_str("    total = mix{j}(total, n as i64);\n")
+    }
+    s.push_str("    total\n\}\n")
+    return s
+}
+
+fn go_module(i: u32, tweak: u32) -> String {
+    let head = #"
+        package main
+
+        import "fmt"
+
+        type Thing#{i} struct {
+        	ID     int32
+        	Weight float64
+        	Tags   []string
+        }
+
+        const (
+        	small#{i} = iota
+        	large#{i}
+        	named#{i}
+        )
+
+        type kind#{i} struct {
+        	tag int
+        	n   int32
+        	s   string
+        }
+
+        func newThing#{i}(id int32) Thing#{i} {
+        	tags := []string{}
+        	tags = append(tags, fmt.Sprintf("t%d", id))
+        	return Thing#{i}{ID: id, Weight: float64(id) * 1.5, Tags: tags}
+        }
+
+        func (t *Thing#{i}) heavier(other *Thing#{i}) bool {
+        	return t.Weight > other.Weight
+        }
+
+        func kindOf#{i}(n int32) kind#{i} {
+        	if n < 10 {
+        		return kind#{i}{tag: small#{i}}
+        	}
+        	if n < 100 {
+        		return kind#{i}{tag: large#{i}, n: n}
+        	}
+        	return kind#{i}{tag: named#{i}, s: fmt.Sprintf("n%d", n)}
+        }
+
+        func rank#{i}(k kind#{i}) int32 {
+        	switch k.tag {
+        	case small#{i}:
+        		return 1
+        	case large#{i}:
+        		return k.n % 7
+        	default:
+        		return int32(len(k.s))
+        	}
+        }
+        "#
+    var s = String()
+    s.push_str(head)
+    s.push_str("\n")
+    for j in 0u32..8 {
+        let helper = #"
+
+            func mix#{i}_#{j}(x, k int64) int64 {
+            	h := x
+            	for r := int64(0); r < k; r++ {
+            		h = (h ^ (r + #{j + tweak})) % 1000003 * 31
+            		if h%3 == 0 {
+            			h += r
+            		}
+            	}
+            	return h
+            }
+            "#
+        s.push_str(helper)
+        s.push_str("\n")
+    }
+    let score = #"
+
+        func score#{i}(n int32) int64 {
+        	var total int64
+        	things := []Thing#{i}{}
+        	for j := int32(0); j < n; j++ {
+        		things = append(things, newThing#{i}(j))
+        	}
+        	for j := range things {
+        		total += int64(rank#{i}(kindOf#{i}(things[j].ID))) + int64(things[j].Weight)
+        		if j > 0 && things[j].heavier(&things[j-1]) {
+        			total += int64(len(things[j].Tags))
+        		}
+        	}
+        "#
+    s.push_str(score)
+    s.push_str("\n")
+    if i > 0 {
+        s.push_str("\ttotal += score{i - 1}(n / 2)\n")
+    }
+    for j in 0u32..8 {
+        s.push_str("\ttotal = mix{i}_{j}(total, int64(n))\n")
+    }
+    s.push_str("\treturn total\n\}\n")
+    return s
+}
+
+// Module `i` of the large program in `lang`, with the hashing loops' constant moved by `tweak`.
+fn module_text(lang: String, i: u32, tweak: u32) -> String {
+    return if lang == "calx" {
+        calx_module(i, tweak)
+    } else if lang == "c" {
+        c_module(i, tweak)
+    } else if lang == "rust" {
+        rust_module(i, tweak)
+    } else {
+        go_module(i, tweak)
+    }
+}
+
+// Where module `i` goes in the program's folder.
+fn module_path(lang: String, dir: String, i: u32) -> String {
+    return if lang == "calx" {
+        "{dir}/m{i}.calx"
+    } else if lang == "c" {
+        "{dir}/m{i}.c"
+    } else if lang == "rust" {
+        "{dir}/src/m{i}.rs"
+    } else {
+        "{dir}/m{i}.go"
+    }
+}
+
+// Writes the large program in `lang` into `dir`, and gives its lines.
+pub fn write_big(lang: String, dir: String) -> usize {
+    fs.make_dir_all(dir.copy())!
+    if lang == "rust" {
+        fs.make_dir_all("{dir}/src")!
+    }
+    var lines: usize = 0
+    for i in 0u32..MODULES {
+        let text = module_text(lang.copy(), i, 0)
+        lines += text.lines().len()
+        fs.write_text(module_path(lang.copy(), dir.copy(), i), text)!
+        if lang == "c" {
+            fs.write_text("{dir}/m{i}.h", "#pragma once\n\nlong long score{i}(int n);\n")!
+            lines += 3
+        }
+    }
+    let last = MODULES - 1
+    var main = String()
+    if lang == "calx" {
+        main = "import m{last}.\{score{last}\}\n\nfn main() \{\n    println(\"\{score{last}(40)\}\")\n\}\n"
+        fs.write_text("{dir}/main.calx", main.copy())!
+    } else if lang == "c" {
+        main = "#include <stdio.h>\n\n#include \"m{last}.h\"\n\nint main(void) \{\n    printf(\"%lld\\n\", score{last}(40));\n    return 0;\n\}\n"
+        fs.write_text("{dir}/main.c", main.copy())!
+    } else if lang == "rust" {
+        for i in 0u32..MODULES {
+            main.push_str("mod m{i};\n")
+        }
+        main.push_str("\nfn main() \{\n    println!(\"\{\}\", m{last}::score{last}(40));\n\}\n")
+        fs.write_text("{dir}/src/main.rs", main.copy())!
+        fs.write_text("{dir}/Cargo.toml", "[package]\nname = \"big\"\nversion = \"0.1.0\"\nedition = \"2021\"\npublish = false\n\n{RUST_PROFILE}\n")!
+    } else {
+        main = "package main\n\nimport \"fmt\"\n\nfunc main() \{\n\tfmt.Println(score{last}(40))\n\}\n"
+        fs.write_text("{dir}/main.go", main.copy())!
+        fs.write_text("{dir}/go.mod", "module big\n\ngo 1.24\n")!
+    }
+    return lines + main.lines().len()
+}
+
+// Rewrites module 0 with its constant moved by `tweak`: the edit a warm build follows.
+pub fn edit_big(lang: String, dir: String, tweak: u32) {
+    fs.write_text(module_path(lang.copy(), dir, 0), module_text(lang, 0, tweak))!
+}
+
+// Writes the hello program in `lang` into `dir`, and gives the file to build or run.
+pub fn write_hello(lang: String, dir: String) -> String {
+    fs.make_dir_all(dir.copy())!
+    if lang == "calx" {
+        fs.write_text("{dir}/hello.calx", "fn main() \{\n    println(\"hello\")\n\}\n")!
+        return "{dir}/hello.calx"
+    }
+    if lang == "c" {
+        fs.write_text("{dir}/hello.c", "#include <stdio.h>\n\nint main(void) \{\n    puts(\"hello\");\n    return 0;\n\}\n")!
+        return "{dir}/hello.c"
+    }
+    if lang == "rust" {
+        fs.make_dir_all("{dir}/src")!
+        fs.write_text("{dir}/src/main.rs", "fn main() \{\n    println!(\"hello\");\n\}\n")!
+        fs.write_text("{dir}/Cargo.toml", "[package]\nname = \"hello\"\nversion = \"0.1.0\"\nedition = \"2021\"\npublish = false\n\n{RUST_PROFILE}\n")!
+        return "{dir}/Cargo.toml"
+    }
+    if lang == "go" {
+        fs.write_text("{dir}/hello.go", "package main\n\nimport \"fmt\"\n\nfunc main() \{\n\tfmt.Println(\"hello\")\n\}\n")!
+        fs.write_text("{dir}/go.mod", "module hello\n\ngo 1.24\n")!
+        return dir.copy()
+    }
+    fs.write_text("{dir}/hello.py", "print(\"hello\")\n")!
+    return "{dir}/hello.py"
+}
+
+// A path in a ninja file, where a colon, as in `C:/`, would end the outputs.
+fn nj(path: String) -> String {
+    return path.replace(":", "$:")
+}
+
+// A ninja file that builds the large C program in `dir` into `objs`, each file to its own object
+// and then one link, as a C project's build would.
+pub fn write_ninja(dir: String, objs: String, mode: String, out: String) -> String {
+    fs.make_dir_all(objs.copy())!
+    var s = "builddir = {nj(objs.copy())}\ncflags = {c_flags(mode.copy())}\n\n"
+    s.push_str("rule cc\n  command = clang $cflags -c $in -o $out\n\n")
+    s.push_str("rule link\n  command = clang $cflags -fuse-ld=lld $in -o $out\n\n")
+    var all = String()
+    for i in 0u32..MODULES {
+        s.push_str("build {nj("{objs}/m{i}.o")}: cc {nj("{dir}/m{i}.c")}\n")
+        all.push_str(" {nj("{objs}/m{i}.o")}")
+    }
+    s.push_str("build {nj("{objs}/main.o")}: cc {nj("{dir}/main.c")}\n")
+    s.push_str("build {nj(out.copy())}: link{all} {nj("{objs}/main.o")}\n")
+    let path = "{objs}/build.ninja"
+    fs.write_text(path.copy(), s)!
+    return path
+}
