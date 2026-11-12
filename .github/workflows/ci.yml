@@ -1,7 +1,7 @@
 # Builds the compiler and runs the test suite, including every example in the reference docs
-# (D41), in debug and release builds on Windows and Linux on x64, and Linux on Arm. A push that
-# only changes the website (site/) skips it; a change to docs/ still runs it, since the docs'
-# examples are tests.
+# (D41), in debug and release builds on Windows and Linux, on x64 and on Arm. A push that only
+# changes the website (site/) skips it; a change to docs/ still runs it, since the docs' examples
+# are tests.
 name: ci
 
 on:
@@ -32,6 +32,10 @@ jobs:
           # platform is `experimental` until it passes, so its failures don't fail the run.
           - os: ubuntu-24.04-arm
             calx: build/compiler/linux/calx
+            experimental: true
+          # Windows on Arm (CLX-276), with the image's LLVM and Visual Studio's ARM64 tools.
+          - os: windows-11-arm
+            calx: build/compiler/windows/calx.exe
             experimental: true
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental == true }}
@@ -81,11 +85,17 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $zip = "$env:RUNNER_TEMP\ninja-win.zip"
+          $name = "ninja-win.zip"
+          $sum = "F550FEC705B6D6FF58F2DB3C374C2277A37691678D6ABA463ADCBB129108467A"
+          if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq "Arm64") {
+            $name = "ninja-winarm64.zip"
+            $sum = "79C96A50E0DEAFEC212CFA85AA57C6B74003F52D9D1673DDCD1EAB1C958C5900"
+          }
+          $zip = "$env:RUNNER_TEMP\$name"
           $got = $false
           foreach ($wait in 10, 30, 60) {
             try {
-              Invoke-WebRequest https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip -OutFile $zip
+              Invoke-WebRequest "https://github.com/ninja-build/ninja/releases/download/v1.12.1/$name" -OutFile $zip
               $got = $true
               break
             } catch {
@@ -95,7 +105,7 @@ jobs:
           }
           if ($got) {
             $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
-            if ($hash -ne "F550FEC705B6D6FF58F2DB3C374C2277A37691678D6ABA463ADCBB129108467A") { throw "ninja-win.zip's SHA-256 is $hash" }
+            if ($hash -ne $sum) { throw "$name's SHA-256 is $hash" }
             Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\ninja"
             "$env:RUNNER_TEMP\ninja" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
           } else {
@@ -106,17 +116,23 @@ jobs:
             $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
           }
       # Puts the MSVC libraries the linker needs on the environment: whatever Visual Studio's
-      # vcvars64.bat sets or changes is kept for the steps after.
+      # vcvars64.bat, or vcvarsarm64.bat on Arm, sets or changes is kept for the steps after.
       - name: MSVC environment
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $tools = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+          $vcvars = "vcvars64.bat"
+          if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq "Arm64") {
+            $tools = "Microsoft.VisualStudio.Component.VC.Tools.ARM64"
+            $vcvars = "vcvarsarm64.bat"
+          }
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires $tools -property installationPath
           if (-not $vs) { throw "there's no Visual Studio with the C++ tools" }
           $before = @{}
           Get-ChildItem env: | ForEach-Object { $before[$_.Name] = $_.Value }
-          $lines = cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" > nul && set"
-          if ($LASTEXITCODE -ne 0) { throw "vcvars64.bat failed" }
+          $lines = cmd /c "`"$vs\VC\Auxiliary\Build\$vcvars`" > nul && set"
+          if ($LASTEXITCODE -ne 0) { throw "$vcvars failed" }
           foreach ($line in $lines) {
             if ($line -match '^([^=]+)=(.*)$' -and $before[$matches[1]] -ne $matches[2]) {
               "$($matches[1])=$($matches[2])" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
@@ -199,11 +215,17 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $zip = "$env:RUNNER_TEMP\ninja-win.zip"
+          $name = "ninja-win.zip"
+          $sum = "F550FEC705B6D6FF58F2DB3C374C2277A37691678D6ABA463ADCBB129108467A"
+          if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq "Arm64") {
+            $name = "ninja-winarm64.zip"
+            $sum = "79C96A50E0DEAFEC212CFA85AA57C6B74003F52D9D1673DDCD1EAB1C958C5900"
+          }
+          $zip = "$env:RUNNER_TEMP\$name"
           $got = $false
           foreach ($wait in 10, 30, 60) {
             try {
-              Invoke-WebRequest https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip -OutFile $zip
+              Invoke-WebRequest "https://github.com/ninja-build/ninja/releases/download/v1.12.1/$name" -OutFile $zip
               $got = $true
               break
             } catch {
@@ -213,7 +235,7 @@ jobs:
           }
           if ($got) {
             $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
-            if ($hash -ne "F550FEC705B6D6FF58F2DB3C374C2277A37691678D6ABA463ADCBB129108467A") { throw "ninja-win.zip's SHA-256 is $hash" }
+            if ($hash -ne $sum) { throw "$name's SHA-256 is $hash" }
             Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\ninja"
             "$env:RUNNER_TEMP\ninja" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
           } else {
@@ -224,17 +246,23 @@ jobs:
             $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
           }
       # Puts the MSVC libraries the linker needs on the environment: whatever Visual Studio's
-      # vcvars64.bat sets or changes is kept for the steps after.
+      # vcvars64.bat, or vcvarsarm64.bat on Arm, sets or changes is kept for the steps after.
       - name: MSVC environment
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $tools = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+          $vcvars = "vcvars64.bat"
+          if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq "Arm64") {
+            $tools = "Microsoft.VisualStudio.Component.VC.Tools.ARM64"
+            $vcvars = "vcvarsarm64.bat"
+          }
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires $tools -property installationPath
           if (-not $vs) { throw "there's no Visual Studio with the C++ tools" }
           $before = @{}
           Get-ChildItem env: | ForEach-Object { $before[$_.Name] = $_.Value }
-          $lines = cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" > nul && set"
-          if ($LASTEXITCODE -ne 0) { throw "vcvars64.bat failed" }
+          $lines = cmd /c "`"$vs\VC\Auxiliary\Build\$vcvars`" > nul && set"
+          if ($LASTEXITCODE -ne 0) { throw "$vcvars failed" }
           foreach ($line in $lines) {
             if ($line -match '^([^=]+)=(.*)$' -and $before[$matches[1]] -ne $matches[2]) {
               "$($matches[1])=$($matches[2])" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
