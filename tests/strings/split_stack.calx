@@ -1,0 +1,109 @@
+// A `let` of a `split` that stops after its first few parts (CLX-309), 16 at most, keeps them in a
+// buffer on the stack (CLX-314): parts that are views and parts that are copies, in loops left by
+// `break`, `continue`, `return` and `?`, in blocks and closures, next to another such list, and at
+// 16 and 17 parts, where the list is a block of its own again.
+
+// A part's copy, returned while the list is in scope.
+fn field(line: String, i: usize) -> String {
+    let parts = line.split(",")
+    if i == 0 {
+        return parts[0].copy()
+    }
+    return parts[2].copy()
+}
+
+fn digit(s: String) -> i64 ! String {
+    if s.len() != 1 {
+        fail "not a digit"
+    }
+    return i64.parse(s) ?? 0
+}
+
+// One more than the second field, a digit, which `try` leaves early when it isn't.
+fn number(line: String) -> i64 ! String {
+    let parts = line.split(" ")
+    let n = try digit(parts[1])
+    return n + 1
+}
+
+// The sum of each line's second field, leaving the loop at "stop" and skipping "#" lines.
+fn total(lines: List<String>) -> i64 {
+    var sum = 0i64
+    for line in lines {
+        let parts = line.split(" ")
+        if parts[0] == "#" {
+            continue
+        }
+        if parts[0] == "stop" {
+            break
+        }
+        if parts[0] == "end" {
+            return sum + 1000
+        }
+        sum += i64.parse(parts[1]) ?? 0
+    }
+    return sum
+}
+
+fn main() {
+    // Views of a `let`'s text, many times over.
+    let line = "GET /index.html 200 5120"
+    var bytes = 0i64
+    for _ in 0..10000 {
+        let parts = line.split(" ")
+        bytes += i64.parse(parts[3]) ?? 0
+    }
+    println("{bytes}")    // out: 51200000
+
+    // Copies, since the text they're from changes while the list is in scope.
+    var text = String("alpha beta gamma")
+    let words = text.split(" ")
+    text.push_str(" delta")
+    println("{words[1]} {words[2]} {text.len()}")    // out: beta gamma 22
+
+    println("{field("a,b,c", 0)} {field("a,b,c", 2)}")    // out: a c
+    let bad = if let err(e) = number("x yz") { e } else { "" }
+    println("{number("x 4")!} {bad}")    // out: 5 not a digit
+
+    let lines: List<String> = ["a 1", "# 100", "b 2", "stop 5", "c 7"]
+    println("{total(lines)}")    // out: 3
+    let ended: List<String> = ["a 1", "end 0", "b 2"]
+    println("{total(ended)}")    // out: 1001
+
+    // Two such lists at once, the second from a part of the first.
+    let record = "id=7;name=ada;lang=calx"
+    for _ in 0..3 {
+        let pairs = record.split(";")
+        let kv = pairs[1].split("=")
+        print(kv[1])
+    }
+    println("")    // out: adaadaada
+
+    // The same name in two blocks, and in a closure.
+    if line.len() > 3 {
+        let parts = "x:y".split(":")
+        print("{parts[1]} ")
+    }
+    if line.len() > 4 {
+        let parts = "u:v".split(":")
+        println(parts[0])    // out: y u
+    }
+    let paths: List<String> = ["a/b/c/d", "e/f/g"]
+    let thirds = paths.map(|s| {
+        let parts = s.split("/")
+        parts[2].copy()
+    })
+    println("{thirds}")    // out: [c, g]
+
+    // 16 parts reach the stack's most; 17 are a block again; both are as the whole list.
+    let many = "0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17"
+    let sixteen = many.split(" ")
+    let seventeen = many.split(" ")
+    println("{sixteen[15]} {seventeen[16]}")    // out: 15 16
+
+    // Fewer parts than the indexes reach: its length is the whole list's.
+    let short = "a b".split(" ")
+    println(short[0])    // out: a
+    let runes = "héllo".split("")
+    println(runes[1])    // out: é
+}

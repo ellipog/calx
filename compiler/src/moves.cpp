@@ -771,14 +771,21 @@ private:
     // A plain `let` of `text.split(sep)` to `l`, whose list the function only indexes by literals,
     // to look at parts: the split stops after the last part those reach (CLX-309). Its list is
     // the whole one's first parts, or all of it when there are fewer, so an index past the end
-    // fails as it did, with the same length.
-    void split_first(Expr* v, const Local* l) {
+    // fails as it did, with the same length. Nothing moves the list or any of it, so where it's
+    // at most 16 parts, its elements can be on the stack (CLX-314).
+    void split_first(Expr* v, Local* l) {
         if (v->kind != ExprKind::call || v->call != CallKind::builtin_method || v->bmethod != BMethod::split) return;
         v->split_first = 0;
+        l->stack_parts = nullptr;
         if (l->is_var || whole_.count(l) || touched(l)) return;
         auto it = indexed_.find(l);
-        if (it != indexed_.end()) v->split_first = it->second;
+        if (it == indexed_.end()) return;
+        v->split_first = it->second;
+        if (it->second <= kStackParts) l->stack_parts = v;
     }
+
+    // As `FEW_PARTS` in calx_text.c, the most `cx_text_split_into` takes.
+    static constexpr std::uint32_t kStackParts = 16;
 
     // --- a `var` String that holds a view (CLX-310) ----------------------------------------------
     //

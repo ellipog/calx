@@ -3593,9 +3593,18 @@ $dropall    m->len = 0;
         return s + r + "; })";
     }
 
-    // Drops the locals in `ls`, in that order.
+    // Drops the locals in `ls`, in that order. A list whose elements are on the stack drops only
+    // them, and nothing when they're views (CLX-314).
     void drops(const Slice<Local*>& ls) {
-        for (Local* l : ls) line(drop_fn(l->type) + "(&" + local_name(l) + ");");
+        for (Local* l : ls) {
+            if (l->stack_parts) {
+                std::string n = local_name(l);
+                if (!l->stack_parts->view_parts)
+                    line("for (cx_usize cx_i = 0; cx_i < " + n + ".len; cx_i++) cx_drop_String(&" + n + ".ptr[cx_i]);");
+                continue;
+            }
+            line(drop_fn(l->type) + "(&" + local_name(l) + ");");
+        }
     }
 
     // Before leaving early: the temporaries of the statements being left, from frame `from` in.
@@ -3656,7 +3665,13 @@ $dropall    m->len = 0;
                     full([&] { expr_stmt(s->value); });
                     break;
                 }
+                if (l->stack_parts == s->value && s->value->split_first) {
+                    // Its parts go in a buffer declared with it, where the split puts them (CLX-314).
+                    stack_parts_ = {s->value, tmp()};
+                    line("cx_String " + stack_parts_.second + "[" + std::to_string(s->value->split_first) + "];");
+                }
                 full([&] { line(ctype(l->type) + " " + local_name(l) + " = " + value(s->value, l->type) + ";"); });
+                stack_parts_ = {};
                 break;
             }
             case StmtKind::assign: full([&] { assign(s); }); break;
@@ -7042,6 +7057,11 @@ $dropall    m->len = 0;
                 case BMethod::split:
                     // Only as far as the parts the list's indexes reach, when that's all it's used
                     // for (CLX-309).
+                    // A `let`'s, into the buffer on the stack declared with it (CLX-314).
+                    if (e->split_first && stack_parts_.first == e)
+                        return string_list(view + "cx_text_split_into(" + p + ", " + text_arg(0) + ", " + std::to_string(e->split_first) +
+                                               ", " + (e->view_parts ? "1" : "0") + ", " + stack_parts_.second + "); })",
+                                           e->type);
                     if (e->split_first)
                         return string_list(view + "cx_text_split_first(" + p + ", " + text_arg(0) + ", " + std::to_string(e->split_first) +
                                                ", " + (e->view_parts ? "1" : "0") + "); })",
@@ -7386,6 +7406,7 @@ $dropall    m->len = 0;
     std::string last_directive_;  // the last `#line`, which `line` repeats after each C line
     std::vector<Frame> frames_;                                 // the statements being emitted, innermost last
     std::unordered_map<std::uint32_t, std::size_t> loop_frames_;  // a loop's id: how many frames are outside it
+    std::pair<const Expr*, std::string> stack_parts_;           // a `let`'s split and the buffer for its parts (CLX-314)
     mutable std::unordered_set<std::string> compound_used_;
     std::map<std::pair<const Type*, const Type*>, std::unique_ptr<DynTable>> dyn_tables_;  // by `dyn` and type
     std::unordered_set<std::string> dyn_names_;

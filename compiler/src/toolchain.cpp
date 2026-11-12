@@ -1777,7 +1777,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     if (parts_ok && calls({"cx_print_f", "cx_format_f"})) parts_ok = part("calx_float.c");
     if (parts_ok && calls({"cx_parse_f"})) parts_ok = part("calx_fparse.c");
     if (parts_ok && calls({"cx_format_", "cx_print_f"})) parts_ok = part("calx_format.c");  // calx_float.c's padding
-    if (parts_ok && calls({"cx_text_trim(", "cx_text_replace", "cx_text_repeat", "cx_text_pad", "cx_text_split(", "cx_text_split_first(", "cx_text_split_whitespace(", "cx_text_lines(", "cx_text_join", "cx_text_words"})) {
+    if (parts_ok && calls({"cx_text_trim(", "cx_text_replace", "cx_text_repeat", "cx_text_pad", "cx_text_split(", "cx_text_split_first(", "cx_text_split_into(", "cx_text_split_whitespace(", "cx_text_lines(", "cx_text_join", "cx_text_words"})) {
         parts_ok = part("calx_text.c");
     }
     if (parts_ok && calls({"cx_digest_"})) parts_ok = part("calx_digest.c");

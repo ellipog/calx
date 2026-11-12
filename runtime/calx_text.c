@@ -164,12 +164,14 @@ static inline void copy_part(cx_u8* q, const cx_u8* p, cx_usize n) {
     }
 }
 
-/* The parts a split has found so far: the first 16 here, on the stack, and then all of them in a
- * list grown as any is. A line split into a few fields gets one allocation, of the size it needs,
- * where a list grown from empty took two or three, at 4, 8 and 16 (CLX-309). */
+/* The parts a split has found so far: the first 16 in `few`, a buffer on the stack, and then all
+ * of them in a list grown as any is. A line split into a few fields gets one allocation, of the
+ * size it needs, where a list grown from empty took two or three, at 4, 8 and 16 (CLX-309). The
+ * buffer can be the caller's, holding the most parts a split that stops early can find, which
+ * then is the list itself (CLX-314). */
 #define FEW_PARTS 16
 typedef struct {
-    cx_String few[FEW_PARTS];
+    cx_String* few;
     cx_usize n;
     cx_StringList more;
 } parts;
@@ -223,27 +225,24 @@ static cx_StringList parts_list(parts* b) {
  * for as `cx_text_split_next` does, and a longer one's rarest bytes are worked out once, not for
  * each part (CLX-300). With `view`, the parts are views of `s` (`parts_push`). It stops after
  * `limit` parts, each as it would be in the whole list. */
-static cx_StringList split_upto(cx_str s, cx_str sep, cx_usize limit, int view) {
-    parts b;
-    b.n = 0;
-    b.more = (cx_StringList){0, 0, 0};
+static void split_parts(parts* b, cx_str s, cx_str sep, cx_usize limit, int view) {
     if (sep.len == 0) {
         cx_usize i = 0;
         for (cx_usize found = 0; i < s.len && found < limit; found++) {
             cx_usize j = i;
             cx_utf8_next(s.ptr, &j);
-            parts_push(&b, s.ptr + i, j - i, view);
+            parts_push(b, s.ptr + i, j - i, view);
             i = j;
         }
-        return parts_list(&b);
+        return;
     }
     if (sep.len == 1) {
         const cx_u8* p = s.ptr;
         const cx_u8* end = s.ptr + s.len;
         for (cx_usize found = 1;; found++) {
             const cx_u8* e = cx_find2(p, end, sep.ptr[0], sep.ptr[0]);
-            parts_push(&b, p, (cx_usize)(e - p), view);
-            if (e == end || found == limit) return parts_list(&b);
+            parts_push(b, p, (cx_usize)(e - p), view);
+            if (e == end || found == limit) return;
             p = e + 1;
         }
     }
@@ -252,11 +251,17 @@ static cx_StringList split_upto(cx_str s, cx_str sep, cx_usize limit, int view) 
     for (cx_usize found = 1;; found++) {
         cx_usize k = cx_bytes_find_rare(s.ptr + i, s.len - i, sep.ptr, sep.len, rare);
         if (k == CX_NOT_FOUND) break;
-        parts_push(&b, s.ptr + i, k, view);
-        if (found == limit) return parts_list(&b);
+        parts_push(b, s.ptr + i, k, view);
+        if (found == limit) return;
         i += k + sep.len;
     }
-    parts_push(&b, s.ptr + i, s.len - i, view);
+    parts_push(b, s.ptr + i, s.len - i, view);
+}
+
+static cx_StringList split_upto(cx_str s, cx_str sep, cx_usize limit, int view) {
+    cx_String few[FEW_PARTS];
+    parts b = {few, 0, {0, 0, 0}};
+    split_parts(&b, s, sep, limit, view);
     return parts_list(&b);
 }
 
@@ -266,11 +271,19 @@ cx_StringList cx_text_split(cx_str s, cx_str sep, int view) { return split_upto(
  * look for the ends of the rest (CLX-309). */
 cx_StringList cx_text_split_first(cx_str s, cx_str sep, cx_usize n, int view) { return split_upto(s, sep, n, view); }
 
+/* The same, into `buf`, the caller's, of `n` parts, at most FEW_PARTS: the list's elements are on
+ * the caller's stack, and its capacity of 0 says they're no block of their own (CLX-314). */
+cx_StringList cx_text_split_into(cx_str s, cx_str sep, cx_usize n, int view, cx_String* buf) {
+    parts b = {buf, 0, {0, 0, 0}};
+    split_parts(&b, s, sep, n, view);
+    cx_StringList l = {buf, b.n, 0};
+    return l;
+}
+
 /* The words of `s`: the parts between runs of whitespace, none of them empty. */
 cx_StringList cx_text_split_whitespace(cx_str s, int view) {
-    parts b;
-    b.n = 0;
-    b.more = (cx_StringList){0, 0, 0};
+    cx_String few[FEW_PARTS];
+    parts b = {few, 0, {0, 0, 0}};
     cx_usize i = 0, k;
     while (i < s.len) {
         while (i < s.len && space_at(s, i, &k)) i = k;
@@ -285,9 +298,8 @@ cx_StringList cx_text_split_whitespace(cx_str s, int view) {
 /* The lines of `s`, each without the `\n`, `\r\n` or `\r` that ends it, as `std.io.Lines` reads
  * them. A last line needn't end with one, and an ending at the very end doesn't start another. */
 cx_StringList cx_text_lines(cx_str s, int view) {
-    parts b;
-    b.n = 0;
-    b.more = (cx_StringList){0, 0, 0};
+    cx_String few[FEW_PARTS];
+    parts b = {few, 0, {0, 0, 0}};
     cx_usize i = 0;
     while (i < s.len) {
         cx_usize j = (cx_usize)(cx_find2(s.ptr + i, s.ptr + s.len, '\n', '\r') - s.ptr);

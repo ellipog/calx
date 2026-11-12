@@ -772,6 +772,7 @@ CX_FN(cx_StringList, cx_text_split, (cx_str s, cx_str sep, int view));
 /* The first `n` parts `split` would give, or all of them when there are fewer, for a list a
  * program only indexes by literals, the highest `n - 1` (CLX-309). */
 CX_FN(cx_StringList, cx_text_split_first, (cx_str s, cx_str sep, cx_usize n, int view));
+CX_FN(cx_StringList, cx_text_split_into, (cx_str s, cx_str sep, cx_usize n, int view, cx_String* buf));
 CX_FN(cx_StringList, cx_text_split_whitespace, (cx_str s, int view));
 CX_FN(cx_StringList, cx_text_lines, (cx_str s, int view));
 CX_FN(cx_String, cx_text_join, (const cx_String* parts, cx_usize n, cx_str sep, const char* at));

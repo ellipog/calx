@@ -138,6 +138,10 @@ struct Local {
     // Filled in by the ownership pass (D76).
     bool owns = false;           // it owns its value, so it's dropped when its scope ends
     bool clear_on_move = false;  // it might be moved where it's dropped, so a move zeroes it
+    // A `let` of a `split` that stops after its first few parts (CLX-309), at most 16: that split,
+    // which puts the list's elements in a buffer on the stack declared with it, so dropping it
+    // drops only the parts, and nothing where they're views (CLX-314).
+    const Expr* stack_parts = nullptr;
 };
 
 // What the checker found a name or call to be.
