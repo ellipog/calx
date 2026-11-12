@@ -38,7 +38,8 @@
 // What it builds and the inputs it writes go in a folder of its own in the temp folder, removed at
 // the end unless --keep. --record writes bench/results/suite-<os>.json with the machine, the
 // toolchains and the commit; with --only or --groups, the benchmarks left out keep their results,
-// and with --langs, the languages left out keep theirs, each with the commit it was recorded at.
+// and with --langs, the languages left out keep theirs, each with the commit it was recorded at,
+// and their tools' versions, as does a tool that isn't found.
 import dx.{MODULES, c_flags, edit_big, write_big, write_hello, write_ninja}
 import inputs.{make_input}
 import machine.{commit, compiler, exe, machine, now_utc, output_of, repo_root, round_to}
@@ -1357,7 +1358,8 @@ fn langs_kept(now: own Json, old: LinkedMap<String, Json>, langs: List<String>, 
     return Json.Object(out)
 }
 
-fn kept(path: String) -> Json {
+// What the record at `path` has under `key`, or null when there's no record.
+fn kept(path: String, key: str) -> Json {
     let ok(read) = fs.read_text(path) else {
         return Json.Null
     }
@@ -1367,7 +1369,42 @@ fn kept(path: String) -> Json {
     let ok(doc) = parse(text) else {
         return Json.Null
     }
-    return doc.get("results") ?? Json.Null
+    return doc.get(key) ?? Json.Null
+}
+
+// Whether a tool in the record's toolchain builds or runs one of `langs`.
+fn tool_used(tool: String, langs: List<String>) -> bool {
+    if tool == "clang" {
+        return langs.contains("c") or langs.contains("calx")
+    }
+    if tool == "rustc" or tool == "rustc_llvm" {
+        return langs.contains("rust")
+    }
+    return langs.contains(tool)
+}
+
+// `now`, with the versions `old` has for the tools whose languages were all left out, or that
+// weren't found, as Go once wasn't in WSL: the results kept for them are the old versions'.
+fn toolchain_kept(now: own Json, old: Json, langs: List<String>) -> Json {
+    let Json.Object(fresh) = now else {
+        return now
+    }
+    let Json.Object(before) = old else {
+        return Json.Object(fresh)
+    }
+    var out = LinkedMap<String, Json>()
+    for (k, v) in fresh {
+        var keep = v.copy()
+        if let Json.Str(version) = v {
+            if version.is_empty() or not tool_used(k.copy(), langs.copy()) {
+                if let was = before.find(k) {
+                    keep = was.copy()
+                }
+            }
+        }
+        out.insert(k.copy(), keep)
+    }
+    return Json.Object(out)
 }
 
 fn main() {
@@ -1558,7 +1595,7 @@ fn main() {
     if a.record and not a.quick {
         let out = "{root}/bench/results/suite-{env.os()}.json"
         var merged = LinkedMap<String, Json>()
-        let old = kept(out.copy())
+        let old = kept(out.copy(), "results")
         for b in benches() {
             match results.remove(b.name.copy()) {
                 some(j) => {
@@ -1583,7 +1620,7 @@ fn main() {
             r.insert("uncommitted", Json.Array(changed.map(|f| Json.Str(f.copy()))))
         }
         r.insert("machine", machine())
-        r.insert("toolchain", toolchains(calx.copy(), python.copy()))
+        r.insert("toolchain", toolchain_kept(toolchains(calx.copy(), python.copy()), kept(out.copy(), "toolchain"), langs.copy()))
         r.insert("rounds", Json.Int(i64(a.rounds)))
         if floor != Json.Null {
             r.insert("peak_mb_of_a_program_that_does_nothing", floor)
