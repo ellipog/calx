@@ -49,8 +49,15 @@ fn main() {
     // out: # calx completions for PowerShell: add `calx completions powershell | Out-String | Invoke-Expression` to $PROFILE
     println(calx(exe, ["completions", "tcsh"], List(), dir))    // out: calx completions: name the shell: bash, zsh, fish or powershell [exited with status 2]
 
-    // This calx was built from source, so it has nothing to uninstall.
-    let refused = calx(exe, ["uninstall", "--yes"], List(), dir)
+    // A copy on its own, not in a bin/ beside runtime/ and std/, has nothing to uninstall. The
+    // check runs on a copy, since the calx under test can be an installed one, which this would
+    // remove (CLX-311).
+    let windows = os() == "windows"
+    let name = if windows { "calx.exe" } else { "calx" }
+    let lone = "{dir}{s}lone"
+    make_dir_all(lone)!
+    copy(exe, "{lone}{s}{name}")!
+    let refused = calx("{lone}{s}{name}", ["uninstall", "--yes"], List(), dir)
     println("{refused.contains("wasn't installed by the install script") and refused.ends_with("[exited with status 1]")}")    // out: true
 
     // A copy laid out as the install script lays one out.
@@ -59,8 +66,7 @@ fn main() {
     make_dir_all(bin)!
     make_dir_all("{home}{s}runtime")!
     make_dir_all("{home}{s}std")!
-    let windows = os() == "windows"
-    let copied = if windows { "{bin}{s}calx.exe" } else { "{bin}{s}calx" }
+    let copied = "{bin}{s}{name}"
     copy(exe, copied)!
     make_dir_all("{cache}{s}objects")!
     write("{cache}{s}objects{s}b.o", [0u8; 1500])!
