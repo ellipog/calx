@@ -278,6 +278,11 @@ jobs:
             platform: windows
             cpu: arm64
             experimental: true
+          # macOS on Apple Silicon (CLX-280), experimental too until it passes.
+          - os: macos-latest
+            platform: macos
+            cpu: arm64
+            experimental: true
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental == true }}
     steps:
@@ -365,6 +370,28 @@ jobs:
           tar -I 'zstd -d --long=31' -xf "$RUNNER_TEMP/$llvm.tar.zst" -C "$RUNNER_TEMP" "$llvm/bin/clang-23" "$llvm/bin/lld" \
             "$llvm/bin/llvm-strip" "$llvm/bin/llvm-objcopy" "$llvm/lib/clang/23" "$llvm/include/llvm/Support/LICENSE.TXT"
           rm "$RUNNER_TEMP/$llvm.tar.zst"
+          echo "LLVM_RELEASE=$RUNNER_TEMP/$llvm" >> "$GITHUB_ENV"
+      # On macOS: LLVM's Apple Silicon release, for clang, ld64.lld and dsymutil, with the SDK from
+      # the runner's Command Line Tools, as a user's comes. The compiler is built with Apple's clang.
+      - name: Fetch the toolchain
+        if: runner.os == 'macOS'
+        run: |
+          command -v ninja > /dev/null || brew install ninja
+          command -v zstd > /dev/null || brew install zstd
+          llvm=LLVM-23.1.5-macOS-ARM64
+          sum=503de30ef90311e0b143623801b19af2250adac6d69faed65ad0051170202e3b
+          for wait in 10 30 60 0; do
+            curl -fsSL -o "$RUNNER_TEMP/$llvm.tar.zst" "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.5/$llvm.tar.zst" && break
+            if [ "$wait" = 0 ]; then echo "LLVM's download failed"; exit 1; fi
+            echo "LLVM's download failed; trying again in $wait s"
+            sleep "$wait"
+          done
+          echo "$sum  $RUNNER_TEMP/$llvm.tar.zst" | shasum -a 256 -c
+          zstd -d -q --long=31 "$RUNNER_TEMP/$llvm.tar.zst" -o "$RUNNER_TEMP/$llvm.tar"
+          rm "$RUNNER_TEMP/$llvm.tar.zst"
+          tar -xf "$RUNNER_TEMP/$llvm.tar" -C "$RUNNER_TEMP" "$llvm/bin/clang-23" "$llvm/bin/lld" "$llvm/bin/dsymutil" \
+            "$llvm/bin/llvm-strip" "$llvm/bin/llvm-objcopy" "$llvm/lib/clang/23" "$llvm/include/llvm/Support/LICENSE.TXT"
+          rm "$RUNNER_TEMP/$llvm.tar"
           echo "LLVM_RELEASE=$RUNNER_TEMP/$llvm" >> "$GITHUB_ENV"
       # The compiler is built with clang 20 from LLVM's apt repository, and lld beside it: those
       # alone, since llvm.sh adds lldb, whose libraries come from Ubuntu's mirrors, which the
@@ -473,9 +500,12 @@ jobs:
           link=()
           if [[ "$RUNNER_OS" == Windows ]]; then
             exe=".exe"
-          else
+          elif [[ "$RUNNER_OS" == Linux ]]; then
             # libstdc++ inside, so the compiler needs only the C library.
             link=("-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc")
+          else
+            # Every macOS has libc++; this one runs on the first for Apple Silicon, as programs do.
+            link=("-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0")
           fi
           # The C runtime inside on Windows too, so no redistributable needs installing.
           cmake -S compiler -B build/release -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Release \
@@ -486,7 +516,7 @@ jobs:
             build/release/calx$exe run tools/release/toolchain.calx -- windows "$LLVM_MINGW" "$LLVM_RELEASE" \
               build/toolchain "LLVM 23.1.5, llvm-mingw 20261104"
           else
-            build/release/calx$exe run tools/release/toolchain.calx -- linux "$LLVM_RELEASE" build/toolchain "LLVM 23.1.5"
+            build/release/calx$exe run tools/release/toolchain.calx -- ${{ matrix.platform }} "$LLVM_RELEASE" build/toolchain "LLVM 23.1.5"
           fi
           # calx-update built with the toolchain, as a user's programs are.
           export CALX_CC="$PWD/build/toolchain/bin/clang$exe"
@@ -588,8 +618,10 @@ jobs:
           gh release upload nightly calx-*.zip calx-*.tar.gz calx-*.sha256 $(ls calx-toolchain-*.tar.xz 2> /dev/null) --clobber
           gh release upload nightly SHA256SUMS version.txt --clobber
           keep=$(gh release view nightly --json assets --jq '.assets[].name' | grep -oE 'calx-[0-9][^-]*-nightly\.[0-9]+' | sort -u -V | tail -n 2)
+          # Each archive's version is the part of its name before the system, whichever system.
           gh release view nightly --json assets --jq '.assets[].name' | grep '^calx-' | grep -v '^calx-toolchain-' | while read -r name; do
-            if ! grep -qF "${name%%-windows*}" <<< "$keep" && ! grep -qF "${name%%-linux*}" <<< "$keep"; then
+            version=$(grep -oE '^calx-[0-9][^-]*-nightly\.[0-9]+' <<< "$name" || true)
+            if [ -n "$version" ] && ! grep -qxF "$version" <<< "$keep"; then
               gh release delete-asset nightly "$name" --yes
             fi
           done
