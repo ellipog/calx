@@ -1,0 +1,48 @@
+// Big blocks that wait in the cache past its delay, 100 ms, give their pages back to the system,
+// and a block taken from it then takes them again (CLX-318). Lists made after a wait hold what's
+// put in them: ones of the sizes freed, ones a little smaller, which take a cached block up to
+// three sizes bigger, and one that grows through cached blocks as it's pushed to.
+import std.thread.{sleep}
+
+fn filled(n: usize, seed: i64) -> List<i64> {
+    var v = List<i64>()
+    v.reserve(n)
+    for i in 0usize..n {
+        v.push(seed * 1000003 + i64.wrap(i))
+    }
+    return v
+}
+
+fn total(v: List<i64>) -> i64 {
+    var s = 0i64
+    for x in v {
+        s = s.wrapping_add(x)
+    }
+    return s
+}
+
+fn main() {
+    // 64 KiB to 16 MiB of i64s.
+    let sizes: List<usize> = [8192, 40000, 131072, 1000000, 2000000]
+    var sum = 0i64
+    for round in 0i64..3 {
+        var kept: List<List<i64>> = []
+        for n in sizes {
+            kept.push(filled(n, round))
+        }
+        kept = []
+        unsafe { sleep(250000000) }
+        // The first block after the wait finds the cached ones due and gives back their pages.
+        sum = sum.wrapping_add(total(filled(5000, round)))
+        for n in sizes {
+            sum = sum.wrapping_add(total(filled(n, round + 10)))
+            sum = sum.wrapping_add(total(filled(n - n / 4, round + 20)))
+        }
+        var grown = List<i64>()
+        for i in 0i64..1500000 {
+            grown.push(i ^ round)
+        }
+        sum = sum.wrapping_add(total(grown))
+    }
+    println("{sum}")    // out: 270289650954540
+}

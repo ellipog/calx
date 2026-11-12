@@ -25,11 +25,15 @@
  * those blocks leave the lists as holes, which count as free when the page's last block is.
  *
  * Bigger blocks come from the system, rounded to four sizes for each doubling, and a freed one
- * waits in a cache for the next block of its size, up to 256 MiB in all. The Windows heap gives
- * big freed blocks back to the system, so a table that grew and was freed would fault on every
- * page of the next one; from the cache, its pages are still there. A big block that grows moves
- * into a cached one big enough, leaving itself cached in its place, or grows where it is, so the
- * blocks it grew through don't pile up in the cache (CLX-264).
+ * waits in a cache for the next block of its size or a little smaller, up to 256 MiB in all. The
+ * Windows heap gives big freed blocks back to the system, so a table that grew and was freed would
+ * fault on every page of the next one; from the cache, its pages are still there. A big block
+ * that grows moves into a cached one big enough, leaving itself cached in its place, or grows
+ * where it is, so the blocks it grew through don't pile up in the cache (CLX-264). A cached block
+ * nothing takes for PURGE_MS gives its pages back to the system, keeping its addresses, and takes
+ * them again when it's next taken: a block a loop frees and takes back keeps its pages, and one an
+ * earlier phase of the program left, at a size nothing asks for now, stops counting as memory it
+ * holds (CLX-318).
  *
  * Debug builds use malloc instead, with a header that holds each block's size, so a free with
  * the wrong size or a second free stops the program: either is a compiler bug. So do builds
@@ -277,6 +281,7 @@ void cx_alloc_idle(void) {}
 #include <pthread.h>
 #include <sched.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 #endif
 
@@ -292,6 +297,10 @@ void cx_alloc_idle(void) {}
  * commit for nothing, and such blocks are rarely freed and made again. */
 #define HUGE_BLOCK ((cx_usize)64 << 20)
 #define CACHE_MAX ((cx_usize)256 << 20)
+/* How long a cached big block keeps its pages, in milliseconds, as mimalloc's purge delay is. Not
+ * mimalloc's 10: a block freed in one tick of a program's loop and taken in the next, 50 ms on in
+ * a game server's, would fault on all its pages each tick. */
+#define PURGE_MS 100
 /* The system's pages, which memory goes back to it in: 4 KiB on x86 and on every Windows, 16 KiB
  * on Apple Silicon, and 4, 16 or 64 KiB on Arm Linux (CLX-274). Asked for as the arena is
  * reserved, before any page is cut, and 4 KiB until then, which only rounds what's asked of the
@@ -780,12 +789,17 @@ static void trim_some(void) {
     if (bytes >= TRIM_AT) (void)trim_class(most, 0);
 }
 
-/* A new page to cut class `c` from; the one cut from before is sealed. */
+static void purge_now(void);
+
+/* A new page to cut class `c` from; the one cut from before is sealed. Now and then the small
+ * sizes are trimmed, and the cached big blocks due give back their pages, for a program that's
+ * gone on to small blocks only. */
 static void new_page(heap* h, unsigned c) {
     seal(h, c);
     if (__atomic_add_fetch(&taken_since_trim, 1, __ATOMIC_RELAXED) >= TRIM_EVERY) {
         __atomic_store_n(&taken_since_trim, 0, __ATOMIC_RELAXED);
         trim_some();
+        purge_now();
     }
     cx_u32 n;
     cx_u8* p = take_page(c, &n);
@@ -896,13 +910,40 @@ static __attribute__((noinline)) void* refill(heap* h, unsigned c) {
 
 /* --- big blocks ------------------------------------------------------------------------- */
 
+/* A cached block's first bytes: the next one of its size, newest first, when it was cached,
+ * whether its pages after the first went back to the system, and its size. */
+typedef struct cache_link {
+    struct cache_link* next;
+    cx_u64 at;
+    cx_u32 purged;
+    cx_u32 cls;
+} cache_link;
+
+/* Milliseconds from some fixed time, cheaply: Windows' tick count, which moves in steps of about
+ * 16, or the coarse monotonic clock elsewhere. */
+static cx_u64 now_ms(void) {
+#ifdef _WIN32
+    return GetTickCount64();
+#else
+    struct timespec t;
+#ifdef CLOCK_MONOTONIC_COARSE
+    clock_gettime(CLOCK_MONOTONIC_COARSE, &t);
+#else
+    clock_gettime(CLOCK_MONOTONIC, &t);
+#endif
+    return (cx_u64)t.tv_sec * 1000 + (cx_u64)t.tv_nsec / 1000000;
+#endif
+}
+
 /* A big block's span is what the system holds for it, which can be more than the size its owner
  * knows: a list that grew into a bigger block than it asked for, or took one from the cache that
  * was bigger. So each one's span is kept here, by its address, from when the system gives it out
  * to when it takes it back, under large_lock with the cache (CLX-264). */
 static int large_lock;
-static void* large_free[LARGE_CLASSES];
+static cache_link* large_free[LARGE_CLASSES];
 static cx_usize cached;
+/* When the cached block that's kept its pages longest is due to give them back, or never. */
+static cx_u64 purge_due = (cx_u64)-1;
 
 static void** span_key;
 static cx_usize* span_size;
@@ -988,44 +1029,135 @@ static void span_drop(const void* p) {
 static inline cx_usize large_span(cx_usize n) { return n > HUGE_BLOCK ? pages(n) : large_size(large_class(n)); }
 
 /* A block from the cache whose span is size `c`'s or up to `more` sizes bigger, taken out of it,
- * with its span in `*span`; or NULL. Under large_lock. */
-static void* take_cached(unsigned c, unsigned more, cx_usize* span) {
+ * with its span in `*span` and whether its pages went back to the system in `*purged`; or NULL.
+ * Under large_lock. */
+static void* take_cached(unsigned c, unsigned more, cx_usize* span, int* purged) {
     unsigned last = c + more < LARGE_CLASSES ? c + more : LARGE_CLASSES - 1;
     for (unsigned k = c; k <= last; k++) {
-        void* p = large_free[k];
-        if (p) {
-            __atomic_store_n(&large_free[k], *(void**)p, __ATOMIC_RELAXED);
+        cache_link* b = large_free[k];
+        if (b) {
+            __atomic_store_n(&large_free[k], b->next, __ATOMIC_RELAXED);
             cached -= large_size(k);
             *span = large_size(k);
-            return p;
+            *purged = (int)b->purged;
+            return b;
         }
     }
     return NULL;
 }
 
-/* Gives `p`, whose span is `span`, to the cache, or back to the system once the cache is full.
- * Under large_lock; returns the block for the system to take back, after the lock, or NULL. */
-static void* keep_block(void* p, cx_usize span) {
+/* The part of a cached block of `span` bytes whose pages go back to the system: all but its first
+ * page, which holds its link, in whole pages. */
+static inline cx_usize purge_end(cx_usize span) { return span & ~(OS_PAGE - 1); }
+
+/* The pages a cached block gave back, taken again for the block's new owner. Linux gives them as
+ * zeros as they're touched; Windows must commit them, and macOS count them as the program's. */
+static void recommit(void* p, cx_usize span) {
+    cx_usize end = purge_end(span);
+    if (end <= OS_PAGE) return;
+#ifdef _WIN32
+    if (!VirtualAlloc((cx_u8*)p + OS_PAGE, end - OS_PAGE, MEM_COMMIT, PAGE_READWRITE)) cx_panic_capacity();
+#elif defined(__APPLE__)
+    madvise((cx_u8*)p + OS_PAGE, end - OS_PAGE, MADV_FREE_REUSE);
+#else
+    (void)p;
+#endif
+}
+
+/* Gives `p`, whose span is `span`, to the cache at time `now`, or back to the system once the
+ * cache is full. Under large_lock; returns the block for the system to take back, after the lock,
+ * or NULL. */
+static void* keep_block(void* p, cx_usize span, cx_u64 now) {
     if (span <= HUGE_BLOCK && cached + span <= CACHE_MAX) {
         unsigned c = large_class(span);
-        *(void**)p = large_free[c];
-        __atomic_store_n(&large_free[c], p, __ATOMIC_RELAXED);
+        cache_link* b = (cache_link*)p;
+        b->next = large_free[c];
+        b->at = now;
+        b->purged = 0;
+        b->cls = c;
+        __atomic_store_n(&large_free[c], b, __ATOMIC_RELAXED);
         cached += span;
+        if (now + PURGE_MS < purge_due) __atomic_store_n(&purge_due, now + PURGE_MS, __ATOMIC_RELAXED);
         return NULL;
     }
     span_drop(p);
     return p;
 }
 
-/* A fresh block takes a cached one of its size or the next, at most a quarter bigger, or one the
- * system gives. */
-static void* large_alloc(cx_usize n) {
+/* Each cached block that's kept its pages PURGE_MS gives them back. The due ones leave the cache
+ * while their pages go, outside the lock, so nothing takes one meanwhile, and come back to it
+ * after. Out of line, as it's seldom run. */
+static __attribute__((cold, noinline)) void purge_blocks(cx_u64 now) {
+    cache_link* due = NULL;
+    cx_u64 next = (cx_u64)-1;
+    lock(&large_lock);
+    if (now >= purge_due) {
+        for (unsigned c = 0; c < LARGE_CLASSES; c++) {
+            cache_link** at = &large_free[c];
+            while (*at) {
+                cache_link* b = *at;
+                if (!b->purged && b->at + PURGE_MS <= now) {
+                    *at = b->next;
+                    b->next = due;
+                    due = b;
+                    cached -= large_size(c);
+                } else {
+                    if (!b->purged && b->at + PURGE_MS < next) next = b->at + PURGE_MS;
+                    at = &b->next;
+                }
+            }
+        }
+        __atomic_store_n(&purge_due, next, __ATOMIC_RELAXED);
+    }
+    unlock(&large_lock);
+    if (!due) return;
+    for (cache_link* b = due; b; b = b->next) {
+        cx_usize end = purge_end(large_size(b->cls));
+        if (end > OS_PAGE) decommit((cx_u8*)b + OS_PAGE, end - OS_PAGE);
+    }
+    /* Each goes back at the end of its list, after the blocks that kept their pages, so those are
+     * taken first. */
+    lock(&large_lock);
+    while (due) {
+        cache_link* b = due;
+        due = b->next;
+        b->purged = 1;
+        b->next = NULL;
+        cache_link** at = &large_free[b->cls];
+        while (*at) at = &(*at)->next;
+        *at = b;
+        cached += large_size(b->cls);
+    }
+    unlock(&large_lock);
+}
+
+/* The cached blocks due give back their pages, if any are due at `now`. */
+static inline void purge_cache(cx_u64 now) {
+    if (now >= __atomic_load_n(&purge_due, __ATOMIC_RELAXED)) purge_blocks(now);
+}
+
+static __attribute__((noinline)) void purge_now(void) { purge_cache(now_ms()); }
+
+/* A fresh block takes a cached one of its size or up to three sizes bigger, at most three-quarters
+ * bigger, or one the system gives. A cached block is memory the program holds already, so one
+ * that's a little big costs nothing, where a new one adds to it: a table's arrays from an earlier
+ * phase of the program serve the next phase's, whose sizes are seldom the same (CLX-318). More
+ * than three sizes up, a small block takes one a bigger block would have, which then comes from
+ * the system. Out of line, as large_release is, so cx_alloc and cx_free stay small enough to go
+ * inside the loops that call them: a big block costs far more than the call. */
+static __attribute__((noinline)) void* large_alloc(cx_usize n) {
     cx_usize span = large_span(n);
     void* p = NULL;
+    int purged = 0;
+    cx_u64 now = now_ms();
     lock(&large_lock);
-    if (n <= HUGE_BLOCK) p = take_cached(large_class(n), 1, &span);
+    if (n <= HUGE_BLOCK) p = take_cached(large_class(n), 3, &span, &purged);
     unlock(&large_lock);
-    if (p) return p;
+    purge_cache(now);
+    if (p) {
+        if (purged) recommit(p, span);
+        return p;
+    }
     p = os_alloc(span);
     lock(&large_lock);
     span_put(p, span);
@@ -1033,13 +1165,15 @@ static void* large_alloc(cx_usize n) {
     return p;
 }
 
-static void large_release(void* p, cx_usize n) {
+static __attribute__((noinline)) void large_release(void* p, cx_usize n) {
     (void)n;
+    cx_u64 now = now_ms();
     lock(&large_lock);
     cx_usize span = span_of(p);
-    void* gone = keep_block(p, span);
+    void* gone = keep_block(p, span, now);
     unlock(&large_lock);
     if (gone) os_free(gone, span);
+    purge_cache(now);
 }
 
 #ifdef _WIN32
@@ -1074,15 +1208,19 @@ static void* large_grow(void* p, cx_usize old, cx_usize n, cx_usize keep) {
         return p;
     }
     cx_usize got = 0;
-    void* q = n <= HUGE_BLOCK ? take_cached(large_class(n), 16, &got) : NULL;
+    int purged = 0;
+    void* q = n <= HUGE_BLOCK ? take_cached(large_class(n), 16, &got, &purged) : NULL;
     if (q) {
         unlock(&large_lock);
+        if (purged) recommit(q, got);
         /* Copied before the cache links the block in through its first bytes. */
         memcpy(q, p, keep < old ? keep : old);
+        cx_u64 now = now_ms();
         lock(&large_lock);
-        void* gone = keep_block(p, have);
+        void* gone = keep_block(p, have, now);
         unlock(&large_lock);
         if (gone) os_free(gone, have);
+        purge_cache(now);
         return q;
     }
     /* The old address leaves the table before the system can give it out again. */
@@ -1133,21 +1271,22 @@ static void* large_grow(void* p, cx_usize old, cx_usize n, cx_usize keep) {
 
 /* Gives back every big block the cache holds. Returns the bytes. */
 static cx_usize trim_large(void) {
-    void* lists[LARGE_CLASSES];
+    cache_link* lists[LARGE_CLASSES];
     lock(&large_lock);
     for (unsigned c = 0; c < LARGE_CLASSES; c++) {
         lists[c] = large_free[c];
         __atomic_store_n(&large_free[c], NULL, __ATOMIC_RELAXED);
-        for (void* p = lists[c]; p; p = *(void**)p) span_drop(p);
+        for (cache_link* b = lists[c]; b; b = b->next) span_drop(b);
     }
     cx_usize bytes = cached;
     cached = 0;
+    __atomic_store_n(&purge_due, (cx_u64)-1, __ATOMIC_RELAXED);
     unlock(&large_lock);
     for (unsigned c = 0; c < LARGE_CLASSES; c++) {
-        for (void* p = lists[c]; p;) {
-            void* next = *(void**)p;
-            os_free(p, large_size(c));
-            p = next;
+        for (cache_link* b = lists[c]; b;) {
+            cache_link* next = b->next;
+            os_free(b, large_size(c));
+            b = next;
         }
     }
     return bytes;
