@@ -49,6 +49,7 @@ Each pass is a `parallel for` over the regions, on the runtime's pool, and `--th
 | `results/calx-linux.json` | The Calx version on Ubuntu under WSL2 |
 | `results/build-windows.json`, `results/build-linux.json` | How fast Calx builds, from [`build.calx`](build.calx) |
 | `results/script-windows.json`, `results/script-linux.json` | Calx against Rust and Python as scripting languages, from [`script.calx`](script.calx) |
+| `results/suite-windows.json`, `results/suite-linux.json` | Calx against C, Rust, Go and Python on 25 programs, from [`suite.calx`](suite.calx) |
 
 Each file names the commit, the machine (CPU, cores, memory, OS), the toolchain (rustc and its LLVM), and every run's mean tick time. The numbers in the gate are the medians.
 
@@ -182,3 +183,34 @@ A record gives each benchmark's results the time and the commit they were record
 Each program is run as a fresh process, the languages taking turns, in the other order every other round. A program times its own steps, the best of 7, and prints them with a total its work came to, which must be the same in all three languages, or the runner stops. The tables give each step's best over the rounds, and for the whole process its CPU time and the most memory it held, the median over the rounds, from [`std.process`](../docs/std/process.md#what-it-used). It builds the Calx programs with `calx build --release`, the Rust ones with `-C opt-level=3`, one codegen unit, `panic = "abort"` and `x86-64-v3`, and thin LTO for the two with crates, and runs Python's own program, not the `py` launcher. Everything it makes goes in a folder of its own in the temp folder, removed at the end.
 
 It doesn't pin itself to cores. On a processor with two kinds, start it pinned, and the programs it runs are too: on Windows, `start /affinity 5554 /b /wait calx run bench/script.calx` puts it on the i9-13900K's performance cores, and on Linux `taskset -c 4` on one of them.
+
+## Against C, Rust, Go and Python
+
+[`suite.calx`](suite.calx) times Calx against C, Rust, Go and Python on 25 programs, each written in each language with the same algorithm, in [`suite/`](suite/), one folder a benchmark. [Language benchmarks](../docs/language-benchmarks.md) has the results and how they're made.
+
+| Group | Benchmarks |
+| --- | --- |
+| compute | The Benchmarks Game's [`nbody`](suite/nbody/), [`spectralnorm`](suite/spectralnorm/), [`fannkuch`](suite/fannkuch/), [`binarytrees`](suite/binarytrees/), [`mandelbrot`](suite/mandelbrot/), [`fasta`](suite/fasta/), [`knucleotide`](suite/knucleotide/), [`revcomp`](suite/revcomp/), [`regexredux`](suite/regexredux/) and [`pidigits`](suite/pidigits/) |
+| realistic | [`json`](suite/json/), a [`csv`](suite/csv/) report, [`logs`](suite/logs/) analysis, [`wordcount`](suite/wordcount/), [`sort`](suite/sort/), [`hashmap`](suite/hashmap/), many small [`objects`](suite/objects/), building and splitting [`text`](suite/text/), many [`files`](suite/files/), [`compress`](suite/compress/) (gzip, zstd, xz), [`hash`](suite/hash/) (SHA-256, CRC-32) and [`png`](suite/png/) |
+| parallel | [`parmandel`](suite/parmandel/), [`parspectral`](suite/parspectral/) and [`parsum`](suite/parsum/): `parallel for` against Rayon, goroutines and OpenMP |
+| dx | A hello program and a generated 64-module one ([`dx.calx`](dx.calx)) built from scratch, after an edit and unchanged; their sizes; and starting hello |
+
+```sh
+calx run --release bench/suite.calx                            # everything, 5 rounds
+calx run --release bench/suite.calx -- --groups compute         # one group
+calx run --release bench/suite.calx -- --only json,csv --langs calx,rust
+calx run --release bench/suite.calx -- --quick                  # small inputs, one round: does everything build and agree?
+calx run --release bench/suite.calx -- --record                 # written to bench/results/suite-<os>.json
+calx run --release bench/suite.calx -- --tables                 # the docs page's tables and tallies, from the records
+```
+
+It needs `clang`, `cargo`, `go`, Python 3 (`py` on Windows, `python3` elsewhere) and, for the dx group, `ninja` on the PATH, and for the parallel C programs LLVM's OpenMP runtime: the LLVM installer has it on Windows, and on Linux it's a package such as `libomp-dev`, or apt.llvm.org's `libomp-23-dev` for its clang 23. clang's own includes and libraries are searched, and `C_INCLUDE_PATH`, `LIBRARY_PATH` and `LD_LIBRARY_PATH` add to them. A language it can't build is left out of that benchmark, and the run says why. Run it with `--release`: it pins itself on Windows through the system's own functions, and only a release build leaves those out elsewhere, since it sees they're never called.
+
+- **Builds.** Calx with `calx build --release`; C with clang at the flags Calx's release builds use, `-O3 -march=x86-64-v3 -ffp-contract=off -fno-math-errno -flto=thin`, and `-fopenmp` for the parallel ones; Rust with the release profile in [`suite/rust/Cargo.toml`](suite/rust/Cargo.toml) (opt-level 3, thin LTO, one codegen unit, `panic = "abort"`) and `-C target-cpu=x86-64-v3`; Go with `go build`, `GOAMD64=v3` and cgo off, from [`suite/go.mod`](suite/go.mod); Python as it is, with `-I`.
+- **Inputs.** [`inputs.calx`](inputs.calx) writes the inputs from fixed seeds: fasta's output, JSON records, a CSV of sales, an access log, words, numbers, an image. Each benchmark's arguments name the ones it reads.
+- **Checking.** Each program prints what its work came to, and every language must print the same, byte for byte, or that language is left out of the benchmark and the run says so. Lines that start with `info ` may differ between languages, such as a compressor's output size or a parallel sum's last bits. The record keeps them, and says when a program's changed from one run to the next, as a parallel float sum's can.
+- **Timing.** One run to warm up and check, then `--rounds` timed runs, the languages taking turns, in the other order every other round; a program that took over 10 s to warm up runs 3. Each run is a fresh process, timed from outside: wall time, the CPU time of all its threads, and its peak memory. The tables give medians, and the record has every run. On Linux each program starts through [`meter.calx`](meter.calx), which reports those for it: a child's peak resident set there starts at the peak of the process that started it, which for the runner, holding inputs and outputs, would be hundreds of megabytes. Through meter, a program that does nothing peaks at about 2 MB, and the record says how much.
+- **A shared machine.** Each run also measures how busy the rest of the machine was, as other programs' share of all the processors. Over 10%, the run is repeated, up to twice, and the quietest kept; the record says how busy each run's machine was. Builds look for a quiet quarter of a second before they start.
+- **Pinning.** Single-threaded programs run on the i9-13900K's performance cores, one thread on each of 7, out of power throttling. A parallel benchmark at up to 7 threads gets those cores, at 8 all 8, and above that every processor. On Linux, `taskset` pins each command.
+
+A record names the commit it measured, and lists any of the suite's files that differed from it. With `--only` or `--groups`, the benchmarks the run leaves out keep their results from the file.

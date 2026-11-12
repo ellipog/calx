@@ -146,6 +146,7 @@ Hash tables that iterate in exactly the order Java's or fastutil's do, for code 
 2. [Calx spec](CALX_SPEC.md): the design of every feature that isn't built yet
 3. [Tick-loop benchmark](benchmarks.md): the workload Calx is timed against Rust on, how it's measured, and how the two versions are kept comparable
 4. [Scripting benchmarks](scripting-benchmarks.md): Calx against Rust and Python on taking text apart, writing numbers, JSON, a tree of files and starting up, with the CPU time and memory each used
+5. [Language benchmarks](language-benchmarks.md): Calx against C, Rust, Go and Python on 25 programs, from the Benchmarks Game to JSON, CSV, compression and parallel loops, and how fast each builds and starts
 
 
 ## How the docs are organized
