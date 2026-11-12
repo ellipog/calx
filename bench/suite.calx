@@ -166,11 +166,13 @@ fn benches() -> List<Bench> {
 }
 
 // Where the programs run: a mask of processors on Windows, and the same as a list for `taskset`
-// on Linux.
+// on Linux. On Linux each program starts through `meter` (bench/meter.calx), which says what it
+// used, when that's set.
 struct Pin {
     mask: u64
     cpus: String
     threads: u32
+    meter: String
 }
 
 // The processors a run of `threads` threads gets. A single-threaded program, or a parallel one at
@@ -178,16 +180,16 @@ struct Pin {
 // 8; more get every processor.
 fn pin_for(threads: u32, processors: u32) -> Pin {
     if threads <= 7 {
-        return Pin { mask: 0x5554, cpus: String("2,4,6,8,10,12,14"), threads: threads }
+        return Pin { mask: 0x5554, cpus: String("2,4,6,8,10,12,14"), threads: threads, meter: String() }
     }
     if threads == 8 {
-        return Pin { mask: 0x5555, cpus: String("0,2,4,6,8,10,12,14"), threads: threads }
+        return Pin { mask: 0x5555, cpus: String("0,2,4,6,8,10,12,14"), threads: threads, meter: String() }
     }
     var mask: u64 = 0
     for k in 0u32..processors.min(64) {
         mask |= 1u64 << u64(k)
     }
-    return Pin { mask: mask, cpus: "0-{processors - 1}", threads: threads }
+    return Pin { mask: mask, cpus: "0-{processors - 1}", threads: threads, meter: String() }
 }
 
 // Pins this program, and so what it starts, on Windows; Linux pins each command with `taskset`.
@@ -249,10 +251,19 @@ struct Run {
 // Runs a command, stopping on nothing: an error comes back as the text of what went wrong.
 fn run_once(cmd: List<String>, dir: String, envs: List<(String, String)>, pin: Pin) -> Run ! String {
     var full: List<String> = []
+    let report = "{pin.meter}.report"
+    let metered = env.os() == "linux" and not pin.meter.is_empty()
     if env.os() == "linux" {
         full.push("taskset")
         full.push("-c")
         full.push(pin.cpus.copy())
+    }
+    if metered {
+        full.push(pin.meter.copy())
+        full.push(report.copy())
+        if fs.exists(report.copy()) {
+            fs.remove_file(report.copy())!
+        }
     }
     for c in cmd {
         full.push(c.copy())
@@ -281,7 +292,19 @@ fn run_once(cmd: List<String>, dir: String, envs: List<(String, String)>, pin: P
     let busy = f64.nearest(after.0 - before.0) - f64.nearest(u.cpu_ns)
     let total = f64.nearest(after.1 - before.1)
     let load = if total > 0.0 { (busy / total).max(0.0) } else { 0.0 }
-    return Run { wall: wall, cpu: f64.nearest(u.cpu_ns) / 1e6, peak: f64.nearest(u.peak_memory) / 1048576.0, load: load, out: out.text().replace("\r\n", "\n") }
+    var run = Run { wall: wall, cpu: f64.nearest(u.cpu_ns) / 1e6, peak: f64.nearest(u.peak_memory) / 1048576.0, load: load, out: out.text().replace("\r\n", "\n") }
+    if metered {
+        // The program's own wall time, CPU time and peak, without taskset's or meter's.
+        let text = fs.read_text(report.copy())! ?? String()
+        let f = text.split_whitespace()
+        if f.len() != 3 {
+            fail "meter wrote no report for {cmd[0]}"
+        }
+        run.wall = f64.nearest(u64.parse(f[0].copy()) ?? 0) / 1e6
+        run.cpu = f64.nearest(u64.parse(f[1].copy()) ?? 0) / 1e6
+        run.peak = f64.nearest(u64.parse(f[2].copy()) ?? 0) / 1048576.0
+    }
+    return run
 }
 
 // Runs it until the machine was quiet enough, at most three times, and keeps the quietest run.
@@ -1411,7 +1434,7 @@ fn main() {
     }
 
     let work = fs.temp_dir()!.replace("\\", "/")
-    let single = pin_for(1, processors)
+    var single = pin_for(1, processors)
     apply_pin(single.copy())
     let quiet = cpu_times()
     println("suite: building in {work}")
@@ -1419,6 +1442,26 @@ fn main() {
     let after = cpu_times()
     if after.1 > quiet.1 {
         println("suite: the machine was {f64.nearest(after.0 - quiet.0) / f64.nearest(after.1 - quiet.1) * 100.0:.0}% busy while it built")
+    }
+    // On Linux every program starts through meter, so the peak memory is the program's own and
+    // not this one's (bench/meter.calx). What a program that does nothing gets is the floor.
+    var meter = String()
+    var floor = Json.Null
+    if env.os() == "linux" {
+        meter = "{work}/bin/meter"
+        let m = match Command.new(calx.copy()).args(["build", "--release", "{root}/bench/meter.calx", "-o", meter.copy()]).output() {
+            ok(o) => o,
+            err(e) => stop("can't build bench/meter.calx: {e}"),
+        }
+        if not m.status.success() {
+            stop("bench/meter.calx didn't build: {m.error_text().trim()}")
+        }
+        single.meter = meter.copy()
+        let ok(r) = run_once(["true"], work.copy(), [], single.copy()) else {
+            stop("meter can't run `true`")
+        }
+        floor = Json.Float(round_to(r.peak, 2))
+        println("suite: a program that does nothing peaks at {mb(r.peak)} through meter")
     }
 
     var inputs = LinkedMap<String, String>()
@@ -1471,7 +1514,8 @@ fn main() {
         // count either.
         var varied = Set<String>()
         for t in thread_counts {
-            let pin = pin_for(t, processors)
+            var pin = pin_for(t, processors)
+            pin.meter = meter.copy()
             apply_pin(pin.copy())
             let args = resolve(if a.quick { b.quick.copy() } else { b.args.copy() }, mut inputs, work.copy(), a.quick, "{t}")
             var progs = progs_for(b.copy(), langs.copy(), built.copy(), python.copy(), args, t)
@@ -1561,6 +1605,9 @@ fn main() {
         r.insert("machine", machine())
         r.insert("toolchain", toolchains(calx.copy(), python.copy()))
         r.insert("rounds", Json.Int(i64(a.rounds)))
+        if floor != Json.Null {
+            r.insert("peak_mb_of_a_program_that_does_nothing", floor)
+        }
         r.insert("results", Json.Object(merged))
         fs.make_dir_all("{root}/bench/results")!
         fs.write_text(out.copy(), "{pretty(Json.Object(r), 2)}\n")!
