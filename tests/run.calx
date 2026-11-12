@@ -4,8 +4,11 @@
 //     calx run tests/run.calx -- --modes debug,release
 //     calx run tests/run.calx -- tests/integers docs/std     # the tests under folders, or single files
 //
-// It tests the compiler in build/compiler/<os>, so build that first, with
-// `ninja -C build/compiler/windows`, `.../linux` or `.../macos`.
+// It tests the compiler that runs it, with its runtime and standard library, as CI tests a
+// release's. To test the one built in the repository, build it, with
+// `ninja -C build/compiler/windows`, `.../linux` or `.../macos`, and run this with it:
+// `build/compiler/windows/calx run tests/run.calx`. A `calx` on PATH from an install tests that
+// install, which it says first.
 //
 // A test is a `.calx` file under `tests/`, or a fenced `calx` block in `docs/reference/`,
 // `docs/std/` or `docs/guide/` (D41). It says what should happen in comments:
@@ -306,10 +309,13 @@ fn main() {
     // The compiler that runs this, which `calx run` says in CALX, or for a build of this, the one
     // built in the repository.
     let built = "{root}/build/compiler/{env.os()}/calx{if windows { ".exe" } else { "" }}"
-    let calx = slashes(env.variable("CALX") ?? built)
+    let calx = slashes(env.variable("CALX") ?? built.copy())
     if not fs.is_file(calx.copy()) {
         eprintln("no compiler at {calx}; build one, as compiler/README.md says, and run this with it")
         process.exit(2)
+    }
+    if fs.is_file(built.copy()) and slashes(built.copy()).to_lower_root() != calx.to_lower_root() {
+        println("testing {calx}, which runs this, and not {built}; run this with that to test it")
     }
     var modes: List<String> = []
     for m in a.modes.split(",") {
