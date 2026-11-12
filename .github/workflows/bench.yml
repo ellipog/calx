@@ -1,0 +1,58 @@
+name: bench
+
+# Times bench/digest on GitHub's runners, for the speed docs' rows from processors other than the
+# i9-13900K the rest were measured on (CLX-281): the newest nightly, installed as a user installs
+# it, against the runner's Python, whose hashlib is OpenSSL's. Shared virtual machines, so the
+# numbers are rough. Run it by hand: `gh workflow run bench`.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  digest:
+    name: digest (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, windows-11-arm, macos-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Calx
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            CALX_INSTALL="$(cygpath -w "$PWD/build/calx")" CALX_CHANNEL=nightly CALX_NO_MODIFY_PATH=1 \
+              pwsh -NoProfile -File tools/install/install.ps1
+          else
+            CALX_INSTALL="$PWD/build/calx" CALX_CHANNEL=nightly CALX_NO_MODIFY_PATH=1 sh tools/install/install.sh
+          fi
+      - name: Time
+        shell: bash
+        run: |
+          exe=""
+          if [[ "$RUNNER_OS" == Windows ]]; then exe=".exe"; fi
+          calx="build/calx/bin/calx$exe"
+          py=python3
+          command -v python3 > /dev/null || py=python
+          {
+            echo "## ${{ matrix.os }}"
+            echo '```'
+            case "$RUNNER_OS" in
+              Linux) lscpu | grep -E 'Model name|Vendor ID|^CPU\(s\)' ;;
+              macOS) sysctl -n machdep.cpu.brand_string hw.ncpu ;;
+              Windows) pwsh -NoProfile -Command '(Get-CimInstance Win32_Processor).Name' ;;
+            esac
+            "$calx" version
+            "$calx" build --release bench/digest/digest.calx -o build/digest$exe
+            # Two rounds, Calx and Python taking turns.
+            for round in 1 2; do
+              echo "calx, round $round"
+              "build/digest$exe"
+              echo "python, round $round"
+              "$py" -I bench/digest/digest.py
+            done
+            echo '```'
+          } 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"

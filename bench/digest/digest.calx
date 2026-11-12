@@ -1,0 +1,71 @@
+// How fast the runtime's hashes, checksums and cipher go, in MiB/s over 64 MiB, the best of 5:
+// the paths with SHA-NI, AES-NI, PCLMUL and AVX2 on x86 and Arm's SHA, AES, CRC32, PMULL and NEON
+// on Arm64 (CLX-281). bench/digest/digest.py times the same hashes and checksums with Python's
+// hashlib and zlib, which are OpenSSL's and zlib's C. Python has no AES, so CFB8 is Calx's alone.
+//
+//     calx run --release bench/digest/digest.calx
+import std.crypto.{Cfb8}
+import std.hash.{md5, sha1, sha256, sha512}
+import std.time.{Instant}
+import std.xz.{crc64}
+import std.zlib.{adler32, crc32}
+
+const SIZE: usize = 64 << 20
+const ROUNDS: usize = 5
+
+fn rate(ns: u64) -> f64 {
+    return f64.nearest(SIZE) / 1048576.0 / (f64.nearest(ns) / 1e9)
+}
+
+fn main() {
+    var data: List<u8> = []
+    data.reserve(SIZE)
+    var x: u32 = 12345
+    for _ in 0..SIZE {
+        x = x.wrapping_mul(1103515245).wrapping_add(12345)
+        data.push(u8.wrap(x >> 16))
+    }
+    let names = ["md5", "sha1", "sha256", "sha512", "crc32", "adler32", "crc64"]
+    var best: List<u64> = []
+    for _ in names {
+        best.push(u64.MAX)
+    }
+    var encrypt = u64.MAX
+    var decrypt = u64.MAX
+    // A total of what each gave, so none of the work can be left out.
+    var total: u64 = 0
+    let key: List<u8> = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    for _ in 0..ROUNDS {
+        for k in 0..names.len() {
+            let t0 = unsafe { Instant.now() }
+            let got = match k {
+                0 => u64(md5(data)[0]),
+                1 => u64(sha1(data)[0]),
+                2 => u64(sha256(data)[0]),
+                3 => u64(sha512(data)[0]),
+                4 => u64(crc32(data)),
+                5 => u64(adler32(data)),
+                _ => crc64(data),
+            }
+            best[k] = best[k].min(unsafe { Instant.now() }.nanos_since(t0))
+            total = total.wrapping_add(got)
+        }
+        var buf = data.copy()
+        let t0 = unsafe { Instant.now() }
+        var c = Cfb8.new(key, key)
+        c.encrypt(mut buf)
+        let t1 = unsafe { Instant.now() }
+        var d = Cfb8.new(key, key)
+        d.decrypt(mut buf)
+        let t2 = unsafe { Instant.now() }
+        encrypt = encrypt.min(t1.nanos_since(t0))
+        decrypt = decrypt.min(t2.nanos_since(t1))
+        total = total.wrapping_add(u64(buf[SIZE - 1]))
+    }
+    for k in 0..names.len() {
+        println("{names[k]}: {rate(best[k]):.0} MiB/s")
+    }
+    println("cfb8 encrypt: {rate(encrypt):.0} MiB/s")
+    println("cfb8 decrypt: {rate(decrypt):.0} MiB/s")
+    println("total {total}")
+}

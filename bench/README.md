@@ -101,6 +101,17 @@ clang -O3 -march=x86-64-v3 -fno-builtin -o libm bench/math/libm.c -lm
 
 Both print a sum of the results, which must agree to the last digit or two. Each Calx loop passes its sum through [`std.hint.black_box`](../docs/std/hint.md) before the clock is read again: release builds inline `std.math` into the loop (D99), and clang could otherwise move a loop with no side effects past the clock. `libm.c` has an empty `asm` in the same place, since clang otherwise sees that only the last of the 7 sums is used and drops the others' additions. The times, on the reference machine (i9-13900K, pinned to one P-core), are in [std.math](../docs/std/math.md#speed).
 
+## Hashes, checksums and AES
+
+[`digest/digest.calx`](digest/digest.calx) times MD5, SHA-1, SHA-256, SHA-512, CRC-32, Adler-32, CRC-64 and AES-CFB8 both ways, in MiB/s over 64 MiB, the best of 5, and [`digest/digest.py`](digest/digest.py) the same hashes and checksums with Python's `hashlib`, which is OpenSSL's, and `zlib`. Python has no CRC-64 or AES. These are the runtime's paths with x86's SHA-NI, AES-NI, PCLMUL and AVX2, and with Arm64's SHA, AES, CRC32, PMULL and NEON instructions (CLX-281).
+
+```sh
+calx run --release bench/digest/digest.calx
+python -I bench/digest/digest.py
+```
+
+The [bench workflow](../.github/workflows/bench.yml) runs both on GitHub's Arm and x64 runners with the newest nightly, installed as a user installs it: `gh workflow run bench`. The speed sections of [std.hash](../docs/std/hash.md#speed), [std.crypto](../docs/std/crypto.md) and [std.zlib](../docs/std/zlib.md) give its numbers, with the machine each is from.
+
 ## Pushing onto a list
 
 [`push/push.calx`](push/push.calx) pushes a million values onto a list three ways: 4 bytes each, big-endian, as a packet encoder writes an `int`; one byte each, as it writes a VarInt below 128; and an `i64` each, whose type is the list's length's. Each loop runs once onto a new list in a local, which it returns, and twice onto a list it's given to change, which the caller keeps and clears, so no time goes to the allocator: once called directly, so clang can put it inside the caller, and once through a function value it can't see through (`std.hint.black_box`), as a function called from many places is kept apart. A last loop writes each value as an int and then as a VarInt through a writer's methods, a struct that holds the list, as Calcite's packets do. Each time is the best of 50. [`push/push.rs`](push/push.rs) is the same loops with `Vec`, built as the tick benchmark's Rust reference is.
