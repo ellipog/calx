@@ -75,3 +75,60 @@ export function buildTimes() {
 	if (all.length < 3 || all.some((r) => !/\d m?s$/.test(r.windows))) throw new Error("README.md's build-time table isn't label, Windows, Linux");
 	return all;
 }
+
+/** The language suite's languages, in the order its tables have them. */
+export const SUITE_LANGS = [
+	{ id: 'calx', name: 'Calx' },
+	{ id: 'c', name: 'C' },
+	{ id: 'rust', name: 'Rust' },
+	{ id: 'go', name: 'Go' },
+	{ id: 'python', name: 'Python' },
+];
+
+const SUITE_GROUPS = [
+	{ id: 'compute', title: 'Classic compute' },
+	{ id: 'realistic', title: 'Realistic programs' },
+	{ id: 'parallel', title: 'Parallel loops, on every processor' },
+];
+
+/** bench/suite.calx's recorded results on Windows (bench/results/suite-windows.json), for the
+ *  chart on the language benchmarks page: each group's benchmarks with each language's median
+ *  wall time in ms, or why it has none. A parallel benchmark gives its run on the most threads.
+ *  The page's tables are written from the same file, so the two can't disagree for long. */
+export function suite() {
+	const doc = JSON.parse(readFileSync(new URL('bench/results/suite-windows.json', REPO), 'utf8'));
+	const groups = SUITE_GROUPS.map((g) => ({ ...g, rows: [] }));
+	let threads = 0;
+	for (const [name, r] of Object.entries(doc.results)) {
+		const group = groups.find((g) => g.id === r.group);
+		if (!group) continue;
+		let byLang = r;
+		if (r.group === 'parallel') {
+			const counts = Object.keys(r.threads).map(Number);
+			threads = Math.max(...counts);
+			byLang = r.threads[String(threads)];
+		}
+		const ms = {};
+		const why = {};
+		for (const { id } of SUITE_LANGS) {
+			const p = byLang[id];
+			if (p?.status === 'ok') ms[id] = p.median_ms;
+			else why[id] = p ? p.why ?? p.status : 'no program';
+		}
+		// "n-body, 10 million steps" is "n-body" in the chart; the table says the rest.
+		group.rows.push({ name, title: r.title, label: r.title.split(/[:,]/)[0], ms, why });
+	}
+	const tc = doc.toolchain;
+	return {
+		groups: groups.filter((g) => g.rows.length),
+		threads,
+		machine: `${doc.machine.cpu.replace(/^\d+th Gen /, '').replace('(R)', '').replace('(TM)', '')}, ${doc.machine.os.replace('Microsoft ', '')}`,
+		rounds: doc.rounds,
+		versions: {
+			clang: tc.clang.match(/clang version ([\d.]+)/)?.[1],
+			rustc: tc.rustc.match(/rustc ([\d.]+)/)?.[1],
+			go: tc.go.match(/go([\d.]+)/)?.[1],
+			python: tc.python.match(/Python ([\d.]+)/)?.[1],
+		},
+	};
+}

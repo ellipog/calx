@@ -1,0 +1,380 @@
+---
+// Calx against C, Rust, Go and Python on every benchmark of bench/suite: for each, who was faster
+// and by how much, so wins, ties and losses read at a glance. A bar's color is the faster
+// language's, Calx's amber or the other's blue, and its length the factor on a log scale that
+// fills the cell at 16 times; times within 5% of each other are even. The numbers are the recorded
+// run's (src/numbers.mjs), and the table under it has every median.
+import { GITHUB } from '../markdown.mjs';
+import { SUITE_LANGS, suite } from '../numbers.mjs';
+
+const s = suite();
+const OTHERS = SUITE_LANGS.filter((l) => l.id !== 'calx');
+const EVEN = 1.05;
+const FULL = 16;
+
+const fmt = (ms: number) => (ms < 10 ? ms.toFixed(2) : ms < 100 ? ms.toFixed(1) : Math.round(ms).toLocaleString('en-US'));
+const factor = (f: number) => (f < 10 ? f.toFixed(1) : Math.round(f).toString());
+
+type Cell =
+	| { kind: 'none'; tip: string }
+	| { kind: 'even' | 'calx' | 'other'; text: string; width: string; tip: string };
+
+function cell(label: string, ms: Record<string, number>, why: Record<string, string>, lang: { id: string; name: string }): Cell {
+	const calx = ms.calx;
+	const other = ms[lang.id];
+	if (calx === undefined || other === undefined) {
+		const who = calx === undefined ? 'Calx' : lang.name;
+		return { kind: 'none', tip: `<b>${label}</b><br>No ${who} result: ${why[calx === undefined ? 'calx' : lang.id] ?? 'no program'}` };
+	}
+	const times = `Calx <b>${fmt(calx)} ms</b> · ${lang.name} <b>${fmt(other)} ms</b>`;
+	const r = calx / other;
+	if (r < EVEN && r > 1 / EVEN) {
+		return { kind: 'even', text: 'even', width: '0%', tip: `<b>${label}</b><br>${times}<br>Within 5%` };
+	}
+	const f = r < 1 ? 1 / r : r;
+	const width = `${(Math.min(Math.log2(f) / Math.log2(FULL), 1) * 100).toFixed(1)}%`;
+	return r < 1
+		? { kind: 'calx', text: `Calx ${factor(f)}×`, width, tip: `<b>${label}</b><br>${times}<br>Calx ${factor(f)}× faster` }
+		: { kind: 'other', text: `${lang.name} ${factor(f)}×`, width, tip: `<b>${label}</b><br>${times}<br>${lang.name} ${factor(f)}× faster` };
+}
+
+const groups = s.groups.map((g) => ({
+	...g,
+	rows: g.rows.map((r) => ({ ...r, cells: OTHERS.map((l) => cell(r.label, r.ms, r.why, l)) })),
+}));
+// Each language's wins, even results and losses, over the benchmarks both have a time for.
+const tally = OTHERS.map((l, i) => {
+	const t = { name: l.name, calx: 0, even: 0, other: 0 };
+	for (const g of groups) for (const r of g.rows) {
+		const c = r.cells[i];
+		if (c.kind !== 'none') t[c.kind]++;
+	}
+	return t;
+});
+---
+
+<div class="suite">
+	<div class="suite-head">
+		<div class="suite-title">Who was faster, and how many times<span>median wall time</span></div>
+		<div class="legend">
+			<span><i class="k-calx"></i>Calx faster</span>
+			<span><i class="k-other"></i>the other language faster</span>
+			<span><i class="k-even"></i>within 5%</span>
+		</div>
+	</div>
+	<div class="cq">
+		<div class="grid head" aria-hidden="true">
+			<div></div>
+			{
+				tally.map((t) => (
+					<div class="tally">
+						<b>vs {t.name}</b>
+						<span>
+							{t.calx} faster · {t.even} even · {t.other} slower
+						</span>
+					</div>
+				))
+			}
+		</div>
+		{
+			groups.map((g) => (
+				<section class="group">
+					<h3>{g.id === 'parallel' ? `Parallel loops, on all ${s.threads} threads` : g.title}</h3>
+					{g.rows.map((r) => (
+						<div class="grid row">
+							<div class="lab" title={r.title}>{r.label}</div>
+							{r.cells.map((c, i) => (
+								<div class={`c c-${c.kind}`} data-tip={c.tip}>
+									<span class="vs">vs {OTHERS[i].name}</span>
+									{c.kind === 'none' ? (
+										<span class="t">—</span>
+									) : (
+										<>
+											<span class="t">{c.text}</span>
+											<span class="track"><span class="bar" style={`width:${c.width}`} /></span>
+										</>
+									)}
+								</div>
+							))}
+						</div>
+					))}
+				</section>
+			))
+		}
+	</div>
+	<div class="suite-foot">
+		<span>
+			Median of {s.rounds} runs on an {s.machine}, single-threaded programs pinned to performance cores. clang {s.versions.clang},
+			rustc {s.versions.rustc}, Go {s.versions.go}, Python {s.versions.python}.{' '}
+			<a href="#how-its-measured">How it's measured</a>
+			{' · '}
+			<a href={`${GITHUB}/tree/main/bench/suite`}>The programs</a>
+			{' · '}
+			<a href={`${GITHUB}/blob/main/bench/results/suite-windows.json`}>Every recorded run</a>
+		</span>
+		<details class="tbl">
+			<summary>Show as a table</summary>
+			<table>
+				<thead>
+					<tr>
+						<th>Benchmark</th>
+						{SUITE_LANGS.map((l) => <th>{l.name}, ms</th>)}
+					</tr>
+				</thead>
+				<tbody>
+					{
+						groups.flatMap((g) =>
+							g.rows.map((r) => (
+								<tr>
+									<td>{g.id === 'parallel' ? `${r.title}, ${s.threads} threads` : r.title}</td>
+									{SUITE_LANGS.map((l) => (
+										<td>{r.ms[l.id] === undefined ? '—' : fmt(r.ms[l.id])}</td>
+									))}
+								</tr>
+							))
+						)
+					}
+				</tbody>
+			</table>
+		</details>
+	</div>
+	<div class="tip" hidden></div>
+</div>
+
+<script>
+	for (const chart of document.querySelectorAll<HTMLElement>('.suite')) {
+		const tip = chart.querySelector<HTMLElement>('.tip')!;
+		for (const c of chart.querySelectorAll<HTMLElement>('.c')) {
+			c.addEventListener('mousemove', (e) => {
+				tip.innerHTML = c.dataset.tip ?? '';
+				tip.hidden = false;
+				tip.style.left = `${Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8)}px`;
+				tip.style.top = `${e.clientY + 16}px`;
+			});
+			c.addEventListener('mouseleave', () => (tip.hidden = true));
+		}
+	}
+</script>
+
+<style>
+	.cq {
+		container: suite / inline-size;
+		margin-top: 22px;
+	}
+	.suite {
+		margin-top: 40px;
+		border: 1px solid var(--line);
+		border-radius: 16px;
+		background: var(--raised);
+		padding: 30px 32px 26px;
+		box-shadow: var(--shadow);
+	}
+	.suite-head {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		gap: 12px 20px;
+		flex-wrap: wrap;
+	}
+	.suite-title {
+		font: 600 17px var(--f-body);
+	}
+	.suite-title span {
+		font: 400 14px var(--f-body);
+		color: var(--ink-3);
+		margin-left: 8px;
+	}
+	.legend {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px 20px;
+		font-size: 14px;
+		color: var(--ink-2);
+	}
+	.legend i {
+		width: 12px;
+		height: 12px;
+		border-radius: 3px;
+		display: inline-block;
+		margin-right: 8px;
+		vertical-align: -1px;
+	}
+	.k-calx {
+		background: var(--calx);
+	}
+	.k-other {
+		background: var(--rust);
+	}
+	.k-even {
+		background: var(--line-2);
+	}
+	.grid {
+		display: grid;
+		grid-template-columns: minmax(110px, 1.1fr) repeat(4, minmax(0, 1fr));
+		gap: 0 14px;
+		align-items: center;
+	}
+	.head {
+		padding-bottom: 10px;
+		border-bottom: 1px solid var(--line);
+	}
+	.tally b {
+		display: block;
+		font: 600 14px var(--f-body);
+		color: var(--ink);
+	}
+	.tally span {
+		font-size: 12.5px;
+		color: var(--ink-3);
+	}
+	.group h3 {
+		font: 600 14px var(--f-body);
+		color: var(--ink-2);
+		margin: 18px 0 4px;
+	}
+	.row {
+		padding: 4px 0;
+	}
+	.lab {
+		font-size: 13.5px;
+		color: var(--ink-2);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.c {
+		position: relative;
+		display: grid;
+		gap: 3px;
+		cursor: default;
+		padding: 3px 0;
+	}
+	.c::before {
+		content: '';
+		position: absolute;
+		inset: -1px -6px;
+		border-radius: 6px;
+	}
+	.c:hover::before {
+		background: var(--amber-wash);
+	}
+	.vs {
+		display: none;
+		font-size: 11.5px;
+		color: var(--ink-3);
+	}
+	.t {
+		position: relative;
+		font: 500 12.5px var(--f-mono);
+		color: var(--ink);
+		white-space: nowrap;
+	}
+	.c-even .t,
+	.c-none .t {
+		color: var(--ink-3);
+	}
+	.track {
+		position: relative;
+		height: 8px;
+		border-radius: 0 4px 4px 0;
+		background: linear-gradient(var(--line), var(--line)) left / 1px 100% no-repeat;
+	}
+	.bar {
+		display: block;
+		height: 100%;
+		min-width: 2px;
+		border-radius: 0 4px 4px 0;
+	}
+	.c-calx .bar {
+		background: var(--calx);
+	}
+	.c-other .bar {
+		background: var(--rust);
+	}
+	.c-even .bar {
+		background: var(--line-2);
+	}
+	.suite-foot {
+		display: flex;
+		justify-content: space-between;
+		gap: 20px;
+		align-items: baseline;
+		flex-wrap: wrap;
+		margin-top: 22px;
+		padding-top: 18px;
+		border-top: 1px solid var(--line);
+		font-size: 13.5px;
+		color: var(--ink-3);
+	}
+	.suite-foot a {
+		font-weight: 500;
+		color: var(--ink);
+		text-decoration: none;
+		border-bottom: 1.5px solid var(--amber);
+		padding-bottom: 1px;
+	}
+	.suite-foot a:hover {
+		border-bottom-width: 2.5px;
+	}
+	details summary {
+		cursor: pointer;
+		font: 500 13.5px var(--f-body);
+		color: var(--ink-2);
+	}
+	details {
+		min-width: 0;
+		max-width: 100%;
+	}
+	details table {
+		margin-top: 12px;
+		display: block;
+		max-width: 100%;
+		overflow-x: auto;
+	}
+	.tip {
+		position: fixed;
+		z-index: 50;
+		pointer-events: none;
+		background: var(--ink);
+		color: var(--paper);
+		font: 500 12.5px/1.45 var(--f-body);
+		padding: 8px 11px;
+		border-radius: 8px;
+		box-shadow: var(--shadow);
+		max-width: 280px;
+	}
+	.tip :global(b) {
+		font-family: var(--f-mono);
+		font-weight: 600;
+	}
+	.tip[hidden] {
+		display: none;
+	}
+	@media (max-width: 600px) {
+		.suite {
+			padding: 22px 16px;
+		}
+	}
+	/* Too narrow for a row of five: the benchmark's name goes above its four cells, and the
+	   tallies, which no longer line up with columns, say which language each cell is against. */
+	@container suite (max-width: 620px) {
+		.head {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 10px 14px;
+		}
+		.head > div:first-child {
+			display: none;
+		}
+		.row {
+			grid-template-columns: repeat(4, minmax(0, 1fr));
+			gap: 2px 10px;
+			padding: 6px 0;
+		}
+		.lab {
+			grid-column: 1 / -1;
+		}
+		.vs {
+			display: block;
+		}
+	}
+</style>

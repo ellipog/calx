@@ -5,6 +5,7 @@
 import { editUrl, testedExamples } from '../facts.mjs';
 import { sectionOf, sectionPath } from '../seo.mjs';
 import PerfChart from './PerfChart.astro';
+import SuiteChart from './SuiteChart.astro';
 
 const route = Astro.locals.starlightRoute;
 const { title, description } = route.entry.data;
@@ -51,6 +52,15 @@ const PAGE_TITLE_ID = '_top';
 		<section class="results" aria-labelledby="results" data-pagefind-ignore>
 			<h2 id="results" class="sr-only">Results</h2>
 			<PerfChart />
+		</section>
+	)
+}
+{
+	// The language benchmarks open with who won each one, then the tables say by how much.
+	route.id === 'language-benchmarks' && (
+		<section class="results" aria-labelledby="results" data-pagefind-ignore>
+			<h2 id="results" class="sr-only">Results</h2>
+			<SuiteChart />
 		</section>
 	)
 }
