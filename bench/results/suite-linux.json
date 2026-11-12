@@ -1,12 +1,12 @@
 {
-  "recorded": "2026-11-12T11:41:17Z",
-  "commit": "dbdb4566e3564791d23ac4e56042d3a36f713a03",
+  "recorded": "2026-11-12T14:39:14Z",
+  "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0",
   "machine": {
     "platform": "linux",
     "os": "Ubuntu 26.04 LTS",
     "cpu": "13th Gen Intel(R) Core(TM) i9-13900K",
     "cores": 16,
-    "threads": 32,
+    "threads": 7,
     "memory_gib": 23.3,
     "kernel": "6.18.33.2-microsoft-standard-WSL2",
     "note": "WSL2: the guest's CPU topology isn't the host's, so the thread counts come from Windows"
@@ -26,8 +26,8 @@
       "python": "python -I"
     }
   },
-  "rounds": 5,
-  "peak_mb_of_a_program_that_does_nothing": 2.14,
+  "rounds": 3,
+  "peak_mb_of_a_program_that_does_nothing": 2.19,
   "results": {
     "nbody": {
       "title": "n-body, 10 million steps",
@@ -805,91 +805,120 @@
       "args": [
         "2500000"
       ],
-      "recorded": "2026-11-12T11:27:51Z",
-      "commit": "12540050d1ba575c681e06bcdd765111d144c8b3",
+      "recorded": "2026-11-12T14:33:26Z",
+      "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0",
       "calx": {
         "status": "ok",
-        "median_ms": 211.503,
-        "best_ms": 207.993,
-        "cpu_ms": 211.4,
-        "peak_mb": 2.14,
+        "median_ms": 202.028,
+        "best_ms": 201.061,
+        "cpu_ms": 200.4,
+        "peak_mb": 2.17,
         "wall_ms": [
-          207.993,
-          216.448,
-          211.503
+          228.539,
+          202.028,
+          201.061
         ],
         "cpu_ms_runs": [
-          207.9,
-          216.3,
-          211.4
+          227.4,
+          200.4,
+          198.8
         ],
         "peak_mb_runs": [
-          2.13,
-          2.14,
-          2.16
+          2.16,
+          2.17,
+          2.2
         ],
         "machine_busy": [
           0.003,
-          0.002,
-          0.001
+          0.003,
+          0.002
         ],
         "runs_repeated": 0,
         "output_sha256": "e3600e481ef68b6cd9ac155f93f40ff06a4094128f62895eb37b28ebad7cab72"
       },
       "c": {
         "status": "ok",
-        "median_ms": 222.963,
-        "best_ms": 222.599,
-        "cpu_ms": 222.9,
-        "peak_mb": 2.13,
+        "median_ms": 223.84,
+        "best_ms": 220.476,
+        "cpu_ms": 220.2,
+        "peak_mb": 2.15,
         "wall_ms": [
-          224.775,
-          222.599,
-          222.963
+          220.476,
+          223.84,
+          224.7
         ],
         "cpu_ms_runs": [
-          224.6,
-          222.5,
-          222.9
+          217.9,
+          220.2,
+          224.3
         ],
         "peak_mb_runs": [
-          2.11,
-          2.16,
-          2.13
+          2.18,
+          2.14,
+          2.15
         ],
         "machine_busy": [
           0.003,
-          0.004,
-          0.002
+          0.001,
+          0.004
         ],
         "runs_repeated": 0,
         "output_sha256": "e3600e481ef68b6cd9ac155f93f40ff06a4094128f62895eb37b28ebad7cab72"
       },
       "rust": {
         "status": "ok",
-        "median_ms": 218.828,
-        "best_ms": 215.879,
-        "cpu_ms": 218.8,
-        "peak_mb": 2.21,
+        "median_ms": 218.308,
+        "best_ms": 218.279,
+        "cpu_ms": 216.0,
+        "peak_mb": 2.2,
         "wall_ms": [
-          215.879,
-          218.918,
-          218.828
+          218.308,
+          218.279,
+          219.121
         ],
         "cpu_ms_runs": [
-          215.8,
-          218.8,
-          218.8
+          214.9,
+          216.0,
+          216.3
         ],
         "peak_mb_runs": [
-          2.18,
-          2.24,
-          2.21
+          2.21,
+          2.19,
+          2.2
         ],
         "machine_busy": [
-          0.002,
-          0.003,
-          0.004
+          0.004,
+          0.008,
+          0.003
+        ],
+        "runs_repeated": 0,
+        "output_sha256": "e3600e481ef68b6cd9ac155f93f40ff06a4094128f62895eb37b28ebad7cab72"
+      },
+      "python": {
+        "status": "ok",
+        "median_ms": 2219.082,
+        "best_ms": 2209.65,
+        "cpu_ms": 2190.6,
+        "peak_mb": 9.86,
+        "wall_ms": [
+          2219.082,
+          2209.65,
+          2293.531
+        ],
+        "cpu_ms_runs": [
+          2193.6,
+          2190.6,
+          2167.9
+        ],
+        "peak_mb_runs": [
+          9.84,
+          9.86,
+          9.86
+        ],
+        "machine_busy": [
+          0.001,
+          0.0,
+          0.001
         ],
         "runs_repeated": 0,
         "output_sha256": "e3600e481ef68b6cd9ac155f93f40ff06a4094128f62895eb37b28ebad7cab72"
@@ -921,36 +950,9 @@
           0.003
         ],
         "runs_repeated": 0,
-        "output_sha256": "e3600e481ef68b6cd9ac155f93f40ff06a4094128f62895eb37b28ebad7cab72"
-      },
-      "python": {
-        "status": "ok",
-        "median_ms": 2203.618,
-        "best_ms": 2186.685,
-        "cpu_ms": 2181.6,
-        "peak_mb": 9.89,
-        "wall_ms": [
-          2186.685,
-          2203.618,
-          2249.425
-        ],
-        "cpu_ms_runs": [
-          2163.8,
-          2181.6,
-          2229.0
-        ],
-        "peak_mb_runs": [
-          9.89,
-          9.89,
-          9.91
-        ],
-        "machine_busy": [
-          0.001,
-          0.0,
-          0.0
-        ],
-        "runs_repeated": 0,
-        "output_sha256": "e3600e481ef68b6cd9ac155f93f40ff06a4094128f62895eb37b28ebad7cab72"
+        "output_sha256": "e3600e481ef68b6cd9ac155f93f40ff06a4094128f62895eb37b28ebad7cab72",
+        "recorded": "2026-11-12T11:27:51Z",
+        "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
       }
     },
     "knucleotide": {
@@ -959,31 +961,31 @@
       "args": [
         "@fasta"
       ],
-      "recorded": "2026-11-12T11:28:05Z",
-      "commit": "12540050d1ba575c681e06bcdd765111d144c8b3",
+      "recorded": "2026-11-12T14:33:39Z",
+      "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0",
       "calx": {
         "status": "ok",
-        "median_ms": 158.807,
-        "best_ms": 156.467,
-        "cpu_ms": 158.7,
-        "peak_mb": 25.39,
+        "median_ms": 153.251,
+        "best_ms": 148.93,
+        "cpu_ms": 149.7,
+        "peak_mb": 25.4,
         "wall_ms": [
-          158.807,
-          163.551,
-          156.467
+          148.93,
+          153.251,
+          153.957
         ],
         "cpu_ms_runs": [
-          158.7,
-          163.5,
-          156.4
+          146.1,
+          149.7,
+          153.9
         ],
         "peak_mb_runs": [
+          25.41,
           25.38,
-          25.39,
-          25.41
+          25.4
         ],
         "machine_busy": [
-          0.0,
+          0.001,
           0.0,
           0.001
         ],
@@ -992,28 +994,28 @@
       },
       "c": {
         "status": "ok",
-        "median_ms": 164.04,
-        "best_ms": 163.925,
-        "cpu_ms": 164.0,
-        "peak_mb": 22.89,
+        "median_ms": 161.067,
+        "best_ms": 160.736,
+        "cpu_ms": 161.0,
+        "peak_mb": 22.88,
         "wall_ms": [
-          163.925,
-          169.251,
-          164.04
+          161.067,
+          160.736,
+          163.034
         ],
         "cpu_ms_runs": [
-          163.8,
-          169.2,
-          164.0
+          161.0,
+          160.7,
+          161.4
         ],
         "peak_mb_runs": [
           22.89,
-          22.91,
-          22.87
+          22.87,
+          22.88
         ],
         "machine_busy": [
           0.0,
-          0.002,
+          0.0,
           0.0
         ],
         "runs_repeated": 0,
@@ -1021,29 +1023,58 @@
       },
       "rust": {
         "status": "ok",
-        "median_ms": 331.398,
-        "best_ms": 326.365,
-        "cpu_ms": 331.3,
-        "peak_mb": 24.84,
+        "median_ms": 310.279,
+        "best_ms": 306.538,
+        "cpu_ms": 310.2,
+        "peak_mb": 25.16,
         "wall_ms": [
-          343.035,
-          331.398,
-          326.365
+          310.279,
+          306.538,
+          312.948
         ],
         "cpu_ms_runs": [
-          340.6,
-          331.3,
-          326.3
+          310.2,
+          306.1,
+          312.9
         ],
         "peak_mb_runs": [
-          25.13,
-          24.84,
-          24.84
+          25.16,
+          25.16,
+          25.16
         ],
         "machine_busy": [
           0.0,
-          0.0,
+          0.001,
           0.001
+        ],
+        "runs_repeated": 0,
+        "output_sha256": "a4e678fe05f2147f674ac924b21073cc08889843f61d53f6b80c4d3656ec9017"
+      },
+      "python": {
+        "status": "ok",
+        "median_ms": 2415.061,
+        "best_ms": 2393.664,
+        "cpu_ms": 2405.0,
+        "peak_mb": 31.12,
+        "wall_ms": [
+          2415.061,
+          2393.664,
+          2420.128
+        ],
+        "cpu_ms_runs": [
+          2405.0,
+          2385.6,
+          2410.2
+        ],
+        "peak_mb_runs": [
+          30.83,
+          31.12,
+          31.12
+        ],
+        "machine_busy": [
+          0.001,
+          0.0,
+          0.0
         ],
         "runs_repeated": 0,
         "output_sha256": "a4e678fe05f2147f674ac924b21073cc08889843f61d53f6b80c4d3656ec9017"
@@ -1075,36 +1106,9 @@
           0.0
         ],
         "runs_repeated": 0,
-        "output_sha256": "a4e678fe05f2147f674ac924b21073cc08889843f61d53f6b80c4d3656ec9017"
-      },
-      "python": {
-        "status": "ok",
-        "median_ms": 2494.048,
-        "best_ms": 2415.789,
-        "cpu_ms": 2431.7,
-        "peak_mb": 30.93,
-        "wall_ms": [
-          2553.183,
-          2494.048,
-          2415.789
-        ],
-        "cpu_ms_runs": [
-          2472.7,
-          2431.7,
-          2407.9
-        ],
-        "peak_mb_runs": [
-          30.82,
-          30.93,
-          30.94
-        ],
-        "machine_busy": [
-          0.0,
-          0.0,
-          0.0
-        ],
-        "runs_repeated": 0,
-        "output_sha256": "a4e678fe05f2147f674ac924b21073cc08889843f61d53f6b80c4d3656ec9017"
+        "output_sha256": "a4e678fe05f2147f674ac924b21073cc08889843f61d53f6b80c4d3656ec9017",
+        "recorded": "2026-11-12T11:28:05Z",
+        "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
       }
     },
     "revcomp": {
@@ -1113,91 +1117,120 @@
       "args": [
         "@fasta"
       ],
-      "recorded": "2026-11-12T11:28:06Z",
-      "commit": "12540050d1ba575c681e06bcdd765111d144c8b3",
+      "recorded": "2026-11-12T14:33:39Z",
+      "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0",
       "calx": {
         "status": "ok",
-        "median_ms": 16.887,
-        "best_ms": 16.581,
-        "cpu_ms": 16.6,
-        "peak_mb": 16.63,
+        "median_ms": 15.793,
+        "best_ms": 15.306,
+        "cpu_ms": 14.3,
+        "peak_mb": 16.62,
         "wall_ms": [
-          16.887,
-          17.978,
-          16.581
+          15.306,
+          15.793,
+          16.067
         ],
         "cpu_ms_runs": [
-          16.6,
-          17.6,
-          14.8
+          12.6,
+          14.3,
+          15.4
         ],
         "peak_mb_runs": [
-          16.64,
-          16.63,
-          16.62
+          16.61,
+          16.62,
+          16.64
         ],
         "machine_busy": [
-          0.0,
-          0.018,
-          0.0
+          0.014,
+          0.01,
+          0.026
         ],
         "runs_repeated": 0,
         "output_sha256": "8de4ea5c51517866ea55956020e16adfb075fa5987c0dec6b4f302b0c39e6d6e"
       },
       "c": {
         "status": "ok",
-        "median_ms": 12.849,
-        "best_ms": 12.015,
-        "cpu_ms": 12.7,
-        "peak_mb": 16.36,
+        "median_ms": 13.474,
+        "best_ms": 12.24,
+        "cpu_ms": 10.7,
+        "peak_mb": 16.37,
         "wall_ms": [
-          12.849,
-          13.427,
-          12.015
+          12.24,
+          13.474,
+          14.238
         ],
         "cpu_ms_runs": [
-          12.7,
-          12.9,
-          11.2
+          10.7,
+          9.5,
+          12.8
         ],
         "peak_mb_runs": [
-          16.09,
-          16.41,
-          16.36
+          16.37,
+          16.36,
+          16.39
         ],
         "machine_busy": [
-          0.013,
-          0.034,
-          0.018
+          0.0,
+          0.021,
+          0.0
         ],
         "runs_repeated": 0,
         "output_sha256": "8de4ea5c51517866ea55956020e16adfb075fa5987c0dec6b4f302b0c39e6d6e"
       },
       "rust": {
         "status": "ok",
-        "median_ms": 13.901,
-        "best_ms": 13.084,
-        "cpu_ms": 13.4,
+        "median_ms": 14.676,
+        "best_ms": 13.92,
+        "cpu_ms": 12.9,
         "peak_mb": 16.4,
         "wall_ms": [
-          13.084,
-          13.996,
-          13.901
+          13.92,
+          15.429,
+          14.676
         ],
         "cpu_ms_runs": [
-          11.2,
-          13.4,
-          13.7
+          10.5,
+          12.9,
+          13.2
         ],
         "peak_mb_runs": [
           16.4,
-          16.4,
-          16.32
+          16.14,
+          16.4
         ],
         "machine_busy": [
           0.0,
-          0.0,
-          0.029
+          0.03,
+          0.013
+        ],
+        "runs_repeated": 0,
+        "output_sha256": "8de4ea5c51517866ea55956020e16adfb075fa5987c0dec6b4f302b0c39e6d6e"
+      },
+      "python": {
+        "status": "ok",
+        "median_ms": 63.075,
+        "best_ms": 60.388,
+        "cpu_ms": 53.5,
+        "peak_mb": 29.96,
+        "wall_ms": [
+          60.388,
+          69.479,
+          63.075
+        ],
+        "cpu_ms_runs": [
+          53.0,
+          55.5,
+          53.5
+        ],
+        "peak_mb_runs": [
+          30.07,
+          29.96,
+          29.95
+        ],
+        "machine_busy": [
+          0.009,
+          0.006,
+          0.003
         ],
         "runs_repeated": 0,
         "output_sha256": "8de4ea5c51517866ea55956020e16adfb075fa5987c0dec6b4f302b0c39e6d6e"
@@ -1229,36 +1262,9 @@
           0.0
         ],
         "runs_repeated": 0,
-        "output_sha256": "8de4ea5c51517866ea55956020e16adfb075fa5987c0dec6b4f302b0c39e6d6e"
-      },
-      "python": {
-        "status": "ok",
-        "median_ms": 64.14,
-        "best_ms": 62.812,
-        "cpu_ms": 53.7,
-        "peak_mb": 29.95,
-        "wall_ms": [
-          64.14,
-          64.908,
-          62.812
-        ],
-        "cpu_ms_runs": [
-          53.8,
-          53.7,
-          52.9
-        ],
-        "peak_mb_runs": [
-          29.95,
-          29.91,
-          29.99
-        ],
-        "machine_busy": [
-          0.007,
-          0.0,
-          0.008
-        ],
-        "runs_repeated": 0,
-        "output_sha256": "8de4ea5c51517866ea55956020e16adfb075fa5987c0dec6b4f302b0c39e6d6e"
+        "output_sha256": "8de4ea5c51517866ea55956020e16adfb075fa5987c0dec6b4f302b0c39e6d6e",
+        "recorded": "2026-11-12T11:28:06Z",
+        "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
       }
     },
     "regexredux": {
@@ -1267,33 +1273,33 @@
       "args": [
         "@fasta"
       ],
-      "recorded": "2026-11-12T11:28:28Z",
-      "commit": "12540050d1ba575c681e06bcdd765111d144c8b3",
+      "recorded": "2026-11-12T14:33:45Z",
+      "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0",
       "calx": {
         "status": "ok",
-        "median_ms": 189.12,
-        "best_ms": 187.691,
-        "cpu_ms": 189.0,
-        "peak_mb": 43.42,
+        "median_ms": 96.626,
+        "best_ms": 95.987,
+        "cpu_ms": 95.3,
+        "peak_mb": 43.37,
         "wall_ms": [
-          187.691,
-          189.12,
-          192.423
+          96.626,
+          97.485,
+          95.987
         ],
         "cpu_ms_runs": [
-          187.6,
-          189.0,
-          192.4
+          95.4,
+          93.5,
+          95.3
         ],
         "peak_mb_runs": [
-          43.44,
+          43.37,
           43.42,
-          43.4
+          43.36
         ],
         "machine_busy": [
           0.0,
-          0.003,
-          0.001
+          0.0,
+          0.002
         ],
         "runs_repeated": 0,
         "output_sha256": "42beaef6f821eb897ab39911cfe760939c76032dbe81f14fd189660f757fe36f"
@@ -1304,29 +1310,58 @@
       },
       "rust": {
         "status": "ok",
-        "median_ms": 137.536,
-        "best_ms": 132.066,
-        "cpu_ms": 135.8,
-        "peak_mb": 51.85,
+        "median_ms": 137.765,
+        "best_ms": 135.782,
+        "cpu_ms": 134.7,
+        "peak_mb": 51.79,
         "wall_ms": [
-          132.066,
-          137.536,
-          139.32
+          135.782,
+          139.828,
+          137.765
         ],
         "cpu_ms_runs": [
-          132.0,
-          137.4,
-          135.8
+          134.2,
+          139.8,
+          134.7
         ],
         "peak_mb_runs": [
-          51.86,
-          51.85,
-          51.84
+          51.79,
+          51.79,
+          51.79
         ],
         "machine_busy": [
+          0.001,
+          0.002,
+          0.001
+        ],
+        "runs_repeated": 0,
+        "output_sha256": "42beaef6f821eb897ab39911cfe760939c76032dbe81f14fd189660f757fe36f"
+      },
+      "python": {
+        "status": "ok",
+        "median_ms": 1259.548,
+        "best_ms": 1246.611,
+        "cpu_ms": 1234.0,
+        "peak_mb": 101.57,
+        "wall_ms": [
+          1270.829,
+          1259.548,
+          1246.611
+        ],
+        "cpu_ms_runs": [
+          1234.0,
+          1251.1,
+          1232.6
+        ],
+        "peak_mb_runs": [
+          101.5,
+          101.63,
+          101.57
+        ],
+        "machine_busy": [
+          0.001,
           0.0,
-          0.003,
-          0.003
+          0.0
         ],
         "runs_repeated": 0,
         "output_sha256": "42beaef6f821eb897ab39911cfe760939c76032dbe81f14fd189660f757fe36f"
@@ -1358,36 +1393,9 @@
           0.001
         ],
         "runs_repeated": 0,
-        "output_sha256": "42beaef6f821eb897ab39911cfe760939c76032dbe81f14fd189660f757fe36f"
-      },
-      "python": {
-        "status": "ok",
-        "median_ms": 1315.909,
-        "best_ms": 1240.786,
-        "cpu_ms": 1280.1,
-        "peak_mb": 101.58,
-        "wall_ms": [
-          1240.786,
-          1315.909,
-          1484.894
-        ],
-        "cpu_ms_runs": [
-          1231.8,
-          1309.6,
-          1280.1
-        ],
-        "peak_mb_runs": [
-          101.51,
-          101.58,
-          101.66
-        ],
-        "machine_busy": [
-          0.001,
-          0.0,
-          0.001
-        ],
-        "runs_repeated": 0,
-        "output_sha256": "42beaef6f821eb897ab39911cfe760939c76032dbe81f14fd189660f757fe36f"
+        "output_sha256": "42beaef6f821eb897ab39911cfe760939c76032dbe81f14fd189660f757fe36f",
+        "recorded": "2026-11-12T11:28:28Z",
+        "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
       }
     },
     "pidigits": {
@@ -1396,33 +1404,33 @@
       "args": [
         "10000"
       ],
-      "recorded": "2026-11-12T11:28:58Z",
-      "commit": "12540050d1ba575c681e06bcdd765111d144c8b3",
+      "recorded": "2026-11-12T14:34:10Z",
+      "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0",
       "calx": {
         "status": "ok",
-        "median_ms": 968.652,
-        "best_ms": 953.44,
-        "cpu_ms": 967.2,
-        "peak_mb": 5.88,
+        "median_ms": 568.687,
+        "best_ms": 567.476,
+        "cpu_ms": 566.6,
+        "peak_mb": 4.64,
         "wall_ms": [
-          968.652,
-          953.44,
-          970.25
+          567.476,
+          568.687,
+          570.509
         ],
         "cpu_ms_runs": [
-          967.2,
-          953.3,
-          970.1
+          566.6,
+          566.6,
+          569.4
         ],
         "peak_mb_runs": [
-          5.89,
-          5.88,
-          5.88
+          4.65,
+          4.64,
+          4.61
         ],
         "machine_busy": [
-          0.003,
           0.0,
-          0.0
+          0.0,
+          0.001
         ],
         "runs_repeated": 0,
         "output_sha256": "bdfa7b6c756d96492f472f97aee9cc139bee954d271eacedfd7ace5d2875f06c"
@@ -1433,29 +1441,58 @@
       },
       "rust": {
         "status": "ok",
-        "median_ms": 3611.576,
-        "best_ms": 3580.976,
-        "cpu_ms": 3609.8,
-        "peak_mb": 3.07,
+        "median_ms": 3532.812,
+        "best_ms": 3524.342,
+        "cpu_ms": 3528.5,
+        "peak_mb": 2.93,
         "wall_ms": [
-          3678.588,
-          3580.976,
-          3611.576
+          3532.812,
+          3524.342,
+          3691.882
         ],
         "cpu_ms_runs": [
-          3675.5,
-          3579.4,
-          3609.8
+          3528.5,
+          3521.3,
+          3685.4
         ],
         "peak_mb_runs": [
-          3.07,
-          3.11,
-          2.92
+          2.9,
+          2.95,
+          2.93
         ],
         "machine_busy": [
-          0.008,
+          0.002,
           0.001,
-          0.0
+          0.001
+        ],
+        "runs_repeated": 0,
+        "output_sha256": "bdfa7b6c756d96492f472f97aee9cc139bee954d271eacedfd7ace5d2875f06c"
+      },
+      "python": {
+        "status": "ok",
+        "median_ms": 1899.587,
+        "best_ms": 1827.899,
+        "cpu_ms": 1889.3,
+        "peak_mb": 9.74,
+        "wall_ms": [
+          2000.572,
+          1899.587,
+          1827.899
+        ],
+        "cpu_ms_runs": [
+          1898.8,
+          1889.3,
+          1814.6
+        ],
+        "peak_mb_runs": [
+          9.74,
+          9.83,
+          9.74
+        ],
+        "machine_busy": [
+          0.001,
+          0.001,
+          0.001
         ],
         "runs_repeated": 0,
         "output_sha256": "bdfa7b6c756d96492f472f97aee9cc139bee954d271eacedfd7ace5d2875f06c"
@@ -1487,36 +1524,9 @@
           0.0
         ],
         "runs_repeated": 0,
-        "output_sha256": "bdfa7b6c756d96492f472f97aee9cc139bee954d271eacedfd7ace5d2875f06c"
-      },
-      "python": {
-        "status": "ok",
-        "median_ms": 1828.603,
-        "best_ms": 1825.432,
-        "cpu_ms": 1816.9,
-        "peak_mb": 9.83,
-        "wall_ms": [
-          1825.432,
-          1828.603,
-          1887.01
-        ],
-        "cpu_ms_runs": [
-          1815.2,
-          1816.9,
-          1862.9
-        ],
-        "peak_mb_runs": [
-          9.82,
-          9.84,
-          9.83
-        ],
-        "machine_busy": [
-          0.005,
-          0.004,
-          0.0
-        ],
-        "runs_repeated": 0,
-        "output_sha256": "bdfa7b6c756d96492f472f97aee9cc139bee954d271eacedfd7ace5d2875f06c"
+        "output_sha256": "bdfa7b6c756d96492f472f97aee9cc139bee954d271eacedfd7ace5d2875f06c",
+        "recorded": "2026-11-12T11:28:58Z",
+        "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
       }
     },
     "json": {
@@ -1525,33 +1535,33 @@
       "args": [
         "@json"
       ],
-      "recorded": "2026-11-12T11:29:07Z",
-      "commit": "12540050d1ba575c681e06bcdd765111d144c8b3",
+      "recorded": "2026-11-12T14:34:15Z",
+      "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0",
       "calx": {
         "status": "ok",
-        "median_ms": 233.477,
-        "best_ms": 231.575,
-        "cpu_ms": 233.4,
-        "peak_mb": 328.63,
+        "median_ms": 239.56,
+        "best_ms": 232.089,
+        "cpu_ms": 232.1,
+        "peak_mb": 328.64,
         "wall_ms": [
-          241.468,
-          233.477,
-          231.575
+          232.089,
+          239.56,
+          244.435
         ],
         "cpu_ms_runs": [
-          241.4,
-          233.4,
-          231.5
+          231.5,
+          232.1,
+          244.4
         ],
         "peak_mb_runs": [
-          328.6,
           328.64,
-          328.63
+          328.12,
+          328.64
         ],
         "machine_busy": [
           0.0,
-          0.0,
-          0.001
+          0.001,
+          0.002
         ],
         "runs_repeated": 0,
         "output_sha256": "f6b5f04321440883f95eac057e3a7a1dbe2c7be80fd9493748b3285da32ab554"
@@ -1562,29 +1572,58 @@
       },
       "rust": {
         "status": "ok",
-        "median_ms": 321.407,
-        "best_ms": 307.82,
-        "cpu_ms": 321.3,
-        "peak_mb": 450.91,
+        "median_ms": 324.725,
+        "best_ms": 306.673,
+        "cpu_ms": 324.6,
+        "peak_mb": 450.89,
         "wall_ms": [
-          322.932,
-          307.82,
-          321.407
+          306.673,
+          324.725,
+          325.307
         ],
         "cpu_ms_runs": [
-          322.8,
-          307.7,
-          321.3
+          306.6,
+          324.6,
+          325.2
         ],
         "peak_mb_runs": [
-          450.91,
-          450.93,
-          450.9
+          450.89,
+          450.88,
+          450.91
         ],
         "machine_busy": [
-          0.003,
           0.0,
-          0.001
+          0.0,
+          0.0
+        ],
+        "runs_repeated": 0,
+        "output_sha256": "f6b5f04321440883f95eac057e3a7a1dbe2c7be80fd9493748b3285da32ab554"
+      },
+      "python": {
+        "status": "ok",
+        "median_ms": 841.926,
+        "best_ms": 750.174,
+        "cpu_ms": 768.3,
+        "peak_mb": 459.14,
+        "wall_ms": [
+          841.926,
+          862.576,
+          750.174
+        ],
+        "cpu_ms_runs": [
+          799.0,
+          768.3,
+          741.1
+        ],
+        "peak_mb_runs": [
+          458.88,
+          459.14,
+          459.5
+        ],
+        "machine_busy": [
+          0.001,
+          0.001,
+          0.0
         ],
         "runs_repeated": 0,
         "output_sha256": "f6b5f04321440883f95eac057e3a7a1dbe2c7be80fd9493748b3285da32ab554"
@@ -1616,36 +1655,9 @@
           0.0
         ],
         "runs_repeated": 0,
-        "output_sha256": "f6b5f04321440883f95eac057e3a7a1dbe2c7be80fd9493748b3285da32ab554"
-      },
-      "python": {
-        "status": "ok",
-        "median_ms": 755.454,
-        "best_ms": 752.462,
-        "cpu_ms": 745.7,
-        "peak_mb": 459.21,
-        "wall_ms": [
-          755.454,
-          752.462,
-          756.767
-        ],
-        "cpu_ms_runs": [
-          745.7,
-          742.8,
-          746.5
-        ],
-        "peak_mb_runs": [
-          459.13,
-          459.49,
-          459.21
-        ],
-        "machine_busy": [
-          0.001,
-          0.001,
-          0.002
-        ],
-        "runs_repeated": 0,
-        "output_sha256": "f6b5f04321440883f95eac057e3a7a1dbe2c7be80fd9493748b3285da32ab554"
+        "output_sha256": "f6b5f04321440883f95eac057e3a7a1dbe2c7be80fd9493748b3285da32ab554",
+        "recorded": "2026-11-12T11:29:07Z",
+        "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
       }
     },
     "csv": {
@@ -1654,91 +1666,120 @@
       "args": [
         "@csv"
       ],
-      "recorded": "2026-11-12T11:29:11Z",
-      "commit": "12540050d1ba575c681e06bcdd765111d144c8b3",
+      "recorded": "2026-11-12T14:34:19Z",
+      "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0",
       "calx": {
         "status": "ok",
-        "median_ms": 79.168,
-        "best_ms": 77.485,
-        "cpu_ms": 79.1,
-        "peak_mb": 37.89,
+        "median_ms": 77.551,
+        "best_ms": 76.924,
+        "cpu_ms": 75.9,
+        "peak_mb": 37.87,
         "wall_ms": [
-          83.165,
-          77.485,
-          79.168
+          78.026,
+          77.551,
+          76.924
         ],
         "cpu_ms_runs": [
-          79.2,
-          77.4,
-          79.1
+          76.7,
+          74.1,
+          75.9
         ],
         "peak_mb_runs": [
-          37.89,
-          37.89,
-          37.89
+          37.85,
+          37.88,
+          37.87
         ],
         "machine_busy": [
-          0.007,
-          0.0,
-          0.015
+          0.001,
+          0.002,
+          0.002
         ],
         "runs_repeated": 0,
         "output_sha256": "850ecdb88f8a28d151d6b8575b907c91cd440a2563934b01e1da7af6d8b03037"
       },
       "c": {
         "status": "ok",
-        "median_ms": 163.804,
-        "best_ms": 159.585,
-        "cpu_ms": 162.9,
-        "peak_mb": 37.62,
+        "median_ms": 165.814,
+        "best_ms": 159.035,
+        "cpu_ms": 162.6,
+        "peak_mb": 37.64,
         "wall_ms": [
-          163.804,
-          167.271,
-          159.585
+          171.439,
+          159.035,
+          165.814
         ],
         "cpu_ms_runs": [
-          162.9,
-          163.6,
-          159.5
+          170.1,
+          157.7,
+          162.6
         ],
         "peak_mb_runs": [
-          37.62,
+          37.65,
           37.63,
-          37.61
+          37.64
         ],
         "machine_busy": [
-          0.005,
-          0.005,
-          0.0
+          0.002,
+          0.0,
+          0.001
         ],
         "runs_repeated": 0,
         "output_sha256": "850ecdb88f8a28d151d6b8575b907c91cd440a2563934b01e1da7af6d8b03037"
       },
       "rust": {
         "status": "ok",
-        "median_ms": 100.946,
-        "best_ms": 99.814,
-        "cpu_ms": 100.8,
-        "peak_mb": 2.16,
+        "median_ms": 106.319,
+        "best_ms": 100.92,
+        "cpu_ms": 102.4,
+        "peak_mb": 2.14,
         "wall_ms": [
-          101.904,
-          100.946,
-          99.814
+          100.92,
+          108.417,
+          106.319
         ],
         "cpu_ms_runs": [
-          101.7,
-          100.8,
-          99.8
+          98.1,
+          102.4,
+          104.2
         ],
         "peak_mb_runs": [
-          2.16,
+          2.15,
           2.14,
-          2.16
+          2.14
+        ],
+        "machine_busy": [
+          0.001,
+          0.002,
+          0.002
+        ],
+        "runs_repeated": 0,
+        "output_sha256": "850ecdb88f8a28d151d6b8575b907c91cd440a2563934b01e1da7af6d8b03037"
+      },
+      "python": {
+        "status": "ok",
+        "median_ms": 547.417,
+        "best_ms": 541.255,
+        "cpu_ms": 538.5,
+        "peak_mb": 9.96,
+        "wall_ms": [
+          541.255,
+          547.417,
+          556.877
+        ],
+        "cpu_ms_runs": [
+          532.2,
+          538.5,
+          544.7
+        ],
+        "peak_mb_runs": [
+          9.87,
+          9.96,
+          10.22
         ],
         "machine_busy": [
           0.0,
-          0.003,
-          0.006
+          0.001,
+          0.001
         ],
         "runs_repeated": 0,
         "output_sha256": "850ecdb88f8a28d151d6b8575b907c91cd440a2563934b01e1da7af6d8b03037"
@@ -1770,36 +1811,9 @@
           0.008
         ],
         "runs_repeated": 0,
-        "output_sha256": "850ecdb88f8a28d151d6b8575b907c91cd440a2563934b01e1da7af6d8b03037"
-      },
-      "python": {
-        "status": "ok",
-        "median_ms": 553.529,
-        "best_ms": 546.705,
-        "cpu_ms": 545.0,
-        "peak_mb": 9.91,
-        "wall_ms": [
-          651.934,
-          546.705,
-          553.529
-        ],
-        "cpu_ms_runs": [
-          549.6,
-          536.6,
-          545.0
-        ],
-        "peak_mb_runs": [
-          10.14,
-          9.91,
-          9.91
-        ],
-        "machine_busy": [
-          0.001,
-          0.002,
-          0.0
-        ],
-        "runs_repeated": 0,
-        "output_sha256": "850ecdb88f8a28d151d6b8575b907c91cd440a2563934b01e1da7af6d8b03037"
+        "output_sha256": "850ecdb88f8a28d151d6b8575b907c91cd440a2563934b01e1da7af6d8b03037",
+        "recorded": "2026-11-12T11:29:11Z",
+        "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
       }
     },
     "logs": {
@@ -1808,91 +1822,120 @@
       "args": [
         "@log"
       ],
-      "recorded": "2026-11-12T11:29:22Z",
-      "commit": "12540050d1ba575c681e06bcdd765111d144c8b3",
+      "recorded": "2026-11-12T14:34:28Z",
+      "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0",
       "calx": {
         "status": "ok",
-        "median_ms": 383.258,
-        "best_ms": 379.914,
-        "cpu_ms": 383.1,
-        "peak_mb": 139.63,
+        "median_ms": 277.089,
+        "best_ms": 257.409,
+        "cpu_ms": 276.7,
+        "peak_mb": 139.64,
         "wall_ms": [
-          408.079,
-          383.258,
-          379.914
+          277.089,
+          257.409,
+          283.004
         ],
         "cpu_ms_runs": [
-          408.0,
-          383.1,
-          379.7
+          276.7,
+          256.7,
+          282.7
         ],
         "peak_mb_runs": [
-          139.63,
-          139.61,
-          139.64
+          139.64,
+          139.65,
+          139.63
         ],
         "machine_busy": [
-          0.001,
           0.0,
-          0.001
+          0.0,
+          0.003
         ],
         "runs_repeated": 0,
         "output_sha256": "26dc92cd26bf57c545deda27e26d18fbae1ce15c409d61ec77145e20747e60f8"
       },
       "c": {
         "status": "ok",
-        "median_ms": 194.733,
-        "best_ms": 191.083,
-        "cpu_ms": 194.6,
-        "peak_mb": 122.42,
+        "median_ms": 212.569,
+        "best_ms": 189.555,
+        "cpu_ms": 209.8,
+        "peak_mb": 122.48,
         "wall_ms": [
-          194.733,
-          191.083,
-          226.193
+          241.621,
+          212.569,
+          189.555
         ],
         "cpu_ms_runs": [
-          194.6,
-          191.0,
-          226.1
+          234.8,
+          209.8,
+          184.0
         ],
         "peak_mb_runs": [
-          122.44,
-          122.4,
-          122.42
+          122.48,
+          122.42,
+          122.5
         ],
         "machine_busy": [
-          0.002,
           0.001,
-          0.0
+          0.001,
+          0.001
         ],
         "runs_repeated": 0,
         "output_sha256": "26dc92cd26bf57c545deda27e26d18fbae1ce15c409d61ec77145e20747e60f8"
       },
       "rust": {
         "status": "ok",
-        "median_ms": 482.169,
-        "best_ms": 455.259,
-        "cpu_ms": 482.1,
+        "median_ms": 487.292,
+        "best_ms": 472.756,
+        "cpu_ms": 484.8,
         "peak_mb": 137.09,
         "wall_ms": [
-          502.302,
-          482.169,
-          455.259
+          487.292,
+          510.843,
+          472.756
         ],
         "cpu_ms_runs": [
-          502.2,
-          482.1,
-          449.7
+          484.8,
+          509.2,
+          469.1
         ],
         "peak_mb_runs": [
           137.09,
           137.09,
-          137.08
+          137.05
+        ],
+        "machine_busy": [
+          0.001,
+          0.0,
+          0.0
+        ],
+        "runs_repeated": 0,
+        "output_sha256": "26dc92cd26bf57c545deda27e26d18fbae1ce15c409d61ec77145e20747e60f8"
+      },
+      "python": {
+        "status": "ok",
+        "median_ms": 1103.297,
+        "best_ms": 1075.149,
+        "cpu_ms": 1087.6,
+        "peak_mb": 33.62,
+        "wall_ms": [
+          1103.297,
+          1075.149,
+          1170.327
+        ],
+        "cpu_ms_runs": [
+          1087.6,
+          1060.9,
+          1159.1
+        ],
+        "peak_mb_runs": [
+          33.62,
+          33.1,
+          33.65
         ],
         "machine_busy": [
           0.0,
           0.0,
-          0.0
+          0.001
         ],
         "runs_repeated": 0,
         "output_sha256": "26dc92cd26bf57c545deda27e26d18fbae1ce15c409d61ec77145e20747e60f8"
@@ -1924,36 +1967,9 @@
           0.001
         ],
         "runs_repeated": 0,
-        "output_sha256": "26dc92cd26bf57c545deda27e26d18fbae1ce15c409d61ec77145e20747e60f8"
-      },
-      "python": {
-        "status": "ok",
-        "median_ms": 1120.341,
-        "best_ms": 1093.788,
-        "cpu_ms": 1113.3,
-        "peak_mb": 33.6,
-        "wall_ms": [
-          1121.872,
-          1120.341,
-          1093.788
-        ],
-        "cpu_ms_runs": [
-          1113.3,
-          1114.4,
-          1085.3
-        ],
-        "peak_mb_runs": [
-          33.61,
-          33.6,
-          33.46
-        ],
-        "machine_busy": [
-          0.0,
-          0.001,
-          0.0
-        ],
-        "runs_repeated": 0,
-        "output_sha256": "26dc92cd26bf57c545deda27e26d18fbae1ce15c409d61ec77145e20747e60f8"
+        "output_sha256": "26dc92cd26bf57c545deda27e26d18fbae1ce15c409d61ec77145e20747e60f8",
+        "recorded": "2026-11-12T11:29:22Z",
+        "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
       }
     },
     "wordcount": {
@@ -1962,32 +1978,32 @@
       "args": [
         "@words"
       ],
-      "recorded": "2026-11-12T11:29:30Z",
-      "commit": "12540050d1ba575c681e06bcdd765111d144c8b3",
+      "recorded": "2026-11-12T14:34:34Z",
+      "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0",
       "calx": {
         "status": "ok",
-        "median_ms": 176.336,
-        "best_ms": 172.217,
-        "cpu_ms": 173.1,
-        "peak_mb": 94.38,
+        "median_ms": 142.653,
+        "best_ms": 137.188,
+        "cpu_ms": 141.8,
+        "peak_mb": 94.39,
         "wall_ms": [
-          177.906,
-          176.336,
-          172.217
+          176.386,
+          142.653,
+          137.188
         ],
         "cpu_ms_runs": [
-          177.8,
-          173.1,
-          172.1
+          176.3,
+          141.8,
+          137.1
         ],
         "peak_mb_runs": [
-          94.38,
-          94.38,
+          94.39,
+          94.35,
           94.39
         ],
         "machine_busy": [
           0.0,
-          0.0,
+          0.004,
           0.001
         ],
         "runs_repeated": 0,
@@ -1995,56 +2011,85 @@
       },
       "c": {
         "status": "ok",
-        "median_ms": 146.032,
-        "best_ms": 143.273,
-        "cpu_ms": 146.0,
-        "peak_mb": 47.95,
+        "median_ms": 172.736,
+        "best_ms": 172.216,
+        "cpu_ms": 171.1,
+        "peak_mb": 47.98,
         "wall_ms": [
-          143.273,
-          146.032,
-          150.724
+          230.77,
+          172.736,
+          172.216
         ],
         "cpu_ms_runs": [
-          143.2,
-          146.0,
-          146.6
+          228.5,
+          171.1,
+          168.8
         ],
         "peak_mb_runs": [
-          48.21,
-          47.94,
-          47.95
+          47.96,
+          47.98,
+          48.21
         ],
         "machine_busy": [
-          0.001,
-          0.003,
-          0.001
+          0.0,
+          0.0,
+          0.0
         ],
         "runs_repeated": 0,
         "output_sha256": "764482ba35fd73d5d6404acfa076d1883e6f1ceaadb28060f381131cbb85974b"
       },
       "rust": {
         "status": "ok",
-        "median_ms": 197.045,
-        "best_ms": 194.077,
-        "cpu_ms": 197.0,
-        "peak_mb": 87.16,
+        "median_ms": 232.614,
+        "best_ms": 215.491,
+        "cpu_ms": 231.9,
+        "peak_mb": 86.88,
         "wall_ms": [
-          197.045,
-          206.06,
-          194.077
+          253.736,
+          215.491,
+          232.614
         ],
         "cpu_ms_runs": [
-          197.0,
-          206.0,
-          194.0
+          253.1,
+          214.6,
+          231.9
         ],
         "peak_mb_runs": [
           87.16,
-          87.32,
-          86.89
+          86.88,
+          86.88
         ],
         "machine_busy": [
-          0.0,
+          0.001,
+          0.001,
+          0.0
+        ],
+        "runs_repeated": 0,
+        "output_sha256": "764482ba35fd73d5d6404acfa076d1883e6f1ceaadb28060f381131cbb85974b"
+      },
+      "python": {
+        "status": "ok",
+        "median_ms": 884.78,
+        "best_ms": 870.751,
+        "cpu_ms": 873.7,
+        "peak_mb": 363.59,
+        "wall_ms": [
+          1009.236,
+          884.78,
+          870.751
+        ],
+        "cpu_ms_runs": [
+          996.4,
+          873.7,
+          847.3
+        ],
+        "peak_mb_runs": [
+          363.62,
+          363.59,
+          363.57
+        ],
+        "machine_busy": [
+          0.001,
           0.0,
           0.0
         ],
@@ -2078,36 +2123,9 @@
           0.0
         ],
         "runs_repeated": 0,
-        "output_sha256": "764482ba35fd73d5d6404acfa076d1883e6f1ceaadb28060f381131cbb85974b"
-      },
-      "python": {
-        "status": "ok",
-        "median_ms": 857.223,
-        "best_ms": 834.364,
-        "cpu_ms": 828.6,
-        "peak_mb": 363.56,
-        "wall_ms": [
-          834.364,
-          860.53,
-          857.223
-        ],
-        "cpu_ms_runs": [
-          828.6,
-          789.2,
-          848.1
-        ],
-        "peak_mb_runs": [
-          363.62,
-          363.56,
-          363.52
-        ],
-        "machine_busy": [
-          0.001,
-          0.0,
-          0.0
-        ],
-        "runs_repeated": 0,
-        "output_sha256": "764482ba35fd73d5d6404acfa076d1883e6f1ceaadb28060f381131cbb85974b"
+        "output_sha256": "764482ba35fd73d5d6404acfa076d1883e6f1ceaadb28060f381131cbb85974b",
+        "recorded": "2026-11-12T11:29:30Z",
+        "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
       }
     },
     "sort": {
@@ -2116,32 +2134,32 @@
       "args": [
         "@numbers"
       ],
-      "recorded": "2026-11-12T11:29:54Z",
-      "commit": "12540050d1ba575c681e06bcdd765111d144c8b3",
+      "recorded": "2026-11-12T14:34:53Z",
+      "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0",
       "calx": {
         "status": "ok",
-        "median_ms": 568.355,
-        "best_ms": 563.56,
-        "cpu_ms": 568.2,
-        "peak_mb": 243.62,
+        "median_ms": 261.206,
+        "best_ms": 260.157,
+        "cpu_ms": 259.6,
+        "peak_mb": 282.11,
         "wall_ms": [
-          568.355,
-          568.73,
-          563.56
+          294.039,
+          261.206,
+          260.157
         ],
         "cpu_ms_runs": [
-          568.2,
-          568.6,
-          563.4
+          293.9,
+          257.4,
+          259.6
         ],
         "peak_mb_runs": [
-          243.62,
-          243.64,
-          243.61
+          281.88,
+          282.13,
+          282.11
         ],
         "machine_busy": [
-          0.002,
           0.0,
+          0.002,
           0.0
         ],
         "runs_repeated": 0,
@@ -2149,58 +2167,87 @@
       },
       "c": {
         "status": "ok",
-        "median_ms": 1215.619,
-        "best_ms": 1212.857,
-        "cpu_ms": 1211.2,
-        "peak_mb": 136.39,
+        "median_ms": 1231.167,
+        "best_ms": 1204.955,
+        "cpu_ms": 1224.0,
+        "peak_mb": 136.42,
         "wall_ms": [
-          1219.26,
-          1212.857,
-          1215.619
+          1254.936,
+          1204.955,
+          1231.167
         ],
         "cpu_ms_runs": [
-          1214.5,
-          1207.9,
-          1211.2
+          1224.0,
+          1200.1,
+          1224.5
         ],
         "peak_mb_runs": [
-          136.41,
+          136.45,
           136.39,
-          136.39
+          136.42
         ],
         "machine_busy": [
-          0.0,
           0.001,
-          0.0
+          0.0,
+          0.001
         ],
         "runs_repeated": 0,
         "output_sha256": "85fb1b8e719271caa04d386ea3a5786a0295b422b3ad3510e9639fc5e105e362"
       },
       "rust": {
         "status": "ok",
-        "median_ms": 313.541,
-        "best_ms": 306.428,
-        "cpu_ms": 313.4,
+        "median_ms": 319.367,
+        "best_ms": 314.687,
+        "cpu_ms": 319.3,
         "peak_mb": 182.42,
         "wall_ms": [
-          306.428,
-          316.851,
-          313.541
+          325.055,
+          319.367,
+          314.687
         ],
         "cpu_ms_runs": [
-          306.3,
-          316.7,
-          313.4
+          325.0,
+          319.3,
+          311.1
         ],
         "peak_mb_runs": [
-          182.4,
           182.43,
-          182.42
+          182.42,
+          182.39
         ],
         "machine_busy": [
           0.0,
-          0.001,
-          0.002
+          0.0,
+          0.008
+        ],
+        "runs_repeated": 0,
+        "output_sha256": "85fb1b8e719271caa04d386ea3a5786a0295b422b3ad3510e9639fc5e105e362"
+      },
+      "python": {
+        "status": "ok",
+        "median_ms": 2931.339,
+        "best_ms": 2925.816,
+        "cpu_ms": 2916.4,
+        "peak_mb": 587.61,
+        "wall_ms": [
+          3066.024,
+          2931.339,
+          2925.816
+        ],
+        "cpu_ms_runs": [
+          3058.9,
+          2916.4,
+          2913.5
+        ],
+        "peak_mb_runs": [
+          587.55,
+          587.63,
+          587.61
+        ],
+        "machine_busy": [
+          0.0,
+          0.0,
+          0.0
         ],
         "runs_repeated": 0,
         "output_sha256": "85fb1b8e719271caa04d386ea3a5786a0295b422b3ad3510e9639fc5e105e362"
@@ -2232,36 +2279,9 @@
           0.0
         ],
         "runs_repeated": 0,
-        "output_sha256": "85fb1b8e719271caa04d386ea3a5786a0295b422b3ad3510e9639fc5e105e362"
-      },
-      "python": {
-        "status": "ok",
-        "median_ms": 2946.296,
-        "best_ms": 2855.448,
-        "cpu_ms": 2938.8,
-        "peak_mb": 587.56,
-        "wall_ms": [
-          3133.211,
-          2855.448,
-          2946.296
-        ],
-        "cpu_ms_runs": [
-          3015.7,
-          2845.7,
-          2938.8
-        ],
-        "peak_mb_runs": [
-          587.38,
-          587.57,
-          587.56
-        ],
-        "machine_busy": [
-          0.0,
-          0.0,
-          0.0
-        ],
-        "runs_repeated": 0,
-        "output_sha256": "85fb1b8e719271caa04d386ea3a5786a0295b422b3ad3510e9639fc5e105e362"
+        "output_sha256": "85fb1b8e719271caa04d386ea3a5786a0295b422b3ad3510e9639fc5e105e362",
+        "recorded": "2026-11-12T11:29:54Z",
+        "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
       }
     },
     "hashmap": {
@@ -2271,91 +2291,120 @@
         "@numbers",
         "2000000"
       ],
-      "recorded": "2026-11-12T11:30:10Z",
-      "commit": "12540050d1ba575c681e06bcdd765111d144c8b3",
+      "recorded": "2026-11-12T14:35:07Z",
+      "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0",
       "calx": {
         "status": "ok",
-        "median_ms": 297.003,
-        "best_ms": 296.76,
-        "cpu_ms": 296.9,
-        "peak_mb": 283.1,
+        "median_ms": 279.38,
+        "best_ms": 275.622,
+        "cpu_ms": 278.2,
+        "peak_mb": 267.62,
         "wall_ms": [
-          297.003,
-          304.97,
-          296.76
+          283.132,
+          275.622,
+          279.38
         ],
         "cpu_ms_runs": [
-          296.9,
-          299.9,
-          296.6
+          282.3,
+          274.3,
+          278.2
         ],
         "peak_mb_runs": [
-          283.15,
-          282.88,
-          283.1
+          267.62,
+          267.38,
+          267.64
         ],
         "machine_busy": [
           0.001,
-          0.002,
-          0.0
+          0.0,
+          0.001
         ],
         "runs_repeated": 0,
         "output_sha256": "32f9e57c28ba1bf89e5e5ef48d36bb7805562fb6c3b5263036788418d97e62fb"
       },
       "c": {
         "status": "ok",
-        "median_ms": 497.975,
-        "best_ms": 488.686,
-        "cpu_ms": 497.9,
-        "peak_mb": 204.28,
+        "median_ms": 499.113,
+        "best_ms": 487.301,
+        "cpu_ms": 495.5,
+        "peak_mb": 204.25,
         "wall_ms": [
-          488.686,
-          497.975,
-          503.131
+          499.113,
+          508.716,
+          487.301
         ],
         "cpu_ms_runs": [
-          488.6,
-          497.9,
-          503.1
+          495.5,
+          507.7,
+          483.4
         ],
         "peak_mb_runs": [
-          204.28,
-          204.29,
-          204.24
+          204.26,
+          204.24,
+          204.25
         ],
         "machine_busy": [
           0.0,
-          0.0,
-          0.005
+          0.001,
+          0.0
         ],
         "runs_repeated": 0,
         "output_sha256": "32f9e57c28ba1bf89e5e5ef48d36bb7805562fb6c3b5263036788418d97e62fb"
       },
       "rust": {
         "status": "ok",
-        "median_ms": 666.002,
-        "best_ms": 613.624,
-        "cpu_ms": 665.9,
-        "peak_mb": 240.21,
+        "median_ms": 681.412,
+        "best_ms": 674.303,
+        "cpu_ms": 677.7,
+        "peak_mb": 240.14,
         "wall_ms": [
-          613.624,
-          666.002,
-          688.998
+          683.566,
+          681.412,
+          674.303
         ],
         "cpu_ms_runs": [
-          613.5,
-          665.9,
-          688.9
+          682.8,
+          677.7,
+          674.1
         ],
         "peak_mb_runs": [
-          240.18,
-          240.22,
-          240.21
+          240.14,
+          239.95,
+          240.2
+        ],
+        "machine_busy": [
+          0.0,
+          0.001,
+          0.001
+        ],
+        "runs_repeated": 0,
+        "output_sha256": "32f9e57c28ba1bf89e5e5ef48d36bb7805562fb6c3b5263036788418d97e62fb"
+      },
+      "python": {
+        "status": "ok",
+        "median_ms": 2044.992,
+        "best_ms": 2012.882,
+        "cpu_ms": 2034.6,
+        "peak_mb": 375.97,
+        "wall_ms": [
+          2086.778,
+          2044.992,
+          2012.882
+        ],
+        "cpu_ms_runs": [
+          2076.2,
+          2034.6,
+          2001.0
+        ],
+        "peak_mb_runs": [
+          375.97,
+          375.97,
+          376.16
         ],
         "machine_busy": [
           0.001,
           0.0,
-          0.0
+          0.001
         ],
         "runs_repeated": 0,
         "output_sha256": "32f9e57c28ba1bf89e5e5ef48d36bb7805562fb6c3b5263036788418d97e62fb"
@@ -2387,36 +2436,9 @@
           0.001
         ],
         "runs_repeated": 0,
-        "output_sha256": "32f9e57c28ba1bf89e5e5ef48d36bb7805562fb6c3b5263036788418d97e62fb"
-      },
-      "python": {
-        "status": "ok",
-        "median_ms": 2135.55,
-        "best_ms": 1903.016,
-        "cpu_ms": 2123.5,
-        "peak_mb": 375.97,
-        "wall_ms": [
-          1903.016,
-          2182.564,
-          2135.55
-        ],
-        "cpu_ms_runs": [
-          1896.8,
-          2172.1,
-          2123.5
-        ],
-        "peak_mb_runs": [
-          375.97,
-          376.0,
-          375.92
-        ],
-        "machine_busy": [
-          0.001,
-          0.002,
-          0.0
-        ],
-        "runs_repeated": 0,
-        "output_sha256": "32f9e57c28ba1bf89e5e5ef48d36bb7805562fb6c3b5263036788418d97e62fb"
+        "output_sha256": "32f9e57c28ba1bf89e5e5ef48d36bb7805562fb6c3b5263036788418d97e62fb",
+        "recorded": "2026-11-12T11:30:10Z",
+        "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
       }
     },
     "objects": {
@@ -2580,91 +2602,120 @@
       "args": [
         "1000000"
       ],
-      "recorded": "2026-11-12T11:30:37Z",
-      "commit": "12540050d1ba575c681e06bcdd765111d144c8b3",
+      "recorded": "2026-11-12T14:35:11Z",
+      "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0",
       "calx": {
         "status": "ok",
-        "median_ms": 151.55,
-        "best_ms": 147.244,
-        "cpu_ms": 151.4,
+        "median_ms": 114.989,
+        "best_ms": 114.353,
+        "cpu_ms": 114.5,
         "peak_mb": 76.39,
         "wall_ms": [
-          152.374,
-          151.55,
-          147.244
+          115.419,
+          114.989,
+          114.353
         ],
         "cpu_ms_runs": [
-          152.3,
-          151.4,
-          143.2
+          114.5,
+          114.9,
+          111.9
         ],
         "peak_mb_runs": [
-          76.37,
           76.39,
-          76.39
+          76.38,
+          76.41
         ],
         "machine_busy": [
+          0.001,
           0.0,
-          0.002,
-          0.001
+          0.008
         ],
         "runs_repeated": 0,
         "output_sha256": "c36c223129ed7b0ec690c9ad02a24036409d14ed3969230df0013c5e635198d1"
       },
       "c": {
         "status": "ok",
-        "median_ms": 124.141,
-        "best_ms": 124.039,
-        "cpu_ms": 124.1,
-        "peak_mb": 76.36,
+        "median_ms": 123.379,
+        "best_ms": 121.368,
+        "cpu_ms": 119.4,
+        "peak_mb": 76.41,
         "wall_ms": [
-          124.039,
-          124.141,
-          124.473
+          121.368,
+          123.379,
+          123.648
         ],
         "cpu_ms_runs": [
-          124.0,
-          124.1,
-          124.3
+          118.5,
+          119.4,
+          121.0
         ],
         "peak_mb_runs": [
-          76.36,
-          76.43,
-          76.35
+          76.41,
+          76.39,
+          76.41
         ],
         "machine_busy": [
-          0.004,
           0.0,
-          0.0
+          0.0,
+          0.002
         ],
         "runs_repeated": 0,
         "output_sha256": "c36c223129ed7b0ec690c9ad02a24036409d14ed3969230df0013c5e635198d1"
       },
       "rust": {
         "status": "ok",
-        "median_ms": 128.108,
-        "best_ms": 127.321,
-        "cpu_ms": 128.0,
+        "median_ms": 126.721,
+        "best_ms": 125.963,
+        "cpu_ms": 124.8,
         "peak_mb": 75.89,
         "wall_ms": [
-          127.321,
-          128.108,
-          128.881
+          132.344,
+          126.721,
+          125.963
         ],
         "cpu_ms_runs": [
-          127.2,
-          128.0,
-          128.7
+          128.5,
+          122.7,
+          124.8
         ],
         "peak_mb_runs": [
           75.89,
           75.89,
-          76.14
+          76.34
         ],
         "machine_busy": [
           0.0,
-          0.003,
-          0.015
+          0.002,
+          0.0
+        ],
+        "runs_repeated": 0,
+        "output_sha256": "c36c223129ed7b0ec690c9ad02a24036409d14ed3969230df0013c5e635198d1"
+      },
+      "python": {
+        "status": "ok",
+        "median_ms": 579.35,
+        "best_ms": 571.743,
+        "cpu_ms": 565.9,
+        "peak_mb": 205.49,
+        "wall_ms": [
+          579.35,
+          580.387,
+          571.743
+        ],
+        "cpu_ms_runs": [
+          565.9,
+          572.1,
+          563.0
+        ],
+        "peak_mb_runs": [
+          205.55,
+          205.48,
+          205.49
+        ],
+        "machine_busy": [
+          0.001,
+          0.001,
+          0.001
         ],
         "runs_repeated": 0,
         "output_sha256": "c36c223129ed7b0ec690c9ad02a24036409d14ed3969230df0013c5e635198d1"
@@ -2696,36 +2747,9 @@
           0.001
         ],
         "runs_repeated": 0,
-        "output_sha256": "c36c223129ed7b0ec690c9ad02a24036409d14ed3969230df0013c5e635198d1"
-      },
-      "python": {
-        "status": "ok",
-        "median_ms": 578.142,
-        "best_ms": 567.824,
-        "cpu_ms": 567.1,
-        "peak_mb": 205.43,
-        "wall_ms": [
-          567.824,
-          673.972,
-          578.142
-        ],
-        "cpu_ms_runs": [
-          558.3,
-          567.1,
-          572.2
-        ],
-        "peak_mb_runs": [
-          205.5,
-          205.24,
-          205.43
-        ],
-        "machine_busy": [
-          0.0,
-          0.001,
-          0.0
-        ],
-        "runs_repeated": 0,
-        "output_sha256": "c36c223129ed7b0ec690c9ad02a24036409d14ed3969230df0013c5e635198d1"
+        "output_sha256": "c36c223129ed7b0ec690c9ad02a24036409d14ed3969230df0013c5e635198d1",
+        "recorded": "2026-11-12T11:30:37Z",
+        "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
       }
     },
     "files": {
@@ -3283,30 +3307,30 @@
         "6000",
         "@threads"
       ],
-      "recorded": "2026-11-12T11:31:03Z",
-      "commit": "12540050d1ba575c681e06bcdd765111d144c8b3",
+      "recorded": "2026-11-12T14:38:51Z",
+      "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0",
       "threads": {
         "1": {
-          "calx": {
+          "c": {
             "status": "ok",
-            "median_ms": 1394.941,
-            "best_ms": 1390.855,
-            "cpu_ms": 1394.8,
-            "peak_mb": 6.87,
+            "median_ms": 1401.562,
+            "best_ms": 1394.431,
+            "cpu_ms": 1401.3,
+            "peak_mb": 9.25,
             "wall_ms": [
-              1394.941,
-              1390.855,
-              1399.003
+              1394.431,
+              1401.562,
+              1420.636
             ],
             "cpu_ms_runs": [
-              1394.8,
-              1390.7,
-              1398.9
+              1394.2,
+              1401.3,
+              1420.3
             ],
             "peak_mb_runs": [
-              6.91,
-              6.86,
-              6.87
+              9.11,
+              9.27,
+              9.25
             ],
             "machine_busy": [
               0.0,
@@ -3316,55 +3340,57 @@
             "runs_repeated": 0,
             "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347"
           },
-          "c": {
+          "calx": {
             "status": "ok",
-            "median_ms": 1386.71,
-            "best_ms": 1380.093,
-            "cpu_ms": 1385.5,
-            "peak_mb": 9.33,
+            "median_ms": 1408.776,
+            "best_ms": 1405.864,
+            "cpu_ms": 1407.7,
+            "peak_mb": 6.87,
             "wall_ms": [
-              1386.71,
-              1380.093,
-              1397.543
+              1420.917,
+              1408.776,
+              1405.864
             ],
             "cpu_ms_runs": [
-              1385.5,
-              1378.5,
-              1397.1
+              1420.5,
+              1407.7,
+              1401.1
             ],
             "peak_mb_runs": [
-              9.15,
-              9.36,
-              9.33
+              6.87,
+              6.89,
+              6.86
             ],
             "machine_busy": [
               0.0,
               0.0,
-              0.0
+              0.002
             ],
             "runs_repeated": 0,
-            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347"
+            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347",
+            "recorded": "2026-11-12T14:35:11Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "rust": {
             "status": "ok",
-            "median_ms": 1452.409,
-            "best_ms": 1450.117,
-            "cpu_ms": 1452.1,
-            "peak_mb": 6.42,
+            "median_ms": 1466.366,
+            "best_ms": 1442.142,
+            "cpu_ms": 1464.7,
+            "peak_mb": 6.39,
             "wall_ms": [
-              1452.409,
-              1450.117,
-              1461.788
+              1466.366,
+              1477.856,
+              1442.142
             ],
             "cpu_ms_runs": [
-              1452.1,
-              1449.9,
-              1461.6
+              1464.7,
+              1477.6,
+              1441.8
             ],
             "peak_mb_runs": [
-              6.42,
               6.39,
-              6.43
+              6.35,
+              6.39
             ],
             "machine_busy": [
               0.0,
@@ -3372,7 +3398,9 @@
               0.0
             ],
             "runs_repeated": 0,
-            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347"
+            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347",
+            "recorded": "2026-11-12T14:35:11Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "go": {
             "status": "ok",
@@ -3401,34 +3429,38 @@
               0.0
             ],
             "runs_repeated": 0,
-            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347"
+            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347",
+            "recorded": "2026-11-12T11:31:03Z",
+            "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
           },
           "python": {
             "status": "no program",
-            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core"
+            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core",
+            "recorded": "2026-11-12T14:35:11Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           }
         },
         "4": {
-          "calx": {
+          "c": {
             "status": "ok",
-            "median_ms": 375.752,
-            "best_ms": 375.519,
-            "cpu_ms": 1448.3,
-            "peak_mb": 6.63,
+            "median_ms": 357.678,
+            "best_ms": 356.831,
+            "cpu_ms": 1424.5,
+            "peak_mb": 8.76,
             "wall_ms": [
-              375.752,
-              375.519,
-              380.038
+              356.831,
+              358.013,
+              357.678
             ],
             "cpu_ms_runs": [
-              1448.3,
-              1444.0,
-              1454.5
+              1421.6,
+              1424.5,
+              1424.7
             ],
             "peak_mb_runs": [
-              6.64,
-              6.63,
-              6.62
+              8.86,
+              8.76,
+              8.76
             ],
             "machine_busy": [
               0.001,
@@ -3438,63 +3470,67 @@
             "runs_repeated": 0,
             "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347"
           },
-          "c": {
+          "calx": {
             "status": "ok",
-            "median_ms": 353.978,
-            "best_ms": 351.256,
-            "cpu_ms": 1409.7,
-            "peak_mb": 9.08,
+            "median_ms": 359.285,
+            "best_ms": 358.962,
+            "cpu_ms": 1415.2,
+            "peak_mb": 6.36,
             "wall_ms": [
-              353.978,
-              351.256,
-              354.585
+              358.962,
+              359.285,
+              363.148
             ],
             "cpu_ms_runs": [
-              1409.7,
-              1399.4,
-              1412.5
+              1410.6,
+              1415.2,
+              1431.9
             ],
             "peak_mb_runs": [
-              8.62,
-              9.09,
-              9.08
+              6.36,
+              6.36,
+              6.39
             ],
             "machine_busy": [
               0.001,
               0.0,
-              0.001
-            ],
-            "runs_repeated": 0,
-            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347"
-          },
-          "rust": {
-            "status": "ok",
-            "median_ms": 370.372,
-            "best_ms": 369.418,
-            "cpu_ms": 1462.0,
-            "peak_mb": 6.41,
-            "wall_ms": [
-              369.418,
-              387.776,
-              370.372
-            ],
-            "cpu_ms_runs": [
-              1462.0,
-              1456.6,
-              1462.7
-            ],
-            "peak_mb_runs": [
-              6.44,
-              5.94,
-              6.41
-            ],
-            "machine_busy": [
-              0.0,
-              0.0,
               0.0
             ],
             "runs_repeated": 0,
-            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347"
+            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347",
+            "recorded": "2026-11-12T14:35:11Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
+          },
+          "rust": {
+            "status": "ok",
+            "median_ms": 371.922,
+            "best_ms": 368.995,
+            "cpu_ms": 1473.3,
+            "peak_mb": 6.14,
+            "wall_ms": [
+              372.292,
+              368.995,
+              371.922
+            ],
+            "cpu_ms_runs": [
+              1473.3,
+              1461.7,
+              1473.7
+            ],
+            "peak_mb_runs": [
+              6.14,
+              6.14,
+              6.45
+            ],
+            "machine_busy": [
+              0.001,
+              0.001,
+              0.001
+            ],
+            "runs_repeated": 0,
+            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347",
+            "recorded": "2026-11-12T14:35:11Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "go": {
             "status": "ok",
@@ -3523,100 +3559,108 @@
               0.001
             ],
             "runs_repeated": 0,
-            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347"
+            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347",
+            "recorded": "2026-11-12T11:31:03Z",
+            "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
           },
           "python": {
             "status": "no program",
-            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core"
+            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core",
+            "recorded": "2026-11-12T14:35:11Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           }
         },
         "8": {
-          "calx": {
+          "c": {
             "status": "ok",
-            "median_ms": 212.425,
-            "best_ms": 210.015,
-            "cpu_ms": 1465.4,
-            "peak_mb": 5.89,
+            "median_ms": 193.629,
+            "best_ms": 193.034,
+            "cpu_ms": 1533.6,
+            "peak_mb": 8.58,
             "wall_ms": [
-              210.015,
-              212.425,
-              213.545
+              195.037,
+              193.034,
+              193.629
             ],
             "cpu_ms_runs": [
-              1465.4,
-              1483.5,
-              1441.5
+              1543.7,
+              1528.6,
+              1533.6
             ],
             "peak_mb_runs": [
-              5.89,
-              5.91,
-              5.88
+              8.58,
+              8.58,
+              8.69
             ],
             "machine_busy": [
-              0.002,
-              0.001,
+              0.004,
+              0.0,
               0.001
             ],
             "runs_repeated": 0,
             "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347"
           },
-          "c": {
+          "calx": {
             "status": "ok",
-            "median_ms": 184.37,
-            "best_ms": 184.292,
-            "cpu_ms": 1460.4,
-            "peak_mb": 8.58,
+            "median_ms": 190.924,
+            "best_ms": 187.629,
+            "cpu_ms": 1490.7,
+            "peak_mb": 6.13,
             "wall_ms": [
-              187.872,
-              184.292,
-              184.37
+              187.629,
+              193.155,
+              190.924
             ],
             "cpu_ms_runs": [
-              1487.8,
-              1460.4,
-              1457.7
+              1461.3,
+              1503.3,
+              1490.7
             ],
             "peak_mb_runs": [
-              8.37,
-              8.61,
-              8.58
+              6.16,
+              6.13,
+              6.11
             ],
             "machine_busy": [
-              0.0,
-              0.003,
-              0.0
+              0.01,
+              0.012,
+              0.01
             ],
             "runs_repeated": 0,
-            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347"
+            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347",
+            "recorded": "2026-11-12T14:35:11Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "rust": {
             "status": "ok",
-            "median_ms": 193.997,
-            "best_ms": 191.02,
-            "cpu_ms": 1516.5,
-            "peak_mb": 5.89,
+            "median_ms": 199.495,
+            "best_ms": 198.132,
+            "cpu_ms": 1557.6,
+            "peak_mb": 5.95,
             "wall_ms": [
-              193.997,
-              191.02,
-              195.302
+              199.495,
+              201.871,
+              198.132
             ],
             "cpu_ms_runs": [
-              1516.5,
-              1493.2,
-              1525.7
+              1557.6,
+              1578.0,
+              1546.7
             ],
             "peak_mb_runs": [
-              5.89,
-              5.89,
-              5.68
+              5.64,
+              6.08,
+              5.95
             ],
             "machine_busy": [
-              0.002,
-              0.0,
-              0.0
+              0.011,
+              0.013,
+              0.011
             ],
             "runs_repeated": 0,
-            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347"
+            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347",
+            "recorded": "2026-11-12T14:35:11Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "go": {
             "status": "ok",
@@ -3645,100 +3689,108 @@
               0.003
             ],
             "runs_repeated": 0,
-            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347"
+            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347",
+            "recorded": "2026-11-12T11:31:03Z",
+            "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
           },
           "python": {
             "status": "no program",
-            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core"
+            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core",
+            "recorded": "2026-11-12T14:35:11Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           }
         },
         "32": {
-          "calx": {
+          "c": {
             "status": "ok",
-            "median_ms": 80.353,
-            "best_ms": 79.401,
-            "cpu_ms": 2156.5,
-            "peak_mb": 3.37,
+            "median_ms": 83.226,
+            "best_ms": 82.479,
+            "cpu_ms": 2518.1,
+            "peak_mb": 5.95,
             "wall_ms": [
-              79.401,
-              80.353,
-              82.45
+              83.226,
+              111.639,
+              82.479
             ],
             "cpu_ms_runs": [
-              2183.6,
-              2156.5,
-              2094.9
+              2518.1,
+              3323.3,
+              2430.4
             ],
             "peak_mb_runs": [
-              3.37,
-              3.14,
-              3.61
+              5.95,
+              6.16,
+              5.77
             ],
             "machine_busy": [
+              0.012,
               0.0,
-              0.0,
-              0.0
+              0.011
             ],
             "runs_repeated": 0,
             "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347"
           },
-          "c": {
+          "calx": {
             "status": "ok",
-            "median_ms": 78.077,
-            "best_ms": 78.025,
-            "cpu_ms": 2298.4,
-            "peak_mb": 5.9,
+            "median_ms": 76.892,
+            "best_ms": 76.111,
+            "cpu_ms": 2132.9,
+            "peak_mb": 3.6,
             "wall_ms": [
-              82.177,
-              78.025,
-              78.077
+              76.892,
+              76.111,
+              80.368
             ],
             "cpu_ms_runs": [
-              2419.0,
-              2221.0,
-              2298.4
+              2132.9,
+              2161.9,
+              2109.6
             ],
             "peak_mb_runs": [
-              6.34,
-              5.9,
-              5.81
+              3.6,
+              3.38,
+              3.66
             ],
             "machine_busy": [
-              0.026,
-              0.052,
-              0.024
+              0.007,
+              0.0,
+              0.048
             ],
             "runs_repeated": 0,
-            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347"
+            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347",
+            "recorded": "2026-11-12T14:35:11Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "rust": {
             "status": "ok",
-            "median_ms": 77.922,
-            "best_ms": 75.04,
-            "cpu_ms": 2124.8,
-            "peak_mb": 3.13,
+            "median_ms": 80.634,
+            "best_ms": 78.968,
+            "cpu_ms": 2119.3,
+            "peak_mb": 3.64,
             "wall_ms": [
-              77.922,
-              79.18,
-              75.04
+              80.634,
+              81.747,
+              78.968
             ],
             "cpu_ms_runs": [
-              2124.8,
-              2099.7,
-              2159.9
+              2108.6,
+              2119.3,
+              2261.9
             ],
             "peak_mb_runs": [
-              3.2,
-              3.13,
-              3.13
+              3.64,
+              3.64,
+              3.16
             ],
             "machine_busy": [
-              0.013,
-              0.023,
+              0.012,
+              0.0,
               0.0
             ],
             "runs_repeated": 0,
-            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347"
+            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347",
+            "recorded": "2026-11-12T14:35:11Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "go": {
             "status": "ok",
@@ -3767,17 +3819,21 @@
               0.006
             ],
             "runs_repeated": 0,
-            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347"
+            "output_sha256": "052476aafe3ce9bf602193a8388435eaebb2b91092ca0ae2752e9e85d10fe347",
+            "recorded": "2026-11-12T11:31:03Z",
+            "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
           },
           "python": {
             "status": "no program",
-            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core"
+            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core",
+            "recorded": "2026-11-12T14:35:11Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           }
         }
       },
       "same_output_at_every_count": {
-        "calx": true,
         "c": true,
+        "calx": true,
         "rust": true,
         "go": true
       }
@@ -3789,34 +3845,34 @@
         "5500",
         "@threads"
       ],
-      "recorded": "2026-11-12T11:31:35Z",
-      "commit": "12540050d1ba575c681e06bcdd765111d144c8b3",
+      "recorded": "2026-11-12T14:38:59Z",
+      "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0",
       "threads": {
         "1": {
-          "calx": {
+          "c": {
             "status": "ok",
-            "median_ms": 902.666,
-            "best_ms": 892.585,
-            "cpu_ms": 902.5,
-            "peak_mb": 2.38,
+            "median_ms": 914.702,
+            "best_ms": 912.708,
+            "cpu_ms": 913.4,
+            "peak_mb": 5.08,
             "wall_ms": [
-              892.585,
-              902.666,
-              904.015
+              914.702,
+              912.708,
+              926.494
             ],
             "cpu_ms_runs": [
-              892.4,
-              902.5,
-              903.9
+              913.4,
+              912.5,
+              924.3
             ],
             "peak_mb_runs": [
-              2.38,
-              2.38,
-              2.39
+              5.21,
+              5.08,
+              5.02
             ],
             "machine_busy": [
-              0.001,
-              0.001,
+              0.0,
+              0.002,
               0.001
             ],
             "runs_repeated": 0,
@@ -3825,61 +3881,63 @@
               "bits 3ff46338dd804641"
             ]
           },
-          "c": {
+          "calx": {
             "status": "ok",
-            "median_ms": 903.517,
-            "best_ms": 900.298,
-            "cpu_ms": 903.3,
-            "peak_mb": 5.38,
+            "median_ms": 910.07,
+            "best_ms": 899.438,
+            "cpu_ms": 907.7,
+            "peak_mb": 2.39,
             "wall_ms": [
-              900.298,
-              903.517,
-              904.569
+              899.438,
+              910.07,
+              913.712
             ],
             "cpu_ms_runs": [
-              900.1,
-              903.3,
-              904.3
+              894.5,
+              907.7,
+              910.5
             ],
             "peak_mb_runs": [
-              5.38,
-              5.09,
-              5.38
+              2.39,
+              2.39,
+              2.39
             ],
             "machine_busy": [
-              0.0,
               0.001,
+              0.0,
               0.0
             ],
             "runs_repeated": 0,
             "output_sha256": "f8a275abdb41f20930a3252b0c5c22ff69a112a069baf0d9416bd40b35a7430c",
             "info": [
               "bits 3ff46338dd804641"
-            ]
+            ],
+            "recorded": "2026-11-12T14:35:28Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "rust": {
             "status": "ok",
-            "median_ms": 903.429,
-            "best_ms": 899.686,
-            "cpu_ms": 901.3,
-            "peak_mb": 2.41,
+            "median_ms": 904.096,
+            "best_ms": 901.915,
+            "cpu_ms": 903.2,
+            "peak_mb": 2.4,
             "wall_ms": [
-              903.429,
-              899.686,
-              904.39
+              908.938,
+              904.096,
+              901.915
             ],
             "cpu_ms_runs": [
-              901.3,
-              898.2,
-              904.1
+              908.4,
+              903.2,
+              900.8
             ],
             "peak_mb_runs": [
-              2.41,
-              2.41,
-              2.4
+              2.4,
+              2.4,
+              2.37
             ],
             "machine_busy": [
-              0.001,
+              0.0,
               0.0,
               0.0
             ],
@@ -3887,7 +3945,9 @@
             "output_sha256": "f8a275abdb41f20930a3252b0c5c22ff69a112a069baf0d9416bd40b35a7430c",
             "info": [
               "bits 3ff46338dd804641"
-            ]
+            ],
+            "recorded": "2026-11-12T14:35:28Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "go": {
             "status": "ok",
@@ -3919,39 +3979,43 @@
             "output_sha256": "63f8f2d89d47915b1bfa4707d02932251a1fe30aa79157ed46d60e1a61e20e7c",
             "info": [
               "bits 3ff46338dd804640"
-            ]
+            ],
+            "recorded": "2026-11-12T11:31:35Z",
+            "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
           },
           "python": {
             "status": "no program",
-            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core"
+            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core",
+            "recorded": "2026-11-12T14:35:28Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           }
         },
         "4": {
-          "calx": {
+          "c": {
             "status": "ok",
-            "median_ms": 231.829,
-            "best_ms": 231.64,
-            "cpu_ms": 920.5,
-            "peak_mb": 2.38,
+            "median_ms": 243.594,
+            "best_ms": 241.942,
+            "cpu_ms": 967.9,
+            "peak_mb": 5.37,
             "wall_ms": [
-              231.64,
-              231.829,
-              236.115
+              250.407,
+              243.594,
+              241.942
             ],
             "cpu_ms_runs": [
-              910.0,
-              920.5,
-              928.2
+              995.2,
+              967.9,
+              961.6
             ],
             "peak_mb_runs": [
-              2.38,
-              2.36,
-              2.41
+              5.21,
+              5.48,
+              5.37
             ],
             "machine_busy": [
-              0.003,
-              0.005,
-              0.0
+              0.012,
+              0.013,
+              0.011
             ],
             "runs_repeated": 0,
             "output_sha256": "f8a275abdb41f20930a3252b0c5c22ff69a112a069baf0d9416bd40b35a7430c",
@@ -3959,69 +4023,73 @@
               "bits 3ff46338dd804641"
             ]
           },
-          "c": {
+          "calx": {
             "status": "ok",
-            "median_ms": 231.323,
-            "best_ms": 228.311,
-            "cpu_ms": 919.3,
-            "peak_mb": 5.37,
+            "median_ms": 229.287,
+            "best_ms": 227.515,
+            "cpu_ms": 905.6,
+            "peak_mb": 2.37,
             "wall_ms": [
-              231.323,
-              234.085,
-              228.311
+              233.657,
+              229.287,
+              227.515
             ],
             "cpu_ms_runs": [
-              919.3,
-              930.0,
-              907.4
+              928.3,
+              905.6,
+              898.8
             ],
             "peak_mb_runs": [
-              5.05,
-              5.37,
-              5.38
+              2.37,
+              2.39,
+              2.37
             ],
             "machine_busy": [
-              0.003,
-              0.003,
-              0.0
+              0.002,
+              0.001,
+              0.002
             ],
             "runs_repeated": 0,
             "output_sha256": "f8a275abdb41f20930a3252b0c5c22ff69a112a069baf0d9416bd40b35a7430c",
             "info": [
               "bits 3ff46338dd804641"
-            ]
+            ],
+            "recorded": "2026-11-12T14:35:28Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "rust": {
             "status": "ok",
-            "median_ms": 231.882,
-            "best_ms": 231.163,
-            "cpu_ms": 906.6,
-            "peak_mb": 2.38,
+            "median_ms": 234.351,
+            "best_ms": 232.816,
+            "cpu_ms": 922.2,
+            "peak_mb": 2.4,
             "wall_ms": [
-              231.163,
-              231.882,
-              235.951
+              236.292,
+              234.351,
+              232.816
             ],
             "cpu_ms_runs": [
-              906.6,
-              906.3,
-              923.0
+              927.3,
+              922.2,
+              912.2
             ],
             "peak_mb_runs": [
-              2.38,
-              2.35,
-              2.41
+              2.4,
+              2.4,
+              2.4
             ],
             "machine_busy": [
               0.0,
-              0.006,
-              0.003
+              0.002,
+              0.001
             ],
             "runs_repeated": 0,
             "output_sha256": "f8a275abdb41f20930a3252b0c5c22ff69a112a069baf0d9416bd40b35a7430c",
             "info": [
               "bits 3ff46338dd804641"
-            ]
+            ],
+            "recorded": "2026-11-12T14:35:28Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "go": {
             "status": "ok",
@@ -4053,70 +4121,42 @@
             "output_sha256": "63f8f2d89d47915b1bfa4707d02932251a1fe30aa79157ed46d60e1a61e20e7c",
             "info": [
               "bits 3ff46338dd804640"
-            ]
+            ],
+            "recorded": "2026-11-12T11:31:35Z",
+            "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
           },
           "python": {
             "status": "no program",
-            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core"
+            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core",
+            "recorded": "2026-11-12T14:35:28Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           }
         },
         "8": {
-          "calx": {
-            "status": "ok",
-            "median_ms": 151.113,
-            "best_ms": 133.558,
-            "cpu_ms": 1154.5,
-            "peak_mb": 2.38,
-            "wall_ms": [
-              133.558,
-              153.199,
-              151.113
-            ],
-            "cpu_ms_runs": [
-              1004.5,
-              1170.8,
-              1154.5
-            ],
-            "peak_mb_runs": [
-              2.38,
-              2.36,
-              2.38
-            ],
-            "machine_busy": [
-              0.006,
-              0.004,
-              0.005
-            ],
-            "runs_repeated": 0,
-            "output_sha256": "f8a275abdb41f20930a3252b0c5c22ff69a112a069baf0d9416bd40b35a7430c",
-            "info": [
-              "bits 3ff46338dd804641"
-            ]
-          },
           "c": {
             "status": "ok",
-            "median_ms": 208.161,
-            "best_ms": 156.506,
-            "cpu_ms": 1648.8,
-            "peak_mb": 5.34,
+            "median_ms": 177.182,
+            "best_ms": 174.074,
+            "cpu_ms": 1401.7,
+            "peak_mb": 5.3,
             "wall_ms": [
-              156.506,
-              240.999,
-              208.161
+              179.157,
+              177.182,
+              174.074
             ],
             "cpu_ms_runs": [
-              1236.5,
-              1910.6,
-              1648.8
+              1418.2,
+              1401.7,
+              1376.6
             ],
             "peak_mb_runs": [
-              5.34,
-              5.55,
-              4.88
+              5.01,
+              5.3,
+              5.33
             ],
             "machine_busy": [
-              0.002,
               0.0,
+              0.001,
               0.0
             ],
             "runs_repeated": 0,
@@ -4124,38 +4164,74 @@
             "info": [
               "bits 3ff46338dd804641"
             ]
+          },
+          "calx": {
+            "status": "ok",
+            "median_ms": 127.753,
+            "best_ms": 125.691,
+            "cpu_ms": 1009.8,
+            "peak_mb": 2.37,
+            "wall_ms": [
+              135.145,
+              125.691,
+              127.753
+            ],
+            "cpu_ms_runs": [
+              1047.7,
+              986.0,
+              1009.8
+            ],
+            "peak_mb_runs": [
+              2.41,
+              2.35,
+              2.37
+            ],
+            "machine_busy": [
+              0.007,
+              0.008,
+              0.002
+            ],
+            "runs_repeated": 0,
+            "output_sha256": "f8a275abdb41f20930a3252b0c5c22ff69a112a069baf0d9416bd40b35a7430c",
+            "info": [
+              "bits 3ff46338dd804641"
+            ],
+            "recorded": "2026-11-12T14:35:28Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "rust": {
             "status": "ok",
-            "median_ms": 151.465,
-            "best_ms": 133.329,
-            "cpu_ms": 1130.8,
-            "peak_mb": 2.35,
+            "median_ms": 137.329,
+            "best_ms": 133.548,
+            "cpu_ms": 1035.1,
+            "peak_mb": 2.41,
             "wall_ms": [
-              133.329,
-              168.713,
-              151.465
+              146.762,
+              137.329,
+              133.548
             ],
             "cpu_ms_runs": [
-              1005.5,
-              1256.5,
-              1130.8
+              1093.2,
+              1035.1,
+              1009.1
             ],
             "peak_mb_runs": [
-              2.35,
-              2.32,
+              2.41,
+              2.39,
               2.41
             ],
             "machine_busy": [
-              0.001,
-              0.0,
+              0.01,
+              0.003,
               0.0
             ],
             "runs_repeated": 0,
             "output_sha256": "f8a275abdb41f20930a3252b0c5c22ff69a112a069baf0d9416bd40b35a7430c",
             "info": [
               "bits 3ff46338dd804641"
-            ]
+            ],
+            "recorded": "2026-11-12T14:35:28Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "go": {
             "status": "ok",
@@ -4187,39 +4263,43 @@
             "output_sha256": "63f8f2d89d47915b1bfa4707d02932251a1fe30aa79157ed46d60e1a61e20e7c",
             "info": [
               "bits 3ff46338dd804640"
-            ]
+            ],
+            "recorded": "2026-11-12T11:31:35Z",
+            "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
           },
           "python": {
             "status": "no program",
-            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core"
+            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core",
+            "recorded": "2026-11-12T14:35:28Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           }
         },
         "32": {
-          "calx": {
+          "c": {
             "status": "ok",
-            "median_ms": 81.374,
-            "best_ms": 81.202,
-            "cpu_ms": 2393.2,
-            "peak_mb": 2.61,
+            "median_ms": 151.433,
+            "best_ms": 102.666,
+            "cpu_ms": 4430.6,
+            "peak_mb": 5.46,
             "wall_ms": [
-              81.202,
-              82.149,
-              81.374
+              151.433,
+              102.666,
+              184.525
             ],
             "cpu_ms_runs": [
-              2381.8,
-              2393.2,
-              2460.9
+              4430.6,
+              3136.7,
+              5771.1
             ],
             "peak_mb_runs": [
-              2.61,
-              2.37,
-              2.65
+              5.55,
+              5.46,
+              5.29
             ],
             "machine_busy": [
+              0.01,
               0.0,
-              0.021,
-              0.007
+              0.012
             ],
             "runs_repeated": 0,
             "output_sha256": "f8a275abdb41f20930a3252b0c5c22ff69a112a069baf0d9416bd40b35a7430c",
@@ -4227,69 +4307,73 @@
               "bits 3ff46338dd804641"
             ]
           },
-          "c": {
+          "calx": {
             "status": "ok",
-            "median_ms": 119.503,
-            "best_ms": 97.747,
-            "cpu_ms": 3670.9,
-            "peak_mb": 5.53,
+            "median_ms": 82.4,
+            "best_ms": 77.903,
+            "cpu_ms": 2437.7,
+            "peak_mb": 2.64,
             "wall_ms": [
-              119.503,
-              97.747,
-              127.929
+              87.487,
+              82.4,
+              77.903
             ],
             "cpu_ms_runs": [
-              3670.9,
-              3006.8,
-              3845.1
+              2591.4,
+              2437.7,
+              2290.8
             ],
             "peak_mb_runs": [
-              5.57,
-              5.53,
-              5.34
+              2.62,
+              2.65,
+              2.64
             ],
             "machine_busy": [
               0.0,
-              0.01,
+              0.005,
               0.0
             ],
             "runs_repeated": 0,
             "output_sha256": "f8a275abdb41f20930a3252b0c5c22ff69a112a069baf0d9416bd40b35a7430c",
             "info": [
               "bits 3ff46338dd804641"
-            ]
+            ],
+            "recorded": "2026-11-12T14:35:28Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "rust": {
             "status": "ok",
-            "median_ms": 118.866,
-            "best_ms": 116.51,
-            "cpu_ms": 2464.9,
-            "peak_mb": 2.66,
+            "median_ms": 128.401,
+            "best_ms": 112.03,
+            "cpu_ms": 2561.2,
+            "peak_mb": 2.63,
             "wall_ms": [
-              118.866,
-              127.046,
-              116.51
+              138.507,
+              128.401,
+              112.03
             ],
             "cpu_ms_runs": [
-              2464.9,
-              2544.2,
-              2456.0
+              2647.0,
+              2561.2,
+              2442.9
             ],
             "peak_mb_runs": [
-              2.66,
-              2.65,
+              2.6,
+              2.63,
               2.66
             ],
             "machine_busy": [
-              0.022,
-              0.006,
-              0.077
+              0.0,
+              0.089,
+              0.05
             ],
-            "runs_repeated": 0,
+            "runs_repeated": 1,
             "output_sha256": "f8a275abdb41f20930a3252b0c5c22ff69a112a069baf0d9416bd40b35a7430c",
             "info": [
               "bits 3ff46338dd804641"
-            ]
+            ],
+            "recorded": "2026-11-12T14:35:28Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "go": {
             "status": "ok",
@@ -4321,17 +4405,21 @@
             "output_sha256": "63f8f2d89d47915b1bfa4707d02932251a1fe30aa79157ed46d60e1a61e20e7c",
             "info": [
               "bits 3ff46338dd804640"
-            ]
+            ],
+            "recorded": "2026-11-12T11:31:35Z",
+            "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
           },
           "python": {
             "status": "no program",
-            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core"
+            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core",
+            "recorded": "2026-11-12T14:35:28Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           }
         }
       },
       "same_output_at_every_count": {
-        "calx": true,
         "c": true,
+        "calx": true,
         "rust": true,
         "go": true
       }
@@ -4343,30 +4431,62 @@
         "2000000000",
         "@threads"
       ],
-      "recorded": "2026-11-12T11:31:58Z",
-      "commit": "12540050d1ba575c681e06bcdd765111d144c8b3",
+      "recorded": "2026-11-12T14:39:05Z",
+      "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0",
       "threads": {
         "1": {
-          "calx": {
+          "c": {
             "status": "ok",
-            "median_ms": 1486.445,
-            "best_ms": 1469.728,
-            "cpu_ms": 1486.3,
-            "peak_mb": 2.13,
+            "median_ms": 1510.561,
+            "best_ms": 1495.314,
+            "cpu_ms": 1508.6,
+            "peak_mb": 5.21,
             "wall_ms": [
-              1486.445,
-              1469.728,
-              1490.656
+              1517.667,
+              1510.561,
+              1495.314
             ],
             "cpu_ms_runs": [
-              1486.3,
-              1469.6,
-              1490.5
+              1514.9,
+              1508.6,
+              1495.1
             ],
             "peak_mb_runs": [
-              2.15,
-              2.13,
-              2.13
+              5.5,
+              5.02,
+              5.21
+            ],
+            "machine_busy": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "runs_repeated": 0,
+            "output_sha256": "1d13fbd572a6445352680ef292530f1596b89053c72956450485e22886b0643e",
+            "info": [
+              "bits 400921fb54442d7f"
+            ]
+          },
+          "calx": {
+            "status": "ok",
+            "median_ms": 1488.738,
+            "best_ms": 1482.324,
+            "cpu_ms": 1488.6,
+            "peak_mb": 2.16,
+            "wall_ms": [
+              1482.324,
+              1488.738,
+              1495.618
+            ],
+            "cpu_ms_runs": [
+              1481.1,
+              1488.6,
+              1492.1
+            ],
+            "peak_mb_runs": [
+              2.18,
+              2.14,
+              2.16
             ],
             "machine_busy": [
               0.0,
@@ -4377,71 +4497,43 @@
             "output_sha256": "d176be80d6f542f84bb08a785a099f21eb578f47ef9d5eb7124ce5a87363b869",
             "info": [
               "bits 400921fb54442d22"
-            ]
-          },
-          "c": {
-            "status": "ok",
-            "median_ms": 1485.717,
-            "best_ms": 1480.052,
-            "cpu_ms": 1485.4,
-            "peak_mb": 5.14,
-            "wall_ms": [
-              1502.188,
-              1480.052,
-              1485.717
             ],
-            "cpu_ms_runs": [
-              1498.9,
-              1479.8,
-              1485.4
-            ],
-            "peak_mb_runs": [
-              4.83,
-              5.14,
-              5.36
-            ],
-            "machine_busy": [
-              0.001,
-              0.0,
-              0.0
-            ],
-            "runs_repeated": 0,
-            "output_sha256": "1d13fbd572a6445352680ef292530f1596b89053c72956450485e22886b0643e",
-            "info": [
-              "bits 400921fb54442d7f"
-            ]
+            "recorded": "2026-11-12T14:35:39Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "rust": {
             "status": "ok",
-            "median_ms": 1640.31,
-            "best_ms": 1640.282,
-            "cpu_ms": 1640.1,
-            "peak_mb": 2.15,
+            "median_ms": 1641.831,
+            "best_ms": 1636.821,
+            "cpu_ms": 1640.8,
+            "peak_mb": 2.17,
             "wall_ms": [
-              1640.282,
-              1640.31,
-              1653.092
+              1641.831,
+              1636.821,
+              1652.3
             ],
             "cpu_ms_runs": [
-              1639.2,
-              1640.1,
-              1652.8
+              1640.8,
+              1636.6,
+              1652.1
             ],
             "peak_mb_runs": [
-              2.11,
-              2.15,
-              2.15
+              2.21,
+              2.17,
+              2.16
             ],
             "machine_busy": [
               0.0,
               0.0,
-              0.0
+              0.001
             ],
             "runs_repeated": 0,
             "output_sha256": "b6eb7acdbe0c65d5474d49be5c12db25fc98ce33795bf4f98b740e31a3a83081",
             "info": [
               "bits 400921fb54442d30"
-            ]
+            ],
+            "recorded": "2026-11-12T14:35:39Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "go": {
             "status": "ok",
@@ -4473,71 +4565,43 @@
             "output_sha256": "1d13fbd572a6445352680ef292530f1596b89053c72956450485e22886b0643e",
             "info": [
               "bits 400921fb54442d7f"
-            ]
+            ],
+            "recorded": "2026-11-12T11:31:58Z",
+            "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
           },
           "python": {
             "status": "no program",
-            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core"
+            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core",
+            "recorded": "2026-11-12T14:35:39Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           }
         },
         "4": {
-          "calx": {
-            "status": "ok",
-            "median_ms": 372.299,
-            "best_ms": 371.566,
-            "cpu_ms": 1482.4,
-            "peak_mb": 2.12,
-            "wall_ms": [
-              371.566,
-              375.746,
-              372.299
-            ],
-            "cpu_ms_runs": [
-              1482.0,
-              1487.7,
-              1482.4
-            ],
-            "peak_mb_runs": [
-              2.12,
-              2.14,
-              2.12
-            ],
-            "machine_busy": [
-              0.012,
-              0.009,
-              0.011
-            ],
-            "runs_repeated": 0,
-            "output_sha256": "d176be80d6f542f84bb08a785a099f21eb578f47ef9d5eb7124ce5a87363b869",
-            "info": [
-              "bits 400921fb54442d22"
-            ]
-          },
           "c": {
             "status": "ok",
-            "median_ms": 374.224,
-            "best_ms": 373.224,
-            "cpu_ms": 1491.1,
-            "peak_mb": 5.08,
+            "median_ms": 383.199,
+            "best_ms": 379.91,
+            "cpu_ms": 1526.7,
+            "peak_mb": 5.04,
             "wall_ms": [
-              374.224,
-              373.224,
-              375.011
+              379.91,
+              384.958,
+              383.199
             ],
             "cpu_ms_runs": [
-              1491.1,
-              1487.2,
-              1494.0
+              1513.4,
+              1533.7,
+              1526.7
             ],
             "peak_mb_runs": [
-              5.04,
-              5.08,
-              5.33
+              5.01,
+              5.28,
+              5.04
             ],
             "machine_busy": [
-              0.013,
-              0.011,
-              0.01
+              0.001,
+              0.0,
+              0.001
             ],
             "runs_repeated": 0,
             "info_changed_between_runs": true,
@@ -4546,38 +4610,74 @@
               "bits 400921fb54442d2f"
             ]
           },
-          "rust": {
+          "calx": {
             "status": "ok",
-            "median_ms": 414.302,
-            "best_ms": 412.637,
-            "cpu_ms": 1647.1,
-            "peak_mb": 2.16,
+            "median_ms": 374.876,
+            "best_ms": 374.764,
+            "cpu_ms": 1495.6,
+            "peak_mb": 2.18,
             "wall_ms": [
-              416.765,
-              412.637,
-              414.302
+              377.852,
+              374.764,
+              374.876
             ],
             "cpu_ms_runs": [
-              1655.3,
-              1645.5,
-              1647.1
+              1495.6,
+              1496.0,
+              1486.4
+            ],
+            "peak_mb_runs": [
+              2.2,
+              2.18,
+              2.18
+            ],
+            "machine_busy": [
+              0.0,
+              0.001,
+              0.0
+            ],
+            "runs_repeated": 0,
+            "output_sha256": "d176be80d6f542f84bb08a785a099f21eb578f47ef9d5eb7124ce5a87363b869",
+            "info": [
+              "bits 400921fb54442d22"
+            ],
+            "recorded": "2026-11-12T14:35:39Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
+          },
+          "rust": {
+            "status": "ok",
+            "median_ms": 414.817,
+            "best_ms": 413.969,
+            "cpu_ms": 1651.7,
+            "peak_mb": 2.19,
+            "wall_ms": [
+              416.826,
+              414.817,
+              413.969
+            ],
+            "cpu_ms_runs": [
+              1648.7,
+              1652.5,
+              1651.7
             ],
             "peak_mb_runs": [
               2.16,
-              2.16,
-              2.15
+              2.19,
+              2.19
             ],
             "machine_busy": [
-              0.012,
-              0.011,
-              0.011
+              0.0,
+              0.001,
+              0.001
             ],
             "runs_repeated": 0,
             "info_changed_between_runs": true,
-            "output_sha256": "8999fb800a7663855b9432f9068081ad40e5ed2d6df215f814704396595dc135",
+            "output_sha256": "69fd3a3402129ba38a6e9fb725d4339eb8e7734a4f402349a4bd8b0f79f7174c",
             "info": [
-              "bits 400921fb54442d01"
-            ]
+              "bits 400921fb54442ce9"
+            ],
+            "recorded": "2026-11-12T14:35:39Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "go": {
             "status": "ok",
@@ -4609,71 +4709,43 @@
             "output_sha256": "67d9a6499ef45b68f420e21980e5f0f65783cc96d8cbdfb3bb8f54c07a233894",
             "info": [
               "bits 400921fb54442d2f"
-            ]
+            ],
+            "recorded": "2026-11-12T11:31:58Z",
+            "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
           },
           "python": {
             "status": "no program",
-            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core"
+            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core",
+            "recorded": "2026-11-12T14:35:39Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           }
         },
         "8": {
-          "calx": {
+          "c": {
             "status": "ok",
-            "median_ms": 208.635,
-            "best_ms": 204.961,
-            "cpu_ms": 1584.2,
-            "peak_mb": 2.15,
+            "median_ms": 210.7,
+            "best_ms": 207.551,
+            "cpu_ms": 1670.1,
+            "peak_mb": 5.36,
             "wall_ms": [
-              209.468,
-              204.961,
-              208.635
+              207.551,
+              210.7,
+              224.235
             ],
             "cpu_ms_runs": [
-              1603.9,
-              1584.2,
-              1582.3
+              1644.2,
+              1670.1,
+              1778.9
             ],
             "peak_mb_runs": [
-              2.14,
-              2.16,
-              2.15
+              4.95,
+              5.5,
+              5.36
             ],
             "machine_busy": [
               0.002,
-              0.007,
-              0.001
-            ],
-            "runs_repeated": 0,
-            "output_sha256": "d176be80d6f542f84bb08a785a099f21eb578f47ef9d5eb7124ce5a87363b869",
-            "info": [
-              "bits 400921fb54442d22"
-            ]
-          },
-          "c": {
-            "status": "ok",
-            "median_ms": 209.027,
-            "best_ms": 204.677,
-            "cpu_ms": 1657.9,
-            "peak_mb": 4.9,
-            "wall_ms": [
-              209.027,
-              211.674,
-              204.677
-            ],
-            "cpu_ms_runs": [
-              1657.9,
-              1678.0,
-              1622.0
-            ],
-            "peak_mb_runs": [
-              4.84,
-              5.58,
-              4.9
-            ],
-            "machine_busy": [
               0.0,
-              0.0,
-              0.0
+              0.002
             ],
             "runs_repeated": 0,
             "output_sha256": "b6eb7acdbe0c65d5474d49be5c12db25fc98ce33795bf4f98b740e31a3a83081",
@@ -4681,38 +4753,74 @@
               "bits 400921fb54442d30"
             ]
           },
-          "rust": {
+          "calx": {
             "status": "ok",
-            "median_ms": 219.849,
-            "best_ms": 217.119,
-            "cpu_ms": 1741.9,
-            "peak_mb": 2.16,
+            "median_ms": 214.834,
+            "best_ms": 207.645,
+            "cpu_ms": 1578.8,
+            "peak_mb": 2.13,
             "wall_ms": [
-              219.849,
-              223.884,
-              217.119
+              207.645,
+              214.848,
+              214.834
             ],
             "cpu_ms_runs": [
-              1741.9,
-              1751.8,
-              1728.3
+              1600.1,
+              1578.8,
+              1573.9
             ],
             "peak_mb_runs": [
-              2.16,
-              2.16,
-              2.16
+              2.13,
+              2.17,
+              2.13
             ],
             "machine_busy": [
+              0.004,
               0.0,
-              0.0,
-              0.0
+              0.004
+            ],
+            "runs_repeated": 0,
+            "output_sha256": "d176be80d6f542f84bb08a785a099f21eb578f47ef9d5eb7124ce5a87363b869",
+            "info": [
+              "bits 400921fb54442d22"
+            ],
+            "recorded": "2026-11-12T14:35:39Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
+          },
+          "rust": {
+            "status": "ok",
+            "median_ms": 229.219,
+            "best_ms": 226.208,
+            "cpu_ms": 1826.4,
+            "peak_mb": 2.2,
+            "wall_ms": [
+              243.734,
+              226.208,
+              229.219
+            ],
+            "cpu_ms_runs": [
+              1942.5,
+              1790.2,
+              1826.4
+            ],
+            "peak_mb_runs": [
+              2.21,
+              2.15,
+              2.2
+            ],
+            "machine_busy": [
+              0.006,
+              0.004,
+              0.003
             ],
             "runs_repeated": 0,
             "info_changed_between_runs": true,
-            "output_sha256": "82942c666fe8c3a32fff4361d823413bfa6d758004d0b7ee384de4c825235c77",
+            "output_sha256": "13a5a8ab909e359577c28a2a2e634ace34303d0183ba8bf3a692b49ad1a679d2",
             "info": [
-              "bits 400921fb54442d21"
-            ]
+              "bits 400921fb54442d1d"
+            ],
+            "recorded": "2026-11-12T14:35:39Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "go": {
             "status": "ok",
@@ -4744,71 +4852,43 @@
             "output_sha256": "7919eed8a25045fcf644439abdad427938b764bc71799bafbc0c36c75e48876e",
             "info": [
               "bits 400921fb54442d31"
-            ]
+            ],
+            "recorded": "2026-11-12T11:31:58Z",
+            "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
           },
           "python": {
             "status": "no program",
-            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core"
+            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core",
+            "recorded": "2026-11-12T14:35:39Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           }
         },
         "32": {
-          "calx": {
-            "status": "ok",
-            "median_ms": 121.004,
-            "best_ms": 115.601,
-            "cpu_ms": 3430.4,
-            "peak_mb": 2.39,
-            "wall_ms": [
-              121.004,
-              115.601,
-              133.528
-            ],
-            "cpu_ms_runs": [
-              3430.4,
-              3523.3,
-              3264.0
-            ],
-            "peak_mb_runs": [
-              2.39,
-              2.36,
-              2.41
-            ],
-            "machine_busy": [
-              0.015,
-              0.025,
-              0.0
-            ],
-            "runs_repeated": 0,
-            "output_sha256": "d176be80d6f542f84bb08a785a099f21eb578f47ef9d5eb7124ce5a87363b869",
-            "info": [
-              "bits 400921fb54442d22"
-            ]
-          },
           "c": {
             "status": "ok",
-            "median_ms": 140.292,
-            "best_ms": 139.178,
-            "cpu_ms": 4363.5,
-            "peak_mb": 5.58,
+            "median_ms": 145.834,
+            "best_ms": 139.315,
+            "cpu_ms": 4544.0,
+            "peak_mb": 5.52,
             "wall_ms": [
-              140.292,
-              139.178,
-              144.624
+              177.886,
+              139.315,
+              145.834
             ],
             "cpu_ms_runs": [
-              4363.5,
-              4326.1,
-              4498.3
+              5420.8,
+              4331.1,
+              4544.0
             ],
             "peak_mb_runs": [
-              5.58,
-              5.64,
-              5.43
+              5.52,
+              5.55,
+              5.5
             ],
             "machine_busy": [
-              0.003,
-              0.005,
-              0.0
+              0.0,
+              0.006,
+              0.012
             ],
             "runs_repeated": 0,
             "output_sha256": "ea98e2b76b5870d70c9502d4ad88286724f57ff65f20a8cbde2349d64d3b7683",
@@ -4816,38 +4896,74 @@
               "bits 400921fb54442cee"
             ]
           },
-          "rust": {
+          "calx": {
             "status": "ok",
-            "median_ms": 127.144,
-            "best_ms": 125.525,
-            "cpu_ms": 3880.1,
-            "peak_mb": 2.4,
+            "median_ms": 143.728,
+            "best_ms": 119.397,
+            "cpu_ms": 2852.7,
+            "peak_mb": 2.37,
             "wall_ms": [
-              135.3,
-              127.144,
-              125.525
+              150.447,
+              119.397,
+              143.728
             ],
             "cpu_ms_runs": [
-              3487.0,
-              3895.1,
-              3880.1
+              2732.4,
+              3687.7,
+              2852.7
             ],
             "peak_mb_runs": [
-              2.4,
-              2.39,
-              2.41
+              2.37,
+              2.36,
+              2.37
             ],
             "machine_busy": [
-              0.016,
               0.008,
-              0.019
+              0.0,
+              0.017
+            ],
+            "runs_repeated": 0,
+            "output_sha256": "d176be80d6f542f84bb08a785a099f21eb578f47ef9d5eb7124ce5a87363b869",
+            "info": [
+              "bits 400921fb54442d22"
+            ],
+            "recorded": "2026-11-12T14:35:39Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
+          },
+          "rust": {
+            "status": "ok",
+            "median_ms": 128.847,
+            "best_ms": 123.045,
+            "cpu_ms": 3800.7,
+            "peak_mb": 2.41,
+            "wall_ms": [
+              128.847,
+              139.978,
+              123.045
+            ],
+            "cpu_ms_runs": [
+              3830.5,
+              3541.6,
+              3800.7
+            ],
+            "peak_mb_runs": [
+              2.41,
+              2.65,
+              2.39
+            ],
+            "machine_busy": [
+              0.012,
+              0.013,
+              0.0
             ],
             "runs_repeated": 0,
             "info_changed_between_runs": true,
             "output_sha256": "0b2678283afe788c9d452653882f4a627fd7a0826d630fa57ae68502c5a837bd",
             "info": [
               "bits 400921fb54442d1b"
-            ]
+            ],
+            "recorded": "2026-11-12T14:35:39Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           },
           "go": {
             "status": "ok",
@@ -4879,17 +4995,21 @@
             "output_sha256": "ea98e2b76b5870d70c9502d4ad88286724f57ff65f20a8cbde2349d64d3b7683",
             "info": [
               "bits 400921fb54442cee"
-            ]
+            ],
+            "recorded": "2026-11-12T11:31:58Z",
+            "commit": "12540050d1ba575c681e06bcdd765111d144c8b3"
           },
           "python": {
             "status": "no program",
-            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core"
+            "why": "CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core",
+            "recorded": "2026-11-12T14:35:39Z",
+            "commit": "8feb83ba33655e451214ac43c761e239d22c9ea0"
           }
         }
       },
       "same_output_at_every_count": {
-        "calx": true,
         "c": false,
+        "calx": true,
         "rust": false,
         "go": false
       }
@@ -4909,36 +5029,36 @@
           "title": "hello, from scratch, debug",
           "calx": {
             "status": "ok",
-            "median_ms": 237.5,
-            "best_ms": 216.4,
+            "median_ms": 188.1,
+            "best_ms": 163.9,
             "wall_ms": [
-              291.5,
-              237.5,
-              227.9,
-              216.4,
-              253.7
+              308.4,
+              186.0,
+              188.1,
+              163.9,
+              203.1
             ],
             "machine_busy": [
               0.002,
               0.0,
               0.0,
-              0.001,
-              0.001
+              0.0,
+              0.0
             ]
           },
           "c": {
             "status": "ok",
-            "median_ms": 133.9,
-            "best_ms": 125.1,
+            "median_ms": 101.3,
+            "best_ms": 95.7,
             "wall_ms": [
-              162.6,
-              128.1,
-              125.1,
-              172.0,
-              133.9
+              103.5,
+              102.0,
+              101.3,
+              99.1,
+              95.7
             ],
             "machine_busy": [
-              0.034,
+              0.001,
               0.001,
               0.0,
               0.0,
@@ -4947,20 +5067,20 @@
           },
           "rust": {
             "status": "ok",
-            "median_ms": 265.2,
-            "best_ms": 207.4,
+            "median_ms": 219.7,
+            "best_ms": 163.5,
             "wall_ms": [
-              327.1,
-              314.0,
-              245.9,
-              207.4,
-              265.2
+              163.5,
+              293.5,
+              167.4,
+              440.1,
+              219.7
             ],
             "machine_busy": [
-              0.002,
               0.0,
+              0.001,
               0.0,
-              0.0,
+              0.001,
               0.001
             ]
           },
@@ -4988,18 +5108,18 @@
           "title": "hello, from scratch, release",
           "calx": {
             "status": "ok",
-            "median_ms": 757.9,
-            "best_ms": 704.9,
+            "median_ms": 590.5,
+            "best_ms": 577.9,
             "wall_ms": [
-              857.6,
-              757.9,
-              882.1,
-              725.9,
-              704.9
+              577.9,
+              658.3,
+              595.7,
+              590.5,
+              586.3
             ],
             "machine_busy": [
               0.0,
-              0.0,
+              0.001,
               0.0,
               0.0,
               0.0
@@ -5007,40 +5127,40 @@
           },
           "c": {
             "status": "ok",
-            "median_ms": 204.3,
-            "best_ms": 153.5,
+            "median_ms": 180.8,
+            "best_ms": 133.4,
             "wall_ms": [
-              232.2,
-              155.6,
-              153.5,
-              239.9,
-              204.3
+              180.8,
+              345.7,
+              133.4,
+              427.3,
+              140.4
             ],
             "machine_busy": [
               0.0,
               0.0,
-              0.0,
+              0.001,
               0.0,
               0.0
             ]
           },
           "rust": {
             "status": "ok",
-            "median_ms": 1809.3,
-            "best_ms": 1690.0,
+            "median_ms": 1685.5,
+            "best_ms": 1661.0,
             "wall_ms": [
-              1928.6,
-              1690.0,
-              1776.6,
-              1809.3,
-              1919.0
+              1712.7,
+              1685.5,
+              1661.0,
+              1669.3,
+              2000.4
             ],
             "machine_busy": [
               0.0,
               0.0,
               0.0,
               0.0,
-              0.0
+              0.007
             ]
           },
           "go": {
@@ -5067,52 +5187,52 @@
           "title": "64 modules, from scratch, debug",
           "calx": {
             "status": "ok",
-            "median_ms": 373.1,
-            "best_ms": 310.1,
+            "median_ms": 279.1,
+            "best_ms": 255.8,
             "wall_ms": [
-              383.5,
-              310.1,
-              610.4,
-              368.4,
-              373.1
+              275.6,
+              255.8,
+              279.1,
+              281.8,
+              299.3
             ],
             "machine_busy": [
               0.0,
-              0.001,
               0.0,
               0.0,
-              0.002
+              0.0,
+              0.0
             ]
           },
           "c": {
             "status": "ok",
-            "median_ms": 234.3,
-            "best_ms": 212.7,
+            "median_ms": 199.0,
+            "best_ms": 184.7,
             "wall_ms": [
-              247.3,
-              219.0,
-              234.3,
-              409.8,
-              212.7
+              196.9,
+              199.0,
+              316.1,
+              184.7,
+              205.6
             ],
             "machine_busy": [
               0.001,
               0.0,
               0.0,
-              0.002,
+              0.0,
               0.0
             ]
           },
           "rust": {
             "status": "ok",
-            "median_ms": 650.0,
-            "best_ms": 633.9,
+            "median_ms": 624.0,
+            "best_ms": 594.9,
             "wall_ms": [
-              644.3,
-              688.5,
-              768.5,
-              650.0,
-              633.9
+              594.9,
+              644.5,
+              624.0,
+              620.1,
+              1055.2
             ],
             "machine_busy": [
               0.0,
@@ -5146,17 +5266,17 @@
           "title": "64 modules, from scratch, release",
           "calx": {
             "status": "ok",
-            "median_ms": 897.1,
-            "best_ms": 812.1,
+            "median_ms": 842.7,
+            "best_ms": 814.7,
             "wall_ms": [
-              812.1,
-              1162.2,
-              896.7,
-              902.7,
-              897.1
+              814.7,
+              842.7,
+              1236.4,
+              836.1,
+              889.7
             ],
             "machine_busy": [
-              0.0,
+              0.005,
               0.001,
               0.0,
               0.0,
@@ -5165,14 +5285,14 @@
           },
           "c": {
             "status": "ok",
-            "median_ms": 459.6,
-            "best_ms": 404.3,
+            "median_ms": 445.3,
+            "best_ms": 432.8,
             "wall_ms": [
-              404.3,
-              459.6,
-              417.6,
-              479.0,
-              561.9
+              445.3,
+              586.0,
+              441.3,
+              432.8,
+              815.5
             ],
             "machine_busy": [
               0.0,
@@ -5184,20 +5304,20 @@
           },
           "rust": {
             "status": "ok",
-            "median_ms": 2571.7,
-            "best_ms": 2387.5,
+            "median_ms": 2415.2,
+            "best_ms": 2384.2,
             "wall_ms": [
-              2420.9,
-              2387.5,
-              2571.7,
-              2578.3,
-              2841.9
+              2384.2,
+              2414.0,
+              2415.2,
+              2504.0,
+              2416.8
             ],
             "machine_busy": [
               0.0,
               0.0,
               0.0,
-              0.0,
+              0.001,
               0.0
             ]
           },
@@ -5225,59 +5345,59 @@
           "title": "64 modules, one module edited, debug",
           "calx": {
             "status": "ok",
-            "median_ms": 106.0,
-            "best_ms": 98.3,
+            "median_ms": 62.9,
+            "best_ms": 61.6,
             "wall_ms": [
-              106.0,
-              101.4,
-              98.3,
-              127.6,
-              107.8
+              63.7,
+              63.6,
+              61.6,
+              62.9,
+              61.6
             ],
             "machine_busy": [
               0.0,
+              0.03,
+              0.005,
               0.0,
-              0.0,
-              0.001,
               0.0
             ]
           },
           "c": {
             "status": "ok",
-            "median_ms": 139.5,
-            "best_ms": 138.4,
+            "median_ms": 125.1,
+            "best_ms": 114.8,
             "wall_ms": [
-              139.0,
-              139.5,
-              138.4,
-              173.9,
-              147.3
+              114.8,
+              125.1,
+              219.7,
+              124.7,
+              137.3
             ],
             "machine_busy": [
               0.001,
-              0.001,
+              0.038,
               0.0,
-              0.001,
+              0.0,
               0.0
             ]
           },
           "rust": {
             "status": "ok",
-            "median_ms": 344.5,
-            "best_ms": 338.4,
+            "median_ms": 293.0,
+            "best_ms": 272.7,
             "wall_ms": [
-              340.5,
-              444.4,
-              344.5,
-              387.7,
-              338.4
+              277.2,
+              310.4,
+              272.7,
+              294.5,
+              293.0
             ],
             "machine_busy": [
               0.0,
+              0.031,
               0.0,
-              0.001,
               0.0,
-              0.0
+              0.001
             ]
           },
           "go": {
@@ -5304,33 +5424,33 @@
           "title": "64 modules, one module edited, release",
           "calx": {
             "status": "ok",
-            "median_ms": 172.4,
-            "best_ms": 150.6,
+            "median_ms": 115.7,
+            "best_ms": 110.4,
             "wall_ms": [
-              165.1,
-              172.4,
-              172.9,
-              150.6,
-              176.6
+              128.6,
+              116.1,
+              113.0,
+              110.4,
+              115.7
             ],
             "machine_busy": [
+              0.0,
               0.001,
               0.0,
-              0.0,
-              0.0,
+              0.001,
               0.0
             ]
           },
           "c": {
             "status": "ok",
-            "median_ms": 435.5,
-            "best_ms": 324.0,
+            "median_ms": 330.2,
+            "best_ms": 299.4,
             "wall_ms": [
-              435.5,
-              437.3,
-              456.8,
-              399.5,
-              324.0
+              299.4,
+              330.2,
+              319.8,
+              368.1,
+              528.7
             ],
             "machine_busy": [
               0.0,
@@ -5342,20 +5462,20 @@
           },
           "rust": {
             "status": "ok",
-            "median_ms": 2733.8,
-            "best_ms": 2700.4,
+            "median_ms": 2345.9,
+            "best_ms": 2306.4,
             "wall_ms": [
-              2728.3,
-              2700.4,
-              2733.8,
-              2819.9,
-              2892.9
+              2345.8,
+              2345.9,
+              2306.4,
+              2349.0,
+              2373.7
             ],
             "machine_busy": [
+              0.0,
+              0.0,
+              0.0,
               0.001,
-              0.0,
-              0.0,
-              0.0,
               0.0
             ]
           },
@@ -5383,33 +5503,33 @@
           "title": "64 modules, nothing changed, debug",
           "calx": {
             "status": "ok",
-            "median_ms": 9.1,
-            "best_ms": 8.1,
+            "median_ms": 1.6,
+            "best_ms": 1.6,
             "wall_ms": [
-              13.6,
-              8.5,
-              8.1,
-              9.7,
-              9.1
+              1.6,
+              1.6,
+              1.6,
+              1.7,
+              1.8
             ],
             "machine_busy": [
               0.0,
               0.0,
               0.0,
-              0.001,
+              0.0,
               0.0
             ]
           },
           "c": {
             "status": "ok",
             "median_ms": 1.6,
-            "best_ms": 1.6,
+            "best_ms": 1.5,
             "wall_ms": [
-              1.6,
-              1.6,
-              1.8,
               1.7,
-              1.6
+              1.6,
+              1.5,
+              1.6,
+              1.9
             ],
             "machine_busy": [
               0.001,
@@ -5421,19 +5541,19 @@
           },
           "rust": {
             "status": "ok",
-            "median_ms": 10.9,
-            "best_ms": 10.8,
+            "median_ms": 10.5,
+            "best_ms": 10.3,
             "wall_ms": [
-              10.9,
-              11.0,
+              10.6,
+              10.5,
               10.8,
-              10.9,
-              11.5
+              10.3,
+              10.5
             ],
             "machine_busy": [
               0.0,
-              0.0,
-              0.0,
+              0.001,
+              0.001,
               0.0,
               0.0
             ]
@@ -5462,17 +5582,17 @@
           "title": "64 modules, nothing changed, release",
           "calx": {
             "status": "ok",
-            "median_ms": 8.2,
-            "best_ms": 7.7,
+            "median_ms": 1.6,
+            "best_ms": 1.5,
             "wall_ms": [
-              7.7,
-              8.7,
-              7.8,
-              8.2,
-              8.3
+              1.6,
+              1.5,
+              1.6,
+              1.5,
+              1.6
             ],
             "machine_busy": [
-              0.002,
+              0.0,
               0.0,
               0.0,
               0.0,
@@ -5481,33 +5601,33 @@
           },
           "c": {
             "status": "ok",
-            "median_ms": 1.6,
-            "best_ms": 1.5,
+            "median_ms": 1.7,
+            "best_ms": 1.6,
             "wall_ms": [
               1.6,
-              1.6,
-              1.5,
-              1.8,
-              1.8
+              1.9,
+              1.7,
+              1.7,
+              1.6
             ],
             "machine_busy": [
+              0.001,
+              0.001,
               0.0,
               0.0,
-              0.0,
-              0.004,
-              0.0
+              0.001
             ]
           },
           "rust": {
             "status": "ok",
-            "median_ms": 11.0,
-            "best_ms": 10.9,
+            "median_ms": 10.8,
+            "best_ms": 10.7,
             "wall_ms": [
-              11.4,
-              11.0,
-              10.9,
-              11.9,
-              10.9
+              11.3,
+              10.8,
+              10.7,
+              11.3,
+              10.8
             ],
             "machine_busy": [
               0.0,
@@ -5540,13 +5660,13 @@
       },
       "sizes_bytes": {
         "hello": {
-          "calx": 97608,
+          "calx": 97680,
           "c": 6048,
           "rust": 424880,
           "go": 2339652
         },
         "big": {
-          "calx": 590368,
+          "calx": 590704,
           "c": 222048,
           "rust": 457768,
           "go": 2608794
@@ -5562,46 +5682,46 @@
       "startup": {
         "calx": {
           "status": "ok",
-          "median_ms": 0.387,
-          "best_ms": 0.357,
+          "median_ms": 0.372,
+          "best_ms": 0.345,
           "cpu_ms": 0.0,
-          "peak_mb": 2.14,
+          "peak_mb": 2.16,
           "wall_ms": [
-            0.379,
-            0.361,
-            0.364,
-            0.357,
-            0.407,
-            0.364,
-            0.386,
-            0.377,
-            0.393,
-            0.395,
+            0.394,
             0.392,
-            0.406,
-            0.469,
-            0.38,
-            0.365,
-            0.399,
-            0.387,
-            0.413,
-            0.416,
-            0.373
+            0.389,
+            0.7,
+            0.381,
+            0.361,
+            0.375,
+            0.363,
+            0.358,
+            0.398,
+            0.359,
+            0.355,
+            0.345,
+            0.376,
+            0.366,
+            0.347,
+            0.373,
+            0.35,
+            0.372,
+            0.378
           ],
           "cpu_ms_runs": [
             0.0,
             0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.3,
-            0.0,
-            0.0,
-            0.3,
-            0.0,
             0.4,
-            0.4,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
             0.0,
             0.0,
             0.0,
@@ -5611,25 +5731,25 @@
             0.0
           ],
           "peak_mb_runs": [
-            2.15,
-            2.16,
-            2.16,
-            2.12,
-            2.14,
-            2.12,
-            2.15,
-            2.12,
-            2.14,
-            2.16,
-            2.14,
-            2.14,
+            2.19,
+            2.2,
+            2.2,
             2.13,
+            2.16,
             2.14,
-            2.12,
-            2.14,
+            2.16,
+            2.18,
             2.14,
             2.14,
             2.16,
+            2.14,
+            2.2,
+            2.18,
+            2.16,
+            2.15,
+            2.18,
+            2.14,
+            2.14,
             2.14
           ],
           "machine_busy": [
@@ -5654,133 +5774,36 @@
             0.0,
             0.0
           ],
-          "runs_repeated": 3,
+          "runs_repeated": 2,
           "output_sha256": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
         },
         "c": {
           "status": "ok",
-          "median_ms": 0.321,
-          "best_ms": 0.285,
-          "cpu_ms": 0.0,
-          "peak_mb": 2.14,
-          "wall_ms": [
-            0.335,
-            0.321,
-            0.318,
-            0.338,
-            0.312,
-            0.298,
-            0.307,
-            0.342,
-            0.308,
-            0.32,
-            0.472,
-            0.328,
-            0.323,
-            0.322,
-            0.285,
-            0.313,
-            0.441,
-            0.291,
-            0.342,
-            0.372
-          ],
-          "cpu_ms_runs": [
-            0.0,
-            0.0,
-            0.3,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.3,
-            0.3
-          ],
-          "peak_mb_runs": [
-            2.14,
-            2.11,
-            2.13,
-            2.16,
-            2.15,
-            2.11,
-            2.14,
-            2.11,
-            2.14,
-            2.11,
-            2.14,
-            2.14,
-            2.14,
-            2.1,
-            2.14,
-            2.16,
-            2.13,
-            2.15,
-            2.12,
-            2.16
-          ],
-          "machine_busy": [
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0
-          ],
-          "runs_repeated": 8,
-          "output_sha256": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
-        },
-        "rust": {
-          "status": "ok",
-          "median_ms": 0.417,
-          "best_ms": 0.379,
+          "median_ms": 0.292,
+          "best_ms": 0.268,
           "cpu_ms": 0.0,
           "peak_mb": 2.18,
           "wall_ms": [
-            0.424,
-            0.41,
-            0.408,
-            0.446,
-            0.381,
-            0.427,
-            0.385,
-            0.494,
-            0.379,
-            0.413,
-            0.431,
-            0.42,
-            0.4,
-            0.418,
-            0.409,
-            0.425,
-            0.437,
-            0.425,
-            0.405,
-            0.417
+            0.28,
+            0.304,
+            0.284,
+            0.305,
+            0.311,
+            0.29,
+            0.279,
+            0.312,
+            0.281,
+            0.285,
+            0.294,
+            0.307,
+            0.268,
+            0.292,
+            0.293,
+            0.297,
+            0.288,
+            0.313,
+            0.287,
+            0.309
           ],
           "cpu_ms_runs": [
             0.0,
@@ -5796,7 +5819,7 @@
             0.0,
             0.0,
             0.0,
-            0.4,
+            0.3,
             0.0,
             0.0,
             0.0,
@@ -5805,25 +5828,25 @@
             0.0
           ],
           "peak_mb_runs": [
-            2.18,
-            2.19,
-            2.19,
-            2.23,
-            2.11,
-            2.18,
-            2.11,
-            2.22,
-            2.17,
-            2.2,
+            2.12,
             2.16,
-            2.18,
-            2.17,
-            2.14,
-            2.14,
-            2.23,
+            2.16,
+            2.22,
+            2.15,
+            2.19,
             2.21,
-            2.24,
+            2.19,
+            2.21,
+            2.14,
+            2.2,
+            2.2,
+            2.18,
+            2.13,
+            2.18,
+            2.14,
             2.17,
+            2.19,
+            2.14,
             2.18
           ],
           "machine_busy": [
@@ -5849,6 +5872,200 @@
             0.0
           ],
           "runs_repeated": 1,
+          "output_sha256": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+        },
+        "rust": {
+          "status": "ok",
+          "median_ms": 0.399,
+          "best_ms": 0.363,
+          "cpu_ms": 0.0,
+          "peak_mb": 2.19,
+          "wall_ms": [
+            0.395,
+            0.536,
+            0.371,
+            0.603,
+            0.399,
+            0.402,
+            0.398,
+            0.414,
+            0.392,
+            0.404,
+            0.37,
+            0.409,
+            0.387,
+            0.484,
+            0.372,
+            0.412,
+            0.369,
+            0.417,
+            0.363,
+            0.396
+          ],
+          "cpu_ms_runs": [
+            0.4,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.4,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "peak_mb_runs": [
+            2.21,
+            2.23,
+            2.21,
+            2.17,
+            2.2,
+            2.19,
+            2.18,
+            2.2,
+            2.14,
+            2.19,
+            2.22,
+            2.17,
+            2.18,
+            2.21,
+            2.17,
+            2.18,
+            2.21,
+            2.16,
+            2.21,
+            2.21
+          ],
+          "machine_busy": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "runs_repeated": 2,
+          "output_sha256": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+        },
+        "python": {
+          "status": "ok",
+          "median_ms": 6.867,
+          "best_ms": 6.636,
+          "cpu_ms": 5.8,
+          "peak_mb": 9.06,
+          "wall_ms": [
+            7.072,
+            6.654,
+            6.965,
+            7.423,
+            6.858,
+            6.725,
+            6.908,
+            6.89,
+            6.883,
+            6.697,
+            6.875,
+            6.719,
+            7.05,
+            7.225,
+            6.751,
+            6.704,
+            6.849,
+            6.713,
+            6.929,
+            6.636
+          ],
+          "cpu_ms_runs": [
+            5.4,
+            5.9,
+            6.9,
+            6.7,
+            5.7,
+            6.4,
+            6.1,
+            6.9,
+            3.0,
+            3.6,
+            3.3,
+            3.8,
+            4.5,
+            7.2,
+            6.7,
+            4.7,
+            6.8,
+            6.7,
+            5.2,
+            5.7
+          ],
+          "peak_mb_runs": [
+            9.12,
+            9.05,
+            9.1,
+            9.05,
+            9.11,
+            9.09,
+            9.05,
+            9.06,
+            9.07,
+            9.03,
+            9.07,
+            9.05,
+            9.05,
+            9.04,
+            8.99,
+            9.01,
+            9.06,
+            9.19,
+            9.06,
+            9.04
+          ],
+          "machine_busy": [
+            0.019,
+            0.018,
+            0.013,
+            0.013,
+            0.019,
+            0.016,
+            0.0,
+            0.013,
+            0.0,
+            0.068,
+            0.0,
+            0.027,
+            0.023,
+            0.0,
+            0.014,
+            0.023,
+            0.0,
+            0.014,
+            0.021,
+            0.0
+          ],
+          "runs_repeated": 0,
           "output_sha256": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
         },
         "go": {
@@ -5946,103 +6163,6 @@
             0.0
           ],
           "runs_repeated": 4,
-          "output_sha256": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
-        },
-        "python": {
-          "status": "ok",
-          "median_ms": 7.093,
-          "best_ms": 6.689,
-          "cpu_ms": 6.8,
-          "peak_mb": 9.07,
-          "wall_ms": [
-            6.689,
-            7.272,
-            6.903,
-            6.708,
-            7.29,
-            7.132,
-            7.312,
-            6.941,
-            7.109,
-            7.237,
-            7.426,
-            6.854,
-            7.492,
-            6.856,
-            7.066,
-            6.867,
-            6.987,
-            7.077,
-            7.167,
-            7.41
-          ],
-          "cpu_ms_runs": [
-            2.9,
-            7.2,
-            3.6,
-            3.7,
-            4.6,
-            7.1,
-            7.1,
-            6.9,
-            6.9,
-            7.2,
-            5.1,
-            4.7,
-            7.4,
-            6.8,
-            5.9,
-            6.8,
-            6.2,
-            6.2,
-            7.1,
-            7.4
-          ],
-          "peak_mb_runs": [
-            9.04,
-            9.12,
-            8.99,
-            9.12,
-            9.06,
-            9.03,
-            9.04,
-            9.11,
-            9.12,
-            9.08,
-            9.08,
-            9.12,
-            9.09,
-            9.05,
-            9.06,
-            9.05,
-            9.04,
-            9.04,
-            9.1,
-            9.07
-          ],
-          "machine_busy": [
-            0.0,
-            0.008,
-            0.023,
-            0.023,
-            0.018,
-            0.0,
-            0.008,
-            0.009,
-            0.009,
-            0.007,
-            0.016,
-            0.018,
-            0.007,
-            0.01,
-            0.013,
-            0.01,
-            0.013,
-            0.048,
-            0.018,
-            0.0
-          ],
-          "runs_repeated": 0,
           "output_sha256": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
         }
       }

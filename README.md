@@ -33,9 +33,9 @@ On the [language benchmarks](docs/language-benchmarks.md), Calx against C, Rust,
 
 | Calx against | Windows 11 | Linux (WSL2) |
 | --- | --- | --- |
-| C | 13 faster, 5 even, 1 slower | 8 faster, 7 even, 4 slower |
-| Rust | 15 faster, 5 even, 5 slower | 13 faster, 7 even, 5 slower |
-| Go | 17 faster, 3 even, 5 slower | 17 faster, 4 even, 4 slower |
+| C | 14 faster, 4 even, 1 slower | 11 faster, 6 even, 2 slower |
+| Rust | 19 faster, 5 even, 1 slower | 16 faster, 6 even, 3 slower |
+| Go | 19 faster, 3 even, 3 slower | 17 faster, 4 even, 4 slower |
 | Python | 21 faster | 21 faster |
 
 The page has every median, the memory each program held, why Calx is slower where it is, and how long each language takes to build a program and to start one. [calxlang.com/performance](https://calxlang.com/performance/) draws them, for either system.

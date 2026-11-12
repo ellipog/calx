@@ -28,19 +28,12 @@ const times = (f: number) => (f < 10 ? f.toFixed(1) : Math.round(f).toString());
 // to its notes until it's written here.
 const WHY: Record<string, string> = {
 	compress: "Go's gzip and xz write bigger files than the others', so they do less work.",
-	logs: "Each part of a line the Calx program keeps is a copy, where C's and Go's share the line. Keeping parts as views is CLX-293.",
-	sort: 'Calx\'s <code>sort_by</code> on the doubles, which is most of it: it sorts the integers and the strings faster than Rust (CLX-292).',
-	regexredux:
-		"Rust's regex crate finds the motifs with a SIMD search for several literals at once, where Calx's lazy DFA reads nearly every byte (CLX-297).",
-	pidigits:
-		"Go's <code>math/big</code> has its inner loops in assembly and reuses a number's memory, where each <code>std.bigint</code> operation makes a new number (CLX-298).",
-	parmandel: "Its rows differ in cost, and Calx's pool hands out chunks where the others hand out a row at a time (CLX-296).",
-	parspectral: "On every processor the efficiency cores join in, and on Windows Rayon came out ahead. We haven't traced why.",
+	logs: 'C scans each line in place. The Calx program\'s parts are views, but it still makes a list for each <code>split</code> and copies the path it trims (CLX-309).',
+	parmandel: "Go's loop over a row takes less time on one thread too, by about as much; how the rows are shared out is even now (CLX-296).",
+	parsum: 'On all 32 processors under WSL the times swing by a fifth from one recording to the next.',
 	binarytrees: "It times the allocator: Go's collector is a little faster than Calx's allocator, and C's and Rust's are slower.",
-	nbody: "Rust's takes a little less time, which we haven't traced (CLX-301).",
-	revcomp: 'The Calx program finds line ends a byte at a time, where C uses <code>memchr</code> (CLX-299).',
-	wordcount: "C's hand-written map keeps its keys pointing into the text.",
-	text: "C's and Rust's programs gain more from Linux than Calx's do, which we haven't traced (CLX-300).",
+	nbody: "LLVM's vectorizer packs the loop differently in Rust's LLVM 21 than in clang 23, which Calx's C goes through (CLX-301).",
+	revcomp: "On Linux, in reversing and pairing the bases, which we haven't traced (CLX-308).",
 };
 
 const OTHERS = SUITE_LANGS.filter((l) => l.id !== 'calx');
