@@ -1118,14 +1118,39 @@ __attribute__((target("aes"))) static inline uint64x2_t crc64_fold(uint64x2_t x,
     return veorq_u64(veorq_u64(lo, hi), y);
 }
 
+/* From 128 bytes, eight lanes, 128 bytes a step, then folded onto four, as calx_zlib.c's CRC-32
+ * does on Arm64 (CLX-288). */
 __attribute__((target("aes"))) static cx_u64 crc64_pmull(cx_u64 crc, const cx_u8* p, cx_usize n) {
-    static const cx_u64 ks[8] = {0x6ae3efbb9dd441f3ull, 0x081f6054a7842df4ull, 0xb5ea1af9c013aca4ull, 0x69a35d91c3730254ull,
-                                 0x60095b008a9efa44ull, 0x3be653a30fe1af51ull, 0xe05dd497ca393ae4ull, 0xdabe95afc7875f40ull};
+    static const cx_u64 ks[10] = {0x6ae3efbb9dd441f3ull, 0x081f6054a7842df4ull, 0xb5ea1af9c013aca4ull, 0x69a35d91c3730254ull,
+                                  0x60095b008a9efa44ull, 0x3be653a30fe1af51ull, 0xe05dd497ca393ae4ull, 0xdabe95afc7875f40ull,
+                                  0x8757d71d4fcc1000ull, 0xd7d86b2af73de740ull};
     const uint64x2_t k64 = vld1q_u64(ks), k48 = vld1q_u64(ks + 2), k32 = vld1q_u64(ks + 4), k16 = vld1q_u64(ks + 6);
-    uint64x2_t a = veorq_u64(crc64_load(p), vcombine_u64(vcreate_u64(crc), vcreate_u64(0)));
-    uint64x2_t b = crc64_load(p + 16), c = crc64_load(p + 32), d = crc64_load(p + 48);
-    p += 64;
-    n -= 64;
+    const uint64x2_t first = vcombine_u64(vcreate_u64(crc), vcreate_u64(0));
+    uint64x2_t a, b, c, d;
+    if (n >= 128) {
+        const uint64x2_t k128 = vld1q_u64(ks + 8);
+        uint64x2_t x[8];
+        for (int i = 0; i < 8; i++) x[i] = crc64_load(p + 16 * i);
+        x[0] = veorq_u64(x[0], first);
+        p += 128;
+        n -= 128;
+        while (n >= 128) {
+            for (int i = 0; i < 8; i++) x[i] = crc64_fold(x[i], k128, crc64_load(p + 16 * i));
+            p += 128;
+            n -= 128;
+        }
+        a = crc64_fold(x[0], k64, x[4]);
+        b = crc64_fold(x[1], k64, x[5]);
+        c = crc64_fold(x[2], k64, x[6]);
+        d = crc64_fold(x[3], k64, x[7]);
+    } else {
+        a = veorq_u64(crc64_load(p), first);
+        b = crc64_load(p + 16);
+        c = crc64_load(p + 32);
+        d = crc64_load(p + 48);
+        p += 64;
+        n -= 64;
+    }
     while (n >= 64) {
         a = crc64_fold(a, k64, crc64_load(p));
         b = crc64_fold(b, k64, crc64_load(p + 16));

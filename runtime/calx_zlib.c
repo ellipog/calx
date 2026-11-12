@@ -156,14 +156,40 @@ __attribute__((target("aes"))) static inline uint64x2_t crc_fold(uint64x2_t x, u
     return veorq_u64(veorq_u64(lo, hi), y);
 }
 
+/* From 128 bytes, eight lanes, 128 bytes a step, then folded onto four, 64 bytes on: each lane
+ * waits on its multiply and two adds in a row, which four lanes can't hide on an Apple M1, where
+ * Apple's zlib did 29.6 GB/s to these four's 24 (CLX-288). */
 __attribute__((target("aes"))) static cx_u32 crc32_pmull(cx_u32 crc, const cx_u8* p, cx_usize n, int has_crc32) {
-    static const cx_u64 ks[8] = {0x653d982200000000ull, 0xcad38e8f00000000ull, 0x69ccfc0d00000000ull, 0x2a28386200000000ull,
-                                 0x9570d49500000000ull, 0x01b5fd1d00000000ull, 0x65673b4600000000ull, 0x9ba54c6f00000000ull};
+    static const cx_u64 ks[10] = {0x653d982200000000ull, 0xcad38e8f00000000ull, 0x69ccfc0d00000000ull, 0x2a28386200000000ull,
+                                  0x9570d49500000000ull, 0x01b5fd1d00000000ull, 0x65673b4600000000ull, 0x9ba54c6f00000000ull,
+                                  0x7d657a1000000000ull, 0x7406fa9500000000ull};
     const uint64x2_t k64 = vld1q_u64(ks), k48 = vld1q_u64(ks + 2), k32 = vld1q_u64(ks + 4), k16 = vld1q_u64(ks + 6);
-    uint64x2_t a = veorq_u64(crc_load(p), vcombine_u64(vcreate_u64(crc), vcreate_u64(0)));
-    uint64x2_t b = crc_load(p + 16), c = crc_load(p + 32), d = crc_load(p + 48);
-    p += 64;
-    n -= 64;
+    const uint64x2_t first = vcombine_u64(vcreate_u64(crc), vcreate_u64(0));
+    uint64x2_t a, b, c, d;
+    if (n >= 128) {
+        const uint64x2_t k128 = vld1q_u64(ks + 8);
+        uint64x2_t x[8];
+        for (int i = 0; i < 8; i++) x[i] = crc_load(p + 16 * i);
+        x[0] = veorq_u64(x[0], first);
+        p += 128;
+        n -= 128;
+        while (n >= 128) {
+            for (int i = 0; i < 8; i++) x[i] = crc_fold(x[i], k128, crc_load(p + 16 * i));
+            p += 128;
+            n -= 128;
+        }
+        a = crc_fold(x[0], k64, x[4]);
+        b = crc_fold(x[1], k64, x[5]);
+        c = crc_fold(x[2], k64, x[6]);
+        d = crc_fold(x[3], k64, x[7]);
+    } else {
+        a = veorq_u64(crc_load(p), first);
+        b = crc_load(p + 16);
+        c = crc_load(p + 32);
+        d = crc_load(p + 48);
+        p += 64;
+        n -= 64;
+    }
     while (n >= 64) {
         a = crc_fold(a, k64, crc_load(p));
         b = crc_fold(b, k64, crc_load(p + 16));

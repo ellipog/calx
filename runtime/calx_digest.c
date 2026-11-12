@@ -349,20 +349,34 @@ SHA_TARGET static void sha256_blocks_ni(cx_u32* h, const cx_u8* p, cx_usize n) {
 
 #ifdef CX_ARM
 /* Four rounds at a time: sha256h works out the new ABCD and sha256h2 the new EFGH, both from the
- * state before, which sits in memory's order, A and E in lane 0. sha256su0 adds sigma0 of the
- * next four words, and sha256su1 the words seven back and sigma1. */
+ * state before, which sits in memory's order, A and E in lane 0. Each writes over its first
+ * operand, so the old ABCD is copied for sha256h2. Left to clang, sha256h worked on the copy,
+ * which put the copy on ABCD's chain every four rounds: written out, sha256h works in place and
+ * the copy delays only EFGH, which waits on ABCD every other time, as OpenSSL's does it. That was
+ * 19% behind OpenSSL on a Neoverse N2 (CLX-288). sha256su0 adds sigma0 of the next four words, and
+ * sha256su1 the words seven back and sigma1. */
+static inline __attribute__((always_inline, target("sha2"))) void sha256_rounds4(uint32x4_t* abcd, uint32x4_t* efgh, uint32x4_t wk) {
+    uint32x4_t before;
+    __asm__("mov %[t].16b, %[a].16b\n\t"
+            "sha256h %q[a], %q[e], %[k].4s\n\t"
+            "sha256h2 %q[e], %q[t], %[k].4s"
+            : [a] "+w"(*abcd), [e] "+w"(*efgh), [t] "=&w"(before)
+            : [k] "w"(wk));
+}
+
 __attribute__((target("sha2"))) static void sha256_blocks_arm(cx_u32* h, const cx_u8* p, cx_usize n) {
     uint32x4_t abcd = vld1q_u32(h), efgh = vld1q_u32(h + 4);
     for (; n; n--, p += 64) {
         uint32x4_t abcd0 = abcd, efgh0 = efgh, w[4];
+        /* The constants loaded in each block, off the rounds' chain, as SHA-512's are: hoisted
+         * out of the loop, the 16 of them took a register each, and two went to the stack. */
+        const cx_u32* k = sha256_k;
+        __asm__ volatile("" : "+r"(k));
         for (int g = 0; g < 4; g++) w[g] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(p + 16 * g)));
         _Pragma("clang loop unroll(full)")
         for (int g = 0; g < 16; g++) {
             if (g >= 4) w[g & 3] = vsha256su1q_u32(vsha256su0q_u32(w[g & 3], w[(g + 1) & 3]), w[(g + 2) & 3], w[(g + 3) & 3]);
-            uint32x4_t wk = vaddq_u32(w[g & 3], vld1q_u32(sha256_k + 4 * g));
-            uint32x4_t before = abcd;
-            abcd = vsha256hq_u32(abcd, efgh, wk);
-            efgh = vsha256h2q_u32(efgh, before, wk);
+            sha256_rounds4(&abcd, &efgh, vaddq_u32(w[g & 3], vld1q_u32(k + 4 * g)));
         }
         abcd = vaddq_u32(abcd, abcd0);
         efgh = vaddq_u32(efgh, efgh0);
