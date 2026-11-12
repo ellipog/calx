@@ -1576,9 +1576,11 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // Line tables in both modes, so debuggers and profilers show Calx lines through `#line`.
     // They don't change the generated code.
     // Each function and each piece of data in a section of its own, so the link drops what nothing
-    // reaches.
-    std::vector<std::string> flags = {"-std=gnu17", "-fwrapv", "-ffp-contract=off", "-fno-math-errno", "-w",
-                                      "-gline-tables-only", "-ffunction-sections", "-fdata-sections"};
+    // reaches. A plain `char` is signed everywhere, as on x86, where Arm Linux makes it unsigned
+    // (CLX-274).
+    std::vector<std::string> flags = {"-std=gnu17", "-fwrapv",          "-ffp-contract=off", "-fno-math-errno",
+                                      "-w",         "-gline-tables-only", "-ffunction-sections", "-fdata-sections",
+                                      "-fsigned-char"};
 #ifndef _WIN32
     // A function whose frame is bigger than a page touches each page of it in turn, so a stack
     // that overflows always reaches the page kept below it and panics, never stepping over it

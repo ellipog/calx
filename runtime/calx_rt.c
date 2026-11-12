@@ -2290,7 +2290,7 @@ static _Thread_local par_line* par_mine; /* a worker's own line */
 /* The pool of the loop this thread runs alone, outside a chunk. */
 static _Thread_local struct par_pool* par_home;
 
-static void par_pause(void) { __builtin_ia32_pause(); }
+static void par_pause(void) { CX_SPIN_PAUSE(); }
 
 /* A clock for timing loops, in what it counts: `par_tick_hz` a second. */
 #ifdef _WIN32

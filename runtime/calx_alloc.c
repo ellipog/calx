@@ -270,6 +270,7 @@ void cx_alloc_idle(void) {}
 #include <pthread.h>
 #include <sched.h>
 #include <sys/mman.h>
+#include <unistd.h>
 #endif
 
 #define SMALL_MAX 32768
@@ -284,7 +285,12 @@ void cx_alloc_idle(void) {}
  * commit for nothing, and such blocks are rarely freed and made again. */
 #define HUGE_BLOCK ((cx_usize)64 << 20)
 #define CACHE_MAX ((cx_usize)256 << 20)
-#define OS_PAGE ((cx_usize)4096)
+/* The system's pages, which memory goes back to it in: 4 KiB on x86 and on every Windows, 16 KiB
+ * on Apple Silicon, and 4, 16 or 64 KiB on Arm Linux (CLX-274). Asked for as the arena is
+ * reserved, before any page is cut, and 4 KiB until then, which only rounds what's asked of the
+ * system, and the system rounds it again. */
+static unsigned os_page_shift = 12;
+#define OS_PAGE ((cx_usize)1 << os_page_shift)
 
 /* --- the system ------------------------------------------------------------------------- */
 
@@ -315,9 +321,7 @@ static void lock(int* l) {
     while (__atomic_exchange_n(l, 1, __ATOMIC_ACQUIRE)) {
         while (__atomic_load_n(l, __ATOMIC_RELAXED)) {
             if (++spins < 64) {
-#if defined(__x86_64__) || defined(__i386__)
-                __builtin_ia32_pause();
-#endif
+                CX_SPIN_PAUSE();
             } else {
 #ifdef _WIN32
                 SwitchToThread();
@@ -410,6 +414,17 @@ static cx_u8* reserve(cx_usize n) {
 }
 
 static void reserve_arena(void) {
+#ifdef _WIN32
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    cx_usize size = si.dwPageSize;
+#else
+    long got = sysconf(_SC_PAGESIZE);
+    cx_usize size = got > 0 ? (cx_usize)got : 4096;
+#endif
+    /* A power of 2 that fits in a page, or the arena's pages go back whole. */
+    if (size & (size - 1) || size > PAGE) size = PAGE;
+    os_page_shift = (unsigned)__builtin_ctzll((unsigned long long)size);
     cx_u8* tables = reserve((cx_usize)ARENA_PAGES * (sizeof(page_info) + sizeof(cx_u32)));
     if (!tables) return;
     arena = reserve((cx_usize)ARENA_PAGES << PAGE_SHIFT);

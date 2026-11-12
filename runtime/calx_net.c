@@ -487,8 +487,10 @@ static int net_start(void) {
         if (parts_only) transmit_limited = 1;
         InterlockedExchange(&wsa_ready, 2);
     }
-    while (wsa_ready == 1) SwitchToThread();
-    return wsa_ready == 2;
+    /* Acquire, so a thread that waited sees the functions the starting one found: volatile
+     * orders nothing on Arm (CLX-274). */
+    while (__atomic_load_n(&wsa_ready, __ATOMIC_ACQUIRE) == 1) SwitchToThread();
+    return __atomic_load_n(&wsa_ready, __ATOMIC_ACQUIRE) == 2;
 }
 
 static void fail_os(void) {

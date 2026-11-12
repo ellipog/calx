@@ -9,7 +9,8 @@ description: The f32 and f64 types - arithmetic, printing and methods - which ma
 
 | Rule | Calx | Emitted C |
 | --- | --- | --- |
-| Format | IEEE 754, round to nearest even, no flush-to-zero | SSE2 on x86-64, never x87 |
+| Format | IEEE 754, round to nearest even, no flush-to-zero | SSE2 on x86-64, never x87, and the FPU of Arm64, which the systems also set to IEEE's defaults |
+| Float to integer | Java's cast: clamped to the range, and NaN gives 0 | On x86-64 one truncating conversion and one test for the cases that need clamping. On Arm64 `fcvtzs`, which clamps and gives 0 for NaN itself: one instruction, and an `f64` to `i32` clamps its `i64` once more |
 | Contraction | No fused multiply-add and no reassociation. `a * b + c` rounds twice, as in Java. `a.mul_add(b, c)` asks for the fused one | `-ffp-contract=off`, and never `-ffast-math` |
 | `%` | The remainder of truncating division, Java's `%` on doubles | `fmod` |
 | Comparison | IEEE: NaN is unequal to everything, including itself, and `-0.0 == 0.0` | |

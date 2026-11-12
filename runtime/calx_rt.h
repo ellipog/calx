@@ -31,6 +31,17 @@ typedef struct {
 #define CX_INLINE static inline __attribute__((always_inline, nodebug))
 #define CX_COLD __attribute__((cold, noreturn))
 
+/* What a thread spinning on a lock or a flag runs between looks, so its core lets the other
+ * thread on it run and draws less power: x86's pause; and isb on Arm, as Rust's spin_loop runs,
+ * which waits about as long, where yield does nothing on most Arm cores (CLX-274). */
+#if defined(__x86_64__) || defined(__i386__)
+#define CX_SPIN_PAUSE() __builtin_ia32_pause()
+#elif defined(__aarch64__)
+#define CX_SPIN_PAUSE() __builtin_arm_isb(15)
+#else
+#define CX_SPIN_PAUSE() ((void)0)
+#endif
+
 /* The runtime's functions (D123). In a program each is a function. In a library, built with
  * `calx build --lib`, each is a pointer to the program's own, filled in when the program opens
  * the library, so the two share one allocator, one output and one way to panic. The compiler
@@ -1605,6 +1616,18 @@ CX_INLINE cx_i64 cx_f32_to_i64(cx_f32 f) {
     if (__builtin_expect(r == -9223372036854775807LL - 1, 0)) return cx_f32_to_i64_clamp(f);
     return r;
 }
+#elif defined(__aarch64__)
+/* AArch64's fcvtzs saturates and gives 0 for NaN, as Java's casts do, so each is one instruction
+ * with no test (CLX-274). clang's builtins, which arm_neon.h wraps, fold constants and vectorize,
+ * without that header in every build. An f32 widens to an f64 exactly, and an f64 that's out of
+ * i32's range is out of it saturated to i64 too. */
+CX_INLINE cx_i64 cx_f64_to_i64(cx_f64 d) { return (cx_i64)__builtin_neon_vcvtd_s64_f64(d); }
+CX_INLINE cx_i32 cx_f64_to_i32(cx_f64 d) {
+    cx_i64 r = (cx_i64)__builtin_neon_vcvtd_s64_f64(d);
+    return r < -2147483647 - 1 ? -2147483647 - 1 : r > 2147483647 ? 2147483647 : (cx_i32)r;
+}
+CX_INLINE cx_i32 cx_f32_to_i32(cx_f32 f) { return (cx_i32)__builtin_neon_vcvts_s32_f32(f); }
+CX_INLINE cx_i64 cx_f32_to_i64(cx_f32 f) { return (cx_i64)__builtin_neon_vcvtd_s64_f64((cx_f64)f); }
 #else
 CX_INLINE cx_i32 cx_f64_to_i32(cx_f64 d) { return cx_f64_to_i32_clamp(d); }
 CX_INLINE cx_i64 cx_f64_to_i64(cx_f64 d) { return cx_f64_to_i64_clamp(d); }

@@ -28,14 +28,15 @@ fn main() {
 
 | Item | Does |
 | --- | --- |
-| `trim()` | Gives the system back what it can of the memory freed values held: each 64 KiB page of small blocks whose blocks are all free, the 4 KiB parts of other pages that hold only free blocks, and the big blocks kept for reuse |
+| `trim()` | Gives the system back what it can of the memory freed values held: each 64 KiB page of small blocks whose blocks are all free, the parts of other pages, a page of the system's each, that hold only free blocks, and the big blocks kept for reuse |
 
 How it finds what it can give back:
 
 - **Small blocks** are 32 KiB or less. Each is cut from a 64 KiB page that holds only blocks of its size, and a page knows how many were cut from it.
 - **Free blocks** go back to a list kept for each size, a batch at a time, once a thread frees more of a size than it allocates. `trim` counts each page's blocks in that list, holding only that size's lock. A page whose every block is there leaves the list. It goes back to the system, then to whichever size needs a page next.
-- **Pages still in use** keep only the parts their blocks are on. A page's blocks in the list are mapped, and each 4 KiB of it, a page of the system's, that holds only free blocks, or none, goes back. Its blocks leave the list, and count as free once the page's last block is, when the whole page goes. Blocks of 4 KiB or more always free the system pages inside them; smaller ones free those they fill.
-- **What stays:** each busy thread keeps up to 64 KiB of free blocks of each size for itself, without a lock, so those stay, and so do the 4 KiB parts of pages with a block in use on them.
+- **Pages still in use** keep only the parts their blocks are on. A page's blocks in the list are mapped, and each page of the system's in it that holds only free blocks, or none, goes back. Its blocks leave the list, and count as free once the page's last block is, when the whole page goes. Blocks as big as a system page or bigger always free the system pages inside them; smaller ones free those they fill.
+- **System pages** are 4 KiB on x86 and on every Windows, 16 KiB on Apple Silicon, and 4, 16 or 64 KiB on Arm Linux, which the allocator asks the system for. With 64 KiB ones, a page goes back only whole.
+- **What stays:** each busy thread keeps up to 64 KiB of free blocks of each size for itself, without a lock, so those stay, and so do the system pages of pages with a block in use on them.
 - **The calling thread** shares its own free blocks first.
 - **Big blocks**, over 32 KiB, kept for the next block of their size go back too, up to 256 MiB of them. A big block that grows takes a kept one if there's one big enough, and leaves its own kept in its place, so growing doesn't add to them ([ownership](../reference/ownership.md#in-c)).
 
