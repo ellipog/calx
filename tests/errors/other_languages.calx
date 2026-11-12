@@ -8,6 +8,11 @@ fn main() {
     println(s.strip())    // error: has no method `strip`; text's is `trim`
     println("{s.startswith("He")}")    // error: has no method `startswith`; text's is `starts_with`
     println("{s.length()}")    // error: has no method `length`; text's is `len`
+    println(s.slice(1, 3))    // error: has no method `slice`; a part of text is `s[a..b]`, from byte `a` up to `b`
+    println(s.substring(1))    // error: has no method `substring`; a part of text is `s[a..b]`
+    println(s.to_string())    // error: has no method `to_string`; a `String` of a `str` is `String(s)`
+    let owned: String = String(s)
+    println(owned.to_string())    // error: has no method `to_string`; a copy of a `String` is `copy()`
     let n: usize = 5
     let b: u8 = 7
     let w: i64 = 300

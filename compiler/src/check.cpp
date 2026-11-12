@@ -10708,7 +10708,7 @@ private:
     }
 
     // What text calls a method of Python's `str`, Rust's, Java's or JavaScript's (CLX-285).
-    static std::string text_hint(std::string_view m) {
+    static std::string text_hint(std::string_view m, bool str_recv) {
         static const std::pair<std::string_view, std::string_view> names[] = {
             {"lower", "to_lower_root"},        {"to_lower", "to_lower_root"},     {"to_lowercase", "to_lower_root"},
             {"toLowerCase", "to_lower_root"},  {"lowercase", "to_lower_root"},    {"casefold", "to_lower_root"},
@@ -10726,6 +10726,10 @@ private:
             {"rjust", "pad_start"},            {"padStart", "pad_start"},         {"ljust", "pad_end"},
             {"padEnd", "pad_end"},             {"partition", "split_once"},
         };
+        if (m == "slice" || m == "substring" || m == "substr") return "; a part of text is `s[a..b]`, from byte `a` up to `b`";
+        if (m == "to_string" || m == "toString" || m == "to_owned") {
+            return str_recv ? "; a `String` of a `str` is `String(s)`" : "; a copy of a `String` is `copy()`";
+        }
         for (const auto& [other, calx] : names) {
             if (m == other) {
                 if (calx == "to_lower_root" || calx == "to_upper_root") {
@@ -11384,7 +11388,8 @@ private:
                                        (recv->kind == TypeKind::deque       ? deque_hint(m)
                                         : recv->kind == TypeKind::slot_map  ? slot_hint(m)
                                         : recv->heap                        ? heap_hint(m)
-                                        : is_text && !text_hint(m).empty()  ? text_hint(m)
+                                        : is_text && !text_hint(m, recv->kind == TypeKind::str).empty()
+                                            ? text_hint(m, recv->kind == TypeKind::str)
                                                                             : loop_hint(m)));
             check_args(e);
             return T.error;
