@@ -459,6 +459,14 @@ jobs:
               --title "Calx $version" --generate-notes
             exit 0
           fi
+          # GITHUB_TOKEN can't point a ref at a commit whose workflows differ from main's tip, as
+          # they do when a push that changes them lands while this runs. That push's own run
+          # publishes the nightly then, so this one leaves it.
+          workflows() { gh api "repos/$GH_REPO/contents/.github/workflows?ref=$1" --jq '[.[] | "\(.name) \(.sha)"] | sort | join(",")'; }
+          if [ "$(workflows "$GITHUB_SHA")" != "$(workflows main)" ]; then
+            echo "::notice::main has moved on with changes to the workflows, so its own run publishes the nightly"
+            exit 0
+          fi
           notes="The newest build of main that passed CI: Calx $version, from $GITHUB_SHA. \`calx update --nightly\` follows these."
           if gh release view nightly > /dev/null 2>&1; then
             gh api -X PATCH "repos/$GH_REPO/git/refs/tags/nightly" -f sha="$GITHUB_SHA" -F force=true > /dev/null
