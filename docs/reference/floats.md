@@ -72,6 +72,7 @@ fn main() {
 | `x.rint()` | Rounded to the nearest integer value, halves to the even one, still a float: Java's `Math.rint` |
 | `x.mul_add(a, b)` | `x * a + b`, rounded once: IEEE 754's fused multiply-add and Java's `Math.fma`. It's exact everywhere, so every machine gives the same bits; with `x86-64-v3`, as in release builds, it's one instruction |
 | `x.is_nan()` | Whether it's NaN |
+| `x.is_finite()`, `x.is_infinite()` | Whether it's neither infinite nor NaN, and whether it's `INFINITY` or `NEG_INFINITY`: Java's `Double.isFinite` and `isInfinite`, and Python's `math.isfinite` and `math.isinf`. NaN is neither |
 | `x.total_cmp(y)` | Java's `Double.compare` and `Float.compare`, as an [`Ordering`](comparing.md#order): `-0.0` comes before `0.0`, and NaN after everything, equal to every NaN. Floats have no `Order`, since `<` can't order NaN, so this is how to sort by one |
 | `x.to_bits()` | The IEEE 754 bits, a `u64` for `f64` and a `u32` for `f32`: Java's `doubleToRawLongBits` and `floatToRawIntBits`, which keep a NaN's payload |
 
@@ -82,6 +83,7 @@ fn main() {
     println("{neg_zero.min(0.0)} {nan.max(1.0)} {2.0.sqrt()} {(-2.5).floor()}")   // out: -0.0 NaN 1.4142135623730951 -3.0
     println("{2.5.rint()} {3.5.rint()} {(-0.5).rint()}")   // out: 2.0 4.0 -0.0
     println("{neg_zero.total_cmp(0.0) == Ordering.Less} {nan.total_cmp(f64.INFINITY) == Ordering.Greater}")   // out: true true
+    println("{2.5.is_finite()} {f64.INFINITY.is_finite()} {f64.NEG_INFINITY.is_infinite()} {nan.is_infinite()}")   // out: true false true false
 }
 ```
 

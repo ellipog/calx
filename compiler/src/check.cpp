@@ -11382,7 +11382,7 @@ private:
             if (in({"parse", "parse_radix", "div_wide", "from_bits"})) return "a function";
             if (in({"MIN", "MAX", "INFINITY", "NEG_INFINITY", "NAN", "MIN_POSITIVE"})) return "a constant";
             if (in({"abs", "ceil", "checked_add", "checked_div", "checked_mul", "checked_rem", "checked_sub", "count_ones",
-                    "floor", "floor_div", "floor_mod", "is_nan", "leading_zeros", "max", "min", "mul_add", "rint",
+                    "floor", "floor_div", "floor_mod", "is_finite", "is_infinite", "is_nan", "leading_zeros", "max", "min", "mul_add", "rint",
                     "rotate_left", "rotate_right", "saturating_add", "saturating_mul", "saturating_sub", "sqrt", "to_bits",
                     "total_cmp", "trailing_zeros", "widening_mul", "wrapping_add", "wrapping_mul", "wrapping_sub"})) {
                 return "a method";
@@ -11700,6 +11700,8 @@ private:
         else if (m == "min" && num) pm = PrimMethod::min, args = 1;
         else if (m == "max" && num) pm = PrimMethod::max, args = 1;
         else if (m == "is_nan" && is_float(recv)) pm = PrimMethod::is_nan;
+        else if (m == "is_finite" && is_float(recv)) pm = PrimMethod::is_finite;
+        else if (m == "is_infinite" && is_float(recv)) pm = PrimMethod::is_infinite;
         else if (m == "sqrt" && is_float(recv)) pm = PrimMethod::sqrt;
         else if (m == "floor" && is_float(recv)) pm = PrimMethod::floor;
         else if (m == "ceil" && is_float(recv)) pm = PrimMethod::ceil;
@@ -11749,7 +11751,7 @@ private:
             if (a.name || a.is_mut) error(a.span, "this argument can't be named or `mut`");
             check(a.value, arg_type);
         }
-        if (pm == PrimMethod::is_nan) return T.bool_;
+        if (pm == PrimMethod::is_nan || pm == PrimMethod::is_finite || pm == PrimMethod::is_infinite) return T.bool_;
         if (pm == PrimMethod::total_cmp) return ordering_type();
         if (pm == PrimMethod::to_bits) return recv->bits == 32 ? T.u32 : T.u64;
         if (pm >= PrimMethod::checked_add && pm <= PrimMethod::checked_rem) return T.optional_of(recv);

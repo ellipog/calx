@@ -6231,6 +6231,8 @@ $dropall    m->len = 0;
             case PrimMethod::min: r = "cx_min_" + h + "(" + v[0] + ", " + v[1] + ")"; break;
             case PrimMethod::max: r = "cx_max_" + h + "(" + v[0] + ", " + v[1] + ")"; break;
             case PrimMethod::is_nan: r = "(" + v[0] + " != " + v[0] + ")"; break;
+            case PrimMethod::is_finite: r = "(cx_bool)__builtin_isfinite(" + v[0] + ")"; break;
+            case PrimMethod::is_infinite: r = "(cx_bool)__builtin_isinf(" + v[0] + ")"; break;
             case PrimMethod::total_cmp:
                 r = "((" + ctype(e->type) + ")(cx_total_cmp_" + h + "(" + v[0] + ", " + v[1] + ") + 1))";
                 break;

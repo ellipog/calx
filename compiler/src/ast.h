@@ -219,6 +219,7 @@ enum class PrimMethod : std::uint8_t {
     checked_add, checked_sub, checked_mul, checked_div, checked_rem, saturating_add, saturating_sub, saturating_mul,
     to_bits, rotate_left, rotate_right, total_cmp, mul_add, rint, trailing_zeros, leading_zeros, count_ones,
     widening_mul,  // on an unsigned integer: the whole product, as its low and high halves (CLX-102)
+    is_finite, is_infinite,  // on a float (CLX-283)
     parse, from_bits, from_utf8,  // prim_static
     div_wide,  // prim_static: a number twice as wide as the type, divided by one of it (CLX-102)
     parse_radix,  // prim_static: an integer in text in a base from 2 to 36, as Java's `parseInt(s, radix)`

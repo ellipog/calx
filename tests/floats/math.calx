@@ -6,4 +6,13 @@ fn main() {
     println("{neg_zero.min(zero)} {zero.max(neg_zero)} {nan.max(1.0)} {zero.min(nan)}")   // out: -0.0 0.0 NaN NaN
     println("{2.0.sqrt()} {(-2.5).floor()} {(-2.5).ceil()} {(-3.0).abs()}")   // out: 1.4142135623730951 -3.0 -2.0 3.0
     println("{nan.is_nan()} {zero.is_nan()}")                 // out: true false
+
+    // Finite is neither infinite nor NaN, in both widths, as Java's isFinite and isInfinite say.
+    let inf = f64.INFINITY
+    let big = f64.MAX
+    println("{zero.is_finite()} {big.is_finite()} {inf.is_finite()} {nan.is_finite()} {(-inf).is_finite()}")   // out: true true false false false
+    println("{inf.is_infinite()} {f64.NEG_INFINITY.is_infinite()} {nan.is_infinite()} {big.is_infinite()}")   // out: true true false false
+    let small: f32 = 1.5f32
+    let over = f32.MAX * 2.0f32
+    println("{small.is_finite()} {over.is_finite()} {over.is_infinite()} {f32.NAN.is_infinite()} {f32.NAN.is_finite()}")   // out: true false true false false
 }
