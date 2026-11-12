@@ -319,6 +319,10 @@ struct Expr {
     bool temp = false;           // a new value that isn't `Copy`, only looked at: it's kept in a
                                  // temporary that's dropped at the end of the statement
     bool part_move = false;      // field: moved out of a new value, whose other parts are dropped
+    // A part of text, or `split`, `lines`, `split_whitespace` or `split_once`, whose parts a `let`
+    // or `if let` keeps: they're views of the text, not copies, since nothing moves them and the
+    // text stays as it is while they're in scope (CLX-293).
+    bool view_parts = false;
     Local* hidden = nullptr;     // match, if let: the new value matched, held for the arms
     bool drop_hidden = false;    // match, if let: `hidden` is dropped when it ends
     bool let_consumes = false;   // if let: the first branch takes the value apart

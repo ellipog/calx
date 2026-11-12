@@ -164,12 +164,18 @@ static inline void copy_part(cx_u8* q, const cx_u8* p, cx_usize n) {
     }
 }
 
-/* Adds a copy of the `n` bytes at `p` to `l`, in a buffer of its own of 16 bytes at least, as
+/* Adds the `n` bytes at `p` to `l`. With `view`, the part is a view of them, a `String` that
+ * doesn't own its bytes, for a list the compiler saw is only looked at while the text it's from
+ * stays as it is (CLX-293). Otherwise it's a copy, in a buffer of its own of 16 bytes at least, as
  * `cx_string_grow_to` would make it, but without a call to grow an empty string first. */
-static void list_push(cx_StringList* l, const cx_u8* p, cx_usize n) {
+static void list_push(cx_StringList* l, const cx_u8* p, cx_usize n, int view) {
     l->ptr = (cx_String*)cx_grow(l->ptr, &l->cap, l->len, 1, sizeof(cx_String));
     cx_String part = {0, 0, 0};
-    if (n) {
+    if (view) {
+        part.ptr = (cx_u8*)p;
+        part.len = n;
+        part.cap = CX_VIEW_CAP;
+    } else if (n) {
         cx_usize cap = n < 16 ? 16 : n;
         part.ptr = (cx_u8*)cx_alloc(cap);
         copy_part(part.ptr, p, n);
@@ -182,15 +188,15 @@ static void list_push(cx_StringList* l, const cx_u8* p, cx_usize n) {
 /* The parts of `s` between each `sep`, empty ones too, so there's one more part than there are
  * separators. An empty `sep` gives each rune as a part of its own. A one-byte `sep` is looked
  * for as `cx_text_split_next` does, and a longer one's rarest bytes are worked out once, not for
- * each part (CLX-300). */
-cx_StringList cx_text_split(cx_str s, cx_str sep) {
+ * each part (CLX-300). With `view`, the parts are views of `s` (`list_push`). */
+cx_StringList cx_text_split(cx_str s, cx_str sep, int view) {
     cx_StringList l = {0, 0, 0};
     if (sep.len == 0) {
         cx_usize i = 0;
         while (i < s.len) {
             cx_usize j = i;
             cx_utf8_next(s.ptr, &j);
-            list_push(&l, s.ptr + i, j - i);
+            list_push(&l, s.ptr + i, j - i, view);
             i = j;
         }
         return l;
@@ -200,7 +206,7 @@ cx_StringList cx_text_split(cx_str s, cx_str sep) {
         const cx_u8* end = s.ptr + s.len;
         for (;;) {
             const cx_u8* e = cx_find2(p, end, sep.ptr[0], sep.ptr[0]);
-            list_push(&l, p, (cx_usize)(e - p));
+            list_push(&l, p, (cx_usize)(e - p), view);
             if (e == end) return l;
             p = e + 1;
         }
@@ -210,15 +216,15 @@ cx_StringList cx_text_split(cx_str s, cx_str sep) {
     for (;;) {
         cx_usize k = cx_bytes_find_rare(s.ptr + i, s.len - i, sep.ptr, sep.len, rare);
         if (k == CX_NOT_FOUND) break;
-        list_push(&l, s.ptr + i, k);
+        list_push(&l, s.ptr + i, k, view);
         i += k + sep.len;
     }
-    list_push(&l, s.ptr + i, s.len - i);
+    list_push(&l, s.ptr + i, s.len - i, view);
     return l;
 }
 
 /* The words of `s`: the parts between runs of whitespace, none of them empty. */
-cx_StringList cx_text_split_whitespace(cx_str s) {
+cx_StringList cx_text_split_whitespace(cx_str s, int view) {
     cx_StringList l = {0, 0, 0};
     cx_usize i = 0, k;
     while (i < s.len) {
@@ -226,19 +232,19 @@ cx_StringList cx_text_split_whitespace(cx_str s) {
         if (i == s.len) break;
         cx_usize start = i;
         while (i < s.len && !space_at(s, i, &k)) i = k;
-        list_push(&l, s.ptr + start, i - start);
+        list_push(&l, s.ptr + start, i - start, view);
     }
     return l;
 }
 
 /* The lines of `s`, each without the `\n`, `\r\n` or `\r` that ends it, as `std.io.Lines` reads
  * them. A last line needn't end with one, and an ending at the very end doesn't start another. */
-cx_StringList cx_text_lines(cx_str s) {
+cx_StringList cx_text_lines(cx_str s, int view) {
     cx_StringList l = {0, 0, 0};
     cx_usize i = 0;
     while (i < s.len) {
         cx_usize j = (cx_usize)(cx_find2(s.ptr + i, s.ptr + s.len, '\n', '\r') - s.ptr);
-        list_push(&l, s.ptr + i, j - i);
+        list_push(&l, s.ptr + i, j - i, view);
         if (j < s.len && s.ptr[j] == '\r' && j + 1 < s.len && s.ptr[j + 1] == '\n') j++;
         i = j + 1;
     }

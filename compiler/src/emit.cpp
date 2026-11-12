@@ -5197,10 +5197,11 @@ $dropall    m->len = 0;
                 }
                 return place_or_value(e);
             case ExprKind::index: return place_or_value(e);
-            // A `String`'s part is kept, so it's copied; a `str`'s is a view of the same bytes.
+            // A `String`'s part is kept, so it's copied, unless the ownership pass saw a `let` keeps
+            // it only to look at (CLX-293); a `str`'s is a view of the same bytes.
             case ExprKind::slice:
                 if (e->type->kind == TypeKind::list) return list_slice(e);
-                return e->type->kind == TypeKind::string ? "cx_string_from(" + slice_view(e) + ")" : slice_view(e);
+                return e->type->kind == TypeKind::string ? keep_part(e, slice_view(e)) : slice_view(e);
             case ExprKind::struct_lit: return e->ref == Ref::variant ? record_variant(e) : struct_literal(e);
             case ExprKind::array_lit:
                 return e->type->kind == TypeKind::list || e->type->kind == TypeKind::deque ? list_literal(e) : array_literal(e);
@@ -6592,6 +6593,12 @@ $dropall    m->len = 0;
     }
 
     // A `List<String>` the runtime built, as a `cx_StringList`, in the list type's own layout.
+    // A part of text, `view`, a `cx_str`, as a `String` that's kept: a copy, or a `String` that
+    // views the same bytes where the ownership pass saw that's safe (CLX-293).
+    static std::string keep_part(const Expr* e, const std::string& view) {
+        return (e->view_parts ? "cx_str_view(" : "cx_string_from(") + view + ")";
+    }
+
     std::string string_list(const std::string& call, const Type* t) {
         std::string r = tmp();
         return "({ cx_StringList " + r + " = " + call + "; (" + ctype(t) + "){ .ptr = " + r + ".ptr, .len = " + r + ".len, .cap = " + r +
@@ -7008,18 +7015,23 @@ $dropall    m->len = 0;
                     return view + "cx_usize " + r + " = " + fn + p + ", " + text_arg(0) + "); (" + o + "){ .v = " + r + ", .has = " + r +
                            " != CX_NOT_FOUND }; })";
                 }
+                // The parts are copies, or views of the text where the ownership pass saw a `let`
+                // keeps them only to look at while the text stays as it is (CLX-293).
                 case BMethod::text_trim: case BMethod::text_trim_start: case BMethod::text_trim_end: case BMethod::trim_prefix:
                 case BMethod::trim_suffix:
-                    return owned ? "cx_string_from(" + part_view(e) + ")" : part_view(e);
-                case BMethod::split: return string_list(view + "cx_text_split(" + p + ", " + text_arg(0) + "); })", e->type);
-                case BMethod::split_whitespace: return string_list(view + "cx_text_split_whitespace(" + p + "); })", e->type);
-                case BMethod::lines: return string_list(view + "cx_text_lines(" + p + "); })", e->type);
+                    return owned ? keep_part(e, part_view(e)) : part_view(e);
+                case BMethod::split:
+                    return string_list(view + "cx_text_split(" + p + ", " + text_arg(0) + ", " + (e->view_parts ? "1" : "0") + "); })",
+                                       e->type);
+                case BMethod::split_whitespace:
+                    return string_list(view + "cx_text_split_whitespace(" + p + ", " + (e->view_parts ? "1" : "0") + "); })", e->type);
+                case BMethod::lines: return string_list(view + "cx_text_lines(" + p + ", " + (e->view_parts ? "1" : "0") + "); })", e->type);
                 case BMethod::split_once: {
                     std::string o = ctype(e->type), pair = ctype(e->type->elem), sep = tmp(), k = tmp();
                     std::string rest = "(cx_str){" + p + ".ptr + " + k + " + " + sep + ".len, " + p + ".len - " + k + " - " + sep + ".len}";
                     return view + "cx_str " + sep + " = " + text_arg(0) + "; cx_usize " + k + " = cx_str_find(" + p + ", " + sep + "); " +
-                           k + " == CX_NOT_FOUND ? (" + o + "){ .has = 0 } : (" + o + "){ .has = 1, .v = (" + pair +
-                           "){ .f0 = cx_string_from((cx_str){" + p + ".ptr, " + k + "}), .f1 = cx_string_from(" + rest + ") } }; })";
+                           k + " == CX_NOT_FOUND ? (" + o + "){ .has = 0 } : (" + o + "){ .has = 1, .v = (" + pair + "){ .f0 = " +
+                           keep_part(e, "(cx_str){" + p + ".ptr, " + k + "}") + ", .f1 = " + keep_part(e, rest) + " } }; })";
                 }
                 case BMethod::text_replace: {
                     // The arguments are worked out in order, as Java works them out.

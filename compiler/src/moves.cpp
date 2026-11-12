@@ -211,7 +211,10 @@ private:
         clear_parts(l, {});
     }
 
-    void end_scope() { scopes_.pop_back(); }
+    void end_scope() {
+        while (!scope_views_.empty() && scope_views_.back().depth >= scopes_.size()) scope_views_.pop_back();
+        scopes_.pop_back();
+    }
 
     // The locals of the scopes from `from` inward that may still hold a value, innermost first:
     // what's dropped when leaving them. One that may have moved is zeroed when it moves, so
@@ -328,6 +331,7 @@ private:
 
     // A pattern takes the whole value of `l` apart.
     void take(Local* l, Span at) {
+        if (!scan_) changed(l);
         if (const Borrow* b = borrowed(l)) {
             error(at, "can't take " + name_of(l) + " apart" +
                           (b->by && b->arena ? " while " + name_of(b->by) + " holds memory from it"
@@ -471,6 +475,10 @@ private:
         scopes_.clear();
         loops_.clear();
         borrows_.clear();
+        scope_views_.clear();
+        temp_views_.clear();
+        stmt_changes_.clear();
+        stmt_depth_ = 0;
         scopes_.emplace_back();
         for (Param& p : f->params) {
             Local* l = p.local;
@@ -512,7 +520,33 @@ private:
 
     // --- statements ----------------------------------------------------------------------------
 
+    // A statement, or a condition, whose temporaries the emitter drops when it ends, as `full` and
+    // `condition_expr` do. The parts of text they hold stay views unless the text's local moved or
+    // changed anywhere in it (CLX-293).
+    template <class F>
+    void framed(F walk) {
+        std::size_t temps = temp_views_.size(), changes = stmt_changes_.size();
+        stmt_depth_++;
+        walk();
+        stmt_depth_--;
+        for (std::size_t i = temps; i < temp_views_.size(); i++) {
+            for (std::size_t k = changes; k < stmt_changes_.size(); k++) {
+                if (stmt_changes_[k] == temp_views_[i].root) temp_views_[i].parts->view_parts = false;
+            }
+        }
+        temp_views_.resize(temps);
+        if (stmt_depth_ == 0) stmt_changes_.clear();
+    }
+
     void stmt(Stmt* s) {
+        framed([&] { stmt_kind(s); });
+    }
+
+    void condition(Expr* c) {
+        framed([&] { expr(c, Use::view); });
+    }
+
+    void stmt_kind(Stmt* s) {
         switch (s->kind) {
             case StmtKind::let: let(s); break;
             case StmtKind::assign: assign(s); break;
@@ -555,6 +589,7 @@ private:
             if (s->local) {
                 s->local->owns = true;
                 declare(s->local);
+                if (!scan_) keep_parts(s->value, p, s->local);
                 // An arena list holds its arena until its scope ends (D114).
                 Expr* v = s->value;
                 if (s->local->type->arena_list && v->kind == ExprKind::call && v->bmethod == BMethod::arena_list && !scan_) {
@@ -623,6 +658,135 @@ private:
         s->consumes = !by_mut && s->consumes && (whole || hidden);
         if (s->consumes) take(whole ? root : hidden, v->span);
         bind(p, s->consumes, s->consumes || !root ? nullptr : root, place_text(v), by_mut ? ViewOf::mut_part : ViewOf::part, v);
+        if (!by_mut) keep_parts(v, p);
+    }
+
+    // --- text parts a `let` keeps as views (CLX-293) --------------------------------------------
+    //
+    // `let fields = line.split(",")`, `let t = s.trim()` and `let (a, b) = s.split_once(" ") ?? ...`
+    // keep parts of some text. They're copies, as anything kept in a variable is, unless the scan
+    // finds that nothing moves them and the text stays as it is for the whole function: then they
+    // can be views of it, as a `for` loop's parts are, with nothing copied. A view frees nothing,
+    // and a copy of it copies its bytes, so the names are dropped and copied as before.
+
+    // The text `e` makes parts of: a slice of a `String`, or `trim` and its kin on one; or
+    // `split`, `lines`, `split_whitespace` or `split_once` on any text, through `??` or `!`.
+    static Expr* text_of_parts(Expr*& e) {
+        if (e->kind == ExprKind::binary && e->op == Op::coalesce) e = e->lhs;
+        else if (e->kind == ExprKind::unwrap) e = e->lhs;
+        if (!e->type) return nullptr;
+        if (e->kind == ExprKind::slice) return e->type->kind == TypeKind::string ? e->lhs : nullptr;
+        if (e->kind != ExprKind::call || e->call != CallKind::builtin_method) return nullptr;
+        Expr* text = e->callee->lhs;
+        if (!text->type || (text->type->kind != TypeKind::string && text->type->kind != TypeKind::str)) return nullptr;
+        switch (e->bmethod) {
+            case BMethod::text_trim: case BMethod::text_trim_start: case BMethod::text_trim_end: case BMethod::trim_prefix:
+            case BMethod::trim_suffix:
+                return e->type->kind == TypeKind::string ? text : nullptr;
+            case BMethod::split: case BMethod::lines: case BMethod::split_whitespace: case BMethod::split_once: return text;
+            default: return nullptr;
+        }
+    }
+
+    // The text a part is of, when `e` is a slice of text, or `trim` or its kin.
+    static Expr* part_base(Expr* e) {
+        if (e->kind == ExprKind::slice) return e->type && e->type->kind != TypeKind::list ? e->lhs : nullptr;
+        if (e->kind != ExprKind::call || e->call != CallKind::builtin_method) return nullptr;
+        switch (e->bmethod) {
+            case BMethod::text_trim: case BMethod::text_trim_start: case BMethod::text_trim_end: case BMethod::trim_prefix:
+            case BMethod::trim_suffix:
+                return e->callee->lhs;
+            default: return nullptr;
+        }
+    }
+
+    // The local `text` is in, through parts of parts; or null, with `*lasting` when it's a literal's
+    // or a constant's, which lasts as long as the program.
+    static Local* text_root(Expr* text, bool* lasting) {
+        while (Expr* b = part_base(text)) text = b;
+        *lasting = false;
+        if (Local* r = place_root(text)) return r;
+        bool constant = (text->kind == ExprKind::name || text->kind == ExprKind::field) && text->ref == Ref::const_;
+        bool literal = text->kind == ExprKind::string_lit && text->interpolations.empty();
+        *lasting = (constant || literal) && text->type && text->type->kind == TypeKind::str;
+        return nullptr;
+    }
+
+    // The names a pattern binds, or false when one can change, as a `mut` or a `var` can.
+    static bool names_of(const Pattern* p, std::vector<const Local*>& out) {
+        if (!p) return true;
+        switch (p->kind) {
+            case PatternKind::binding:
+                if (p->is_mut || !p->local || p->local->is_var) return false;
+                out.push_back(p->local);
+                return true;
+            case PatternKind::wildcard: return true;
+            case PatternKind::tuple:
+            case PatternKind::variant:
+                for (const Pattern* x : p->elems) {
+                    if (!names_of(x, out)) return false;
+                }
+                return true;
+            default: return false;
+        }
+    }
+
+    bool touched(const Local* l) const { return touched_.count(l) || moved_any_.count(l); }
+
+    // A `let` or `if let` of `v` to the pattern `p`, or to the one name `single` of a plain `let`,
+    // just bound: when `v` makes parts of text, they're views of it, unless the scan saw a name
+    // moved, or a name can change. A move or a change of the text's local while the names are in
+    // scope makes them copies again (`changed`). That local is in scope where the parts are made,
+    // so it lasts at least as long as the names do.
+    void keep_parts(Expr* v, const Pattern* p, const Local* single = nullptr) {
+        Expr* made = v;
+        Expr* text = text_of_parts(made);
+        if (!text) return;
+        made->view_parts = false;
+        std::vector<const Local*> names;
+        if (single) {
+            if (single->is_var) return;
+            names.push_back(single);
+        } else if (!names_of(p, names)) {
+            return;
+        }
+        for (const Local* l : names) {
+            if (touched(l)) return;
+        }
+        bool lasting = false;
+        Local* root = text_root(text, &lasting);
+        if (!root && !lasting) return;
+        made->view_parts = true;
+        if (root) scope_views_.push_back({made, root, scopes_.size()});
+    }
+
+    // A part of text, `e`, kept in a temporary for the statement: a view, unless its text's local
+    // moves or changes anywhere in the statement, which the statement's end looks at. One a
+    // `mut` argument before it changes counts, since the call changes it while it reads the part.
+    void temp_part(Expr* e) {
+        Expr* text = part_base(e);
+        if (!text) return;
+        bool lasting = false;
+        Local* root = text_root(text, &lasting);
+        e->view_parts = lasting || (root && stmt_depth_ > 0);
+        if (root && e->view_parts) temp_views_.push_back({e, root, 0});
+    }
+
+    // A move or a change of `l`, or of a part of it: the views of its text that are in scope go
+    // back to being copies, and the statement notes it for the views its temporaries hold. A
+    // change through a `mut` view of a part is a change of what it's a view of.
+    void changed(Local* l) {
+        for (int hops = 0; l && hops < 16; hops++) {
+            if (stmt_depth_ > 0) stmt_changes_.push_back(l);
+            for (LiveView& v : scope_views_) {
+                if (v.root == l) v.parts->view_parts = false;
+            }
+            Local* of = nullptr;
+            for (const Borrow& b : borrows_) {
+                if (b.by == l && b.part) of = b.root;
+            }
+            l = of;
+        }
     }
 
     // Decides whether a `let` with a pattern takes its value apart: it does when one of the names
@@ -708,7 +872,11 @@ private:
         expr(s->value, Use::consume);
         if (is_local_name(t)) {
             Local* l = t->local;
-            if (scan_) return;
+            if (scan_) {
+                touched_.insert(l);
+                return;
+            }
+            changed(l);
             check_change(l, t->span);
             if (!copyable(l->type)) {
                 // A `mut` parameter always holds the caller's value.
@@ -725,8 +893,12 @@ private:
             return;
         }
         Where w = locate(t);
-        if (scan_) return;
+        if (scan_) {
+            touched_.insert(w.root);
+            return;
+        }
         Local* l = w.root;
+        changed(l);
         // Assigning to a field that moved out puts a value back; inside one, it's still moved.
         std::uint32_t i = id(l);
         bool inside = false;
@@ -766,13 +938,13 @@ private:
 
     void while_loop(Stmt* s) {
         if (scan_) {
-            expr(s->cond, Use::view);
+            condition(s->cond);
             block(s->body, Use::view);
             return;
         }
         State exit;
         State breaks = walk_loop(s->loop_id, scopes_.size(), [&] {
-            expr(s->cond, Use::view);
+            condition(s->cond);
             exit = st_;
             block(s->body, Use::view);
             return st_;
@@ -915,7 +1087,11 @@ private:
     }
 
     void rvalue(Expr* e, Use u) {
-        if (!scan_ && u == Use::view && !copyable(e->type)) e->temp = true;
+        if (!scan_ && u == Use::view && !copyable(e->type)) {
+            e->temp = true;
+            // A part of text that's only looked at, as an argument a function reads (CLX-293).
+            if (e->type->kind == TypeKind::string) temp_part(e);
+        }
     }
 
     void expr(Expr* e, Use u) {
@@ -1069,10 +1245,14 @@ private:
         if (scan_) {
             // Moving a field counts too: a pattern's name whose field moves must own its value.
             if (keep && (whole || w.fields_only)) moved_any_.insert(l);
+            // Moving or changing any of it: text in it can't have parts a `let` keeps as views,
+            // and a name that keeps parts can't be one (CLX-293).
+            if (keep || u == Use::change) touched_.insert(l);
             return;
         }
         use(e, l, w.path);
         if (u == Use::change) check_change(l, e->span);
+        if (keep || u == Use::change) changed(l);
         if (!keep) return;
         if (whole) {
             move(e, l);
@@ -1288,7 +1468,7 @@ private:
             if_let(e, bu);
             return;
         }
-        expr(e->cond, Use::view);
+        condition(e->cond);
         State before = st_;
         block(e->block, bu);
         State then = st_;
@@ -1337,6 +1517,7 @@ private:
         if (e->let_consumes) take(whole ? root : hidden, v->span);
         bind(e->let_pattern, e->let_consumes, e->let_consumes || !root ? nullptr : root, place_text(v),
              by_mut ? ViewOf::mut_part : ViewOf::part, v);
+        if (!by_mut) keep_parts(v, e->let_pattern);
         block(e->block, bu);
         e->let_drops = drops_from(scopes_.size() - 1);
         unborrow_scope();
@@ -1367,7 +1548,7 @@ private:
             for (MatchArm& a : e->arms) {
                 scopes_.emplace_back();
                 bind(a.pattern, false, nullptr, "");
-                if (a.guard) expr(a.guard, Use::view);
+                if (a.guard) condition(a.guard);
                 expr(a.body, bu);
                 end_scope();
                 a.consumes = !by_mut && binds_moved(a.pattern);
@@ -1401,7 +1582,7 @@ private:
             if (a.consumes) take(whole ? root : hidden, v->span);
             bind(a.pattern, a.consumes, a.consumes || !root ? nullptr : root, place_text(v),
                  by_mut ? ViewOf::mut_part : ViewOf::part, v);
-            if (a.guard) expr(a.guard, Use::view);
+            if (a.guard) condition(a.guard);
             expr(a.body, bu);
             a.drops = drops_from(scopes_.size() - 1);
             unborrow_scope();
@@ -1431,6 +1612,20 @@ private:
     std::unordered_map<const Local*, ViewOf> view_of_;
     std::unordered_map<const Local*, std::string> part_of_;
     std::unordered_map<const Local*, std::string> found_;  // views of a value `m.find(k)` found: the map
+    // CLX-293: the locals the scan saw moved, changed or assigned to, wholly or in part; the views
+    // of text the walk has made, which a change of `root` makes copies again: those the names in
+    // scope keep, down to the scope `depth`, and those the statements being walked keep in
+    // temporaries; and the locals changed since the outermost of those statements started.
+    std::unordered_set<const Local*> touched_;
+    struct LiveView {
+        Expr* parts;
+        Local* root;
+        std::size_t depth;
+    };
+    std::vector<LiveView> scope_views_;
+    std::vector<LiveView> temp_views_;
+    std::vector<const Local*> stmt_changes_;
+    int stmt_depth_ = 0;
 };
 
 }  // namespace

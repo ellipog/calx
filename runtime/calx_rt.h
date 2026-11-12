@@ -750,9 +750,11 @@ CX_FN(cx_str, cx_text_trim, (cx_str s, cx_u32 ends));
 CX_FN(cx_String, cx_text_replace, (cx_str s, cx_str from, cx_str to, const char* at));
 CX_FN(cx_String, cx_text_repeat, (cx_str s, cx_usize n, const char* at));
 CX_FN(cx_String, cx_text_pad, (cx_str s, cx_usize width, cx_rune fill, cx_bool start, const char* at));
-CX_FN(cx_StringList, cx_text_split, (cx_str s, cx_str sep));
-CX_FN(cx_StringList, cx_text_split_whitespace, (cx_str s));
-CX_FN(cx_StringList, cx_text_lines, (cx_str s));
+/* `split`, `split_whitespace` and `lines` as lists: with `view` 1, of views of the text, for a
+ * list the compiler saw is only looked at while the text stays as it is (CLX-293). */
+CX_FN(cx_StringList, cx_text_split, (cx_str s, cx_str sep, int view));
+CX_FN(cx_StringList, cx_text_split_whitespace, (cx_str s, int view));
+CX_FN(cx_StringList, cx_text_lines, (cx_str s, int view));
 CX_FN(cx_String, cx_text_join, (const cx_String* parts, cx_usize n, cx_str sep, const char* at));
 CX_FN(cx_String, cx_text_join_str, (const cx_str* parts, cx_usize n, cx_str sep, const char* at));
 CX_FN(cx_bool, cx_text_words_next, (cx_str s, cx_usize* at, cx_str* part));

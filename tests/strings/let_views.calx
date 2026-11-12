@@ -1,0 +1,99 @@
+// Parts of text kept with `let`, or passed to a function that reads them, are views of the text
+// when nothing moves them and the text stays as it is while they're in scope, and copies
+// otherwise (CLX-293). Each case here changes the text in place afterwards, in the same buffer,
+// so a part that should have been a copy would show the new bytes, not the old.
+fn overwrite(s: mut String) {
+    let n = s.len()
+    s.clear()
+    for _ in 0..n {
+        s.push('#')
+    }
+}
+
+fn read_then_change(part: String, s: mut String) -> String {
+    overwrite(mut s)
+    return "{part}"
+}
+
+fn is_word(s: String) -> bool {
+    return not s.is_empty() and not s.contains(" ")
+}
+
+fn main() {
+    // Only looked at, with the text as it is: views.
+    let line = String("  alpha,beta ,gamma  ")
+    let t = line.trim()
+    let cells = t.split(",")
+    let (head, rest) = t.split_once(",") ?? (String(), String())
+    println("[{t}] {cells.len()} [{cells[1]}] [{head}] [{rest}] {is_word(line[2..7])}")    // out: [alpha,beta ,gamma] 3 [beta ] [alpha] [beta ,gamma] true
+
+    // The text changes while the parts are in scope: copies.
+    var s = String("key=value;more")
+    let k = s.trim_suffix(";more")
+    let pieces = s.split("=")
+    let (a, b) = s.split_once("=") ?? (String("x"), String("y"))
+    overwrite(mut s)
+    println("{s} [{k}] [{pieces[0]}|{pieces[1]}] [{a}|{b}]")    // out: ############## [key=value] [key|value;more] [key|value;more]
+
+    // The text is assigned a new value while the part is in scope: a copy.
+    var w = String("first second")
+    let first = w[..5]
+    w = String("XXXXXXXXXXXX")
+    println("{first} {w}")    // out: first XXXXXXXXXXXX
+
+    // A name that's moved: a copy, which outlives the text.
+    var kept: List<String> = []
+    var src = String("one two")
+    let word = src[..3]
+    kept.push(word)
+    overwrite(mut src)
+    println("{kept[0]} {src}")    // out: one #######
+
+    // A copy of a list of views copies the parts.
+    var lists: List<List<String>> = []
+    var csv = String("p,q,r")
+    let parts = csv.split(",")
+    lists.push(parts.copy())
+    println("{parts[2]}")    // out: r
+    overwrite(mut csv)
+    println("{lists[0][0]}{lists[0][2]} {csv}")    // out: pr #####
+
+    // `if let`, and parts of parts.
+    let config = String("name = calx ; port = 25565")
+    for entry in config.split(";") {
+        if let (key, value) = entry.split_once("=") {
+            let kk = key.trim()
+            let vv = value.trim()
+            print("{kk}:{vv};")
+        }
+    }
+    println("")    // out: name:calx;port:25565;
+
+    // A part passed to a function, with the text changed later in the same statement: a copy.
+    var both = String("abcdef")
+    var other = String("ghi")
+    let joined = "{read_then_change(both[1..4], mut other)}{read_then_change(other[..2], mut both)}"
+    println("{joined} {both} {other}")    // out: bcd## ###### ###
+
+    // The text changes in a loop after the part: a copy, every time round.
+    var log = String("a;b;c")
+    let tail = log[2..]
+    for _ in 0..3 {
+        overwrite(mut log)
+    }
+    println("{tail} {log}")    // out: b;c #####
+
+    // Assigned before the part in each pass, which ends before the next assignment: views.
+    var rows = String()
+    var total = 0
+    for i in 0..3 {
+        rows = "{i},{i * 10},{i * 100}"
+        let fields = rows.split(",")
+        total += i32.parse(fields[2]) ?? 0
+    }
+    println("{total}")    // out: 300
+
+    // A literal's parts.
+    let letters = "x y z".split(" ")
+    println("{letters.len()} {letters[2]}")    // out: 3 z
+}
