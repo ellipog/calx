@@ -1,0 +1,10 @@
+// std.http.websocket writes the headers of the handshake itself, so giving one panics at the call
+// (CLX-320).
+
+import std.http.{Header}
+import std.http.websocket.{open}
+
+fn main() {
+    let ws = open("ws://127.0.0.1:1/", [Header { name: "Sec-WebSocket-Key", value: "x" }])    // panic: std.http.websocket sets the Sec-WebSocket-Key header itself
+    ws.close()
+}
