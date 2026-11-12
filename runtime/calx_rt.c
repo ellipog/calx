@@ -1963,6 +1963,87 @@ cx_usize cx_rx_skip(const cx_u8* hay, cx_usize len, cx_usize from, const cx_u8* 
     return (cx_usize)(p - hay);
 }
 
+/* For std.regex: the first place from `from` where one of `count` strings, 1 to 8, of `k` bytes, 2 to 8,
+ * back to back in `grams`, starts, or `len` if there's none (CLX-297). Every match of a pattern
+ * such as `agggtaaa|tttaccct` or `[cgt]gggtaaa|tttaccc[acg]` starts with one of a few of them,
+ * where its first bytes alone start nearly every place in DNA. With SIMD each step tests 32 or 16
+ * places for their first `f` bytes, up to 4, all at once: the text is loaded at each of those
+ * offsets once, and each string's bytes compared with the loads. Only where one passes is the
+ * whole of each compared, so the search goes back to the regex only where one is: in DNA, 4 bytes
+ * of one of four strings pass at one place in 64. */
+/* Whether one of the strings is at `at`, where `k` bytes are there to read: the bytes as one
+ * little-endian number, compared with each string's, a load and a compare each. */
+static inline int rx_gram_at(const cx_u8* at, const cx_u8* end, const cx_u64* nums, cx_u32 count, cx_u32 k, cx_u64 mask) {
+    cx_u64 x = 0;
+    if (end - at >= 8) memcpy(&x, at, 8);
+    else
+        for (cx_u32 j = 0; j < k; j++) x |= (cx_u64)at[j] << (8 * j);
+    x &= mask;
+    int hit = 0;
+    for (cx_u32 s = 0; s < count; s++) hit |= x == nums[s];
+    return hit;
+}
+
+static inline __attribute__((always_inline)) cx_usize rx_grams_f(const cx_u8* hay, cx_usize len, cx_usize from, const cx_u8* grams, cx_u32 count, cx_u32 k, const cx_u32 f) {
+    cx_usize last = len - k;  // the last place one can start
+    cx_usize p = from;
+    const cx_u8* end = hay + len;
+    cx_u64 nums[8];
+    cx_u64 mask = k >= 8 ? ~(cx_u64)0 : ((cx_u64)1 << (8 * k)) - 1;
+    if (count > 8) count = 8;
+    for (cx_u32 s = 0; s < count; s++) {
+        nums[s] = 0;
+        for (cx_u32 j = 0; j < k; j++) nums[s] |= (cx_u64)grams[(cx_usize)s * k + j] << (8 * j);
+    }
+#if defined(FIND_STEP)
+    /* The strings' first `f` bytes, each different start once, a byte in every lane, made before
+     * the loop rather than at each step. */
+    find_v want[8][4];
+    cx_u32 starts = 0;
+    for (cx_u32 s = 0; s < count && s < 8; s++) {
+        const cx_u8* g = grams + (cx_usize)s * k;
+        int seen = 0;
+        for (cx_u32 t = 0; t < s; t++) seen |= memcmp(grams + (cx_usize)t * k, g, f) == 0;
+        if (seen) continue;
+        for (cx_u32 j = 0; j < f; j++) memset(&want[starts][j], g[j], sizeof want[starts][j]);
+        starts++;
+    }
+    /* Each step's loads end at p + f - 1 + FIND_STEP - 1, and the whole strings it compares at
+     * p + FIND_STEP - 1 + k - 1 at most, inside the text while the places it tests, up to
+     * p + FIND_STEP - 1, are no later than `last`. */
+    while (p <= last && last - p >= FIND_STEP - 1) {
+        find_v w[4];
+        for (cx_u32 j = 0; j < f; j++) w[j] = *(const find_v*)(hay + p + j);
+        find_v any = {0};  // all clear
+        for (cx_u32 s = 0; s < starts; s++) {
+            find_v m = w[0] == want[s][0];
+            for (cx_u32 j = 1; j < f; j++) m &= w[j] == want[s][j];
+            any |= m;
+        }
+        find_m hit = FIND_MASK(any);
+        while (hit) {
+            cx_usize at = p + FIND_AT(hit);
+            if (k == f || rx_gram_at(hay + at, end, nums, count, k, mask)) return at;
+            hit &= hit - 1;
+        }
+        p += FIND_STEP;
+    }
+#endif
+    for (; p <= last; p++) {
+        if (rx_gram_at(hay + p, end, nums, count, k, mask)) return p;
+    }
+    return len;
+}
+
+cx_usize cx_rx_find_grams(const cx_u8* hay, cx_usize len, cx_usize from, const cx_u8* grams, cx_u32 count, cx_u32 k) {
+    if (len < k || from > len - k) return len;
+    switch (k) {
+    case 2: return rx_grams_f(hay, len, from, grams, count, 2, 2);
+    case 3: return rx_grams_f(hay, len, from, grams, count, 3, 3);
+    default: return rx_grams_f(hay, len, from, grams, count, k, 4);
+    }
+}
+
 /* For std.csv: the first byte from `from` that's `a`, `b` or `c`, or `len`, which ends a field
  * without quotes at the delimiter or a line break (CLX-188). A field is short, so the first step
  * mostly decides it: 16 or 32 bytes compared at once, the place taken from the mask, with no byte

@@ -1,0 +1,63 @@
+// The searches that skip by a few strings every match starts with, the patterns that are nothing
+// but a few strings of one length, and the anchored search at each place a single first byte is
+// (CLX-297), against `Regex.python`'s backtracking, which none of them change: the same matches,
+// counts and replacements, on random text where matches are many, next to each other and at the
+// ends.
+import std.random.{Random}
+import std.regex.{Regex}
+
+const PATTERNS: [str; 14] = [
+    "agggtaaa|tttaccct",
+    "[cgt]gggtaaa|tttaccc[acg]",
+    "aND|caN|Ha[DS]|WaS",
+    "a[NSt]|BY",
+    "tHa[Nt]",
+    "<[^>]*>",
+    #"\|[^|][^|]*\|"#,
+    "ag+t|tc",
+    "(at|ta)g",
+    #"\bat|ga\b"#,
+    "é[at]|üg",
+    "aa|bb",
+    "at|atg",
+    "atg|at",
+]
+
+fn spans(re: mut Regex, text: String) -> String {
+    var out = String()
+    for m in re.find_all(text) {
+        out.push_str("{m.start}-{m.end} ")
+    }
+    return out
+}
+
+fn main() {
+    var r = Random.new(297)
+    let alphabet: List<String> = ["a", "c", "g", "t", "a", "t", "g", "N", "S", "B", "Y", "H", "D", "W", "<", ">", "|", "é", "ü", " ", "b"]
+    var same = 0
+    var tried = 0
+    for round in 0usize..60 {
+        var text = String()
+        let len = if round < 10 { round } else { 50 + r.index(3000) }
+        for _ in 0usize..len {
+            text.push_str(alphabet[r.index(alphabet.len())])
+        }
+        for p in PATTERNS {
+            var fast = Regex.new(p)!
+            var slow = Regex.python(p)!
+            tried += 1
+            let a = "{spans(mut fast, text)}{fast.count(text)} {fast.is_match(text)} {fast.replace_all(text, "<$0>")}"
+            let b = "{spans(mut slow, text)}{slow.count(text)} {slow.is_match(text)} {slow.replace_all(text, "<\\g<0>>")}"
+            if a == b {
+                same += 1
+            } else {
+                println("{p} differs on {text}:\n  {a}\n  {b}")
+            }
+        }
+    }
+    println("{same == tried} {tried}")    // out: true 840
+
+    // At the very end, and text shorter than the strings.
+    var end = Regex.new("agggtaaa|tttaccct")!
+    println("{end.count("xxtttaccct")} {end.count("tttacc")} {end.find("aagggtaaa")?.start ?? 99}")    // out: 1 0 1
+}

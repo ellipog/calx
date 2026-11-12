@@ -15,6 +15,7 @@ extern "C" {
     fn cx_bytes_rare(needle: *const u8, n: usize) -> usize
     fn cx_bytes_find_rare(hay: *const u8, len: usize, needle: *const u8, n: usize, k: usize) -> usize
     fn cx_rx_skip(hay: *const u8, len: usize, from: usize, set: *const u8, count: u32, bytes: u32) -> usize
+    fn cx_rx_find_grams(hay: *const u8, len: usize, from: usize, grams: *const u8, count: u32, k: u32) -> usize
 }
 
 /// Why a pattern isn't one `Regex.new` or `Regex.python` takes.
@@ -1807,6 +1808,12 @@ const SKIP_PREFIX: u32 = 1
 const SKIP_BYTES: u32 = 2
 // To no earlier than a match with the next place a literal inside every match is can start.
 const SKIP_INNER: u32 = 3
+// To the next place one of a few strings of 2 to 8 bytes is, one of which every match starts with
+// (CLX-297).
+const SKIP_GRAMS: u32 = 4
+// At most this many of them, each this long at most.
+const MAX_GRAMS: usize = 8
+const GRAM_LEN: usize = 8
 // After this many skips, whether they went far enough on average to be worth it, in bytes.
 const SKIP_WINDOW: u32 = 64
 const SKIP_WORTH: u64 = 8
@@ -1872,10 +1879,14 @@ struct Dfa {
     closed: List<u32>
     next_ids: List<u32>
     // How the search skips ahead, `SKIP_*`: to `prefix`, or to a byte that's nonzero in
-    // `skip_set`, `skip_count` of them, which with three or fewer are `skip_bytes`, one a byte.
+    // `skip_set`, `skip_count` of them, which with three or fewer are `skip_bytes`, one a byte, or
+    // to one of the `gram_count` strings of `gram_len` bytes back to back in `grams`.
     skip: u32
     prefix: List<u8>
     prefix_rare: usize
+    grams: List<u8>
+    gram_count: u32
+    gram_len: u32
     skip_set: List<u8>
     skip_count: u32
     skip_bytes: u32
@@ -1972,6 +1983,9 @@ fn new_dfa(node: Node, rev: bool) -> Dfa {
         skip: SKIP_NONE,
         prefix: List<u8>(),
         prefix_rare: 0,
+        grams: List<u8>(),
+        gram_count: 0,
+        gram_len: 0,
         skip_set: [0; 256],
         skip_count: 0,
         skip_bytes: 0,
@@ -2104,6 +2118,18 @@ impl Dfa {
         }
     }
 
+    // Has the search skip to where one of `count` strings of `k` bytes back to back in `grams` is,
+    // one of which every match starts with. Not when a match can be empty, as for the other skips.
+    fn plan_grams(mut self, grams: own List<u8>, count: u32, k: u32) {
+        if not self.ok or not self.first or self.first_bytes() == none {
+            return
+        }
+        self.skip = SKIP_GRAMS
+        self.grams = grams
+        self.gram_count = count
+        self.gram_len = k
+    }
+
     // Has the search skip by `lit`, a literal every match has after its start, and `set`, the
     // bytes the part of the pattern before it can take. See `skip_from`.
     fn plan_jumps(mut self, lit: own List<u8>, set: own List<u8>) {
@@ -2149,6 +2175,9 @@ impl Dfa {
                     return n
                 }
                 return i + k
+            }
+            if self.skip == SKIP_GRAMS {
+                return cx_rx_find_grams(text.as_ptr(), n, i, self.grams.as_ptr(), self.gram_count, self.gram_len)
             }
             return cx_rx_skip(text.as_ptr(), n, i, self.skip_set.as_ptr(), self.skip_count, self.skip_bytes)
         }
@@ -2514,6 +2543,12 @@ pub struct Regex {
     names: List<String>
     // The pattern as plain text, when it's nothing more, found with `find` as it is.
     literal: String?
+    // The pattern as a few strings of one length, `lit_count` of them `lit_len` bytes long, back to
+    // back in `lits`, when it's nothing more, found by looking for all of them at once (CLX-297).
+    // `lit_count` is 0 when it isn't.
+    lits: List<u8>
+    lit_count: u32
+    lit_len: u32
     // The DFAs that find where a match ends, reading forward, and then where it starts, reading
     // back from there.
     fwd: Dfa
@@ -2589,6 +2624,25 @@ impl Regex {
                 }
             }
         }
+        // A few strings every match starts with, when its first byte alone wouldn't skip far: in
+        // DNA, `agggtaaa|tttaccct` starts with `a` or `t` at half the places, and with `aggg` or
+        // `ttta` at one in 128.
+        if fwd.skip == SKIP_NONE or (fwd.skip == SKIP_BYTES and fwd.skip_count > 1) {
+            if let (grams, count, k) = prefix_grams(node) {
+                fwd.plan_grams(grams, count, k)
+            }
+        }
+        // A pattern that's only a few strings of one length is found by looking for them.
+        var lits = List<u8>()
+        var lit_count: u32 = 0
+        var lit_len: u32 = 0
+        if groups == 0 and literal == none {
+            if let (bytes, count, k) = exact_set(node) {
+                lits = bytes
+                lit_count = count
+                lit_len = k
+            }
+        }
         var inner_rare: usize = 0
         var lit_rare: usize = 0
         unsafe {
@@ -2597,7 +2651,7 @@ impl Regex {
                 lit_rare = cx_bytes_rare(lit.as_ptr(), lit.len())
             }
         }
-        return Regex { source: pattern.copy(), prog: prog, pike: pike, track: track, groups: usize(groups), names: names, literal: literal, fwd: fwd, rev: rev, inner: inner, inner_rare: inner_rare, before: before, before_ends: before_ends, lit_rare: lit_rare, whole: new_dfa(Node.Empty, false), whole_made: false, python_re: false, py: sre.empty() }
+        return Regex { source: pattern.copy(), prog: prog, pike: pike, track: track, groups: usize(groups), names: names, literal: literal, lits: lits, lit_count: lit_count, lit_len: lit_len, fwd: fwd, rev: rev, inner: inner, inner_rare: inner_rare, before: before, before_ends: before_ends, lit_rare: lit_rare, whole: new_dfa(Node.Empty, false), whole_made: false, python_re: false, py: sre.empty() }
     }
 
     /// The pattern compiled as Python's `re.compile` compiles it, or the error it raises, with
@@ -2618,7 +2672,7 @@ impl Regex {
         let track = new_track(prog)
         let groups = py.group_count()
         let names = py.group_names()
-        return Regex { source: pattern.copy(), prog: prog, pike: pike, track: track, groups: groups, names: names, literal: none, fwd: new_dfa(Node.Empty, false), rev: new_dfa(Node.Empty, true), inner: List<u8>(), inner_rare: 0, before: new_dfa(Node.Empty, true), before_ends: List<u8>(), lit_rare: 0, whole: new_dfa(Node.Empty, false), whole_made: true, python_re: true, py: py }
+        return Regex { source: pattern.copy(), prog: prog, pike: pike, track: track, groups: groups, names: names, literal: none, lits: List<u8>(), lit_count: 0, lit_len: 0, fwd: new_dfa(Node.Empty, false), rev: new_dfa(Node.Empty, true), inner: List<u8>(), inner_rare: 0, before: new_dfa(Node.Empty, true), before_ends: List<u8>(), lit_rare: 0, whole: new_dfa(Node.Empty, false), whole_made: true, python_re: true, py: py }
     }
 
     /// The pattern as it was written.
@@ -2643,6 +2697,9 @@ impl Regex {
         }
         if let lit = self.literal {
             return text.contains(lit)
+        }
+        if self.lit_count > 0 {
+            return self.span_at(text, 0) != none
         }
         if not self.inner.is_empty() {
             let (s, _) = self.inner_span(text, 0)
@@ -2733,8 +2790,8 @@ impl Regex {
         }
     }
 
-    // Where the first match from `from` is, for a pattern every match of which starts with the
-    // literal `fwd.prefix`: at each place it is, a search anchored there, so where the match starts
+    // Where the first match from `from` is, for a pattern every match of which starts where the
+    // forward search skips to, `fwd.prefix` or another: at each such place, a search anchored there, so where the match starts
     // is known without reading back. It gives up as `inner_span` does.
     fn prefix_span(mut self, text: String, from: usize) -> (u64, u64) {
         let n = text.len()
@@ -2785,8 +2842,23 @@ impl Regex {
             }
             return some((from + k, from + k + lit.len()))
         }
-        if self.fwd.skip == SKIP_PREFIX or not self.inner.is_empty() {
-            let (s, e) = if self.fwd.skip == SKIP_PREFIX { self.prefix_span(text, from) } else { self.inner_span(text, from) }
+        if self.lit_count > 0 {
+            var at: usize = 0
+            unsafe {
+                at = cx_rx_find_grams(text.as_ptr(), text.len(), from, self.lits.as_ptr(), self.lit_count, self.lit_len)
+            }
+            if at >= text.len() {
+                return none
+            }
+            return some((at, at + usize(self.lit_len)))
+        }
+        // Every match starts where the skip goes, so a search anchored there finds where it ends,
+        // without reading back for where it starts: by a literal prefix, a byte or a few strings
+        // every match starts with (CLX-297).
+        let skip = self.fwd.skip
+        let starts = skip == SKIP_PREFIX or skip == SKIP_GRAMS or (skip == SKIP_BYTES and self.fwd.skip_count == 1)
+        if starts or not self.inner.is_empty() {
+            let (s, e) = if starts { self.prefix_span(text, from) } else { self.inner_span(text, from) }
             if s == NO_MATCH {
                 return none
             }
@@ -3379,6 +3451,186 @@ fn literal_prefix(node: Node, out: mut List<u8>) -> bool {
         },
         _ => false,
     }
+}
+
+// Strings of 2 to `GRAM_LEN` bytes, `MAX_GRAMS` or fewer, one of which every match of `node`
+// starts with, back to back, with how many and how long: `agggtaaa` and `tttaccct` themselves,
+// or for `[cgt]gggtaaa|tttaccc[acg]`, `cgggtaaa`, `ggggtaaa`, `tgggtaaa` and three more. None when a match can be
+// shorter than 2 bytes, or its start is more than that many strings, or isn't known this way.
+fn prefix_grams(node: Node) -> (List<u8>, u32, u32)? {
+    let all = starts_of(node, false) else return none
+    var k = GRAM_LEN
+    for e in all {
+        k = k.min(e.0.len())
+    }
+    if k < 2 {
+        return none
+    }
+    var grams = List<u8>()
+    var count: u32 = 0
+    for e in all {
+        let g = e.0[..k]
+        var seen = false
+        for c in 0usize..usize(count) {
+            if grams[c * k..(c + 1) * k] == g {
+                seen = true
+            }
+        }
+        if not seen {
+            if usize(count) == MAX_GRAMS {
+                return none
+            }
+            grams.extend(g)
+            count += 1
+        }
+    }
+    return some((grams, count, u32.wrap(k)))
+}
+
+// The strings `node` matches, when it's nothing but a few of them of one length, 2 to `GRAM_LEN`
+// bytes, with no groups, assertions or repeats, back to back, with how many and how long:
+// `a[NSt]|BY` is `aN`, `aS`, `at` and `BY`. Only one of them can be at a place, so looking for them
+// is looking for the pattern's leftmost match.
+fn exact_set(node: Node) -> (List<u8>, u32, u32)? {
+    let all = starts_of(node, true) else return none
+    if all.is_empty() or all.len() > MAX_GRAMS {
+        return none
+    }
+    let k = all[0].0.len()
+    if k < 2 {
+        return none
+    }
+    var out = List<u8>()
+    for e in all {
+        if not e.1 or e.0.len() != k {
+            return none
+        }
+        out.extend(e.0)
+    }
+    return some((out, u32.wrap(all.len()), u32.wrap(k)))
+}
+
+// The ways a match of `node` can start: each the bytes it starts with, up to `GRAM_LEN`, and
+// whether they're all of it, so what follows the node comes after them. Too many, or a class with
+// a rune past ASCII, and it's none. `strict` for `exact_set`, which takes no groups, assertions or
+// repeats.
+fn starts_of(node: Node, strict: bool) -> List<(List<u8>, bool)>? {
+    match node {
+        Node.Empty => return some([(List<u8>(), true)]),
+        Node.Look(_) => return if strict { none } else { some([(List<u8>(), true)]) },
+        Node.Lit(rs) => {
+            var bs = List<u8>()
+            push_lit(mut bs, rs)
+            return some([cut_start(bs, true)])
+        },
+        Node.Class(ranges) => {
+            var out: List<(List<u8>, bool)> = []
+            var i: usize = 0
+            while i + 1 < ranges.len() {
+                let lo = ranges[i]
+                let hi = ranges[i + 1]
+                if hi >= 128 or usize(hi - lo) + out.len() >= MAX_GRAMS {
+                    return none
+                }
+                for r in lo..=hi {
+                    out.push(([u8.wrap(r)], true))
+                }
+                i += 2
+            }
+            return some(out)
+        },
+        Node.Group(inner, _) => return if strict { none } else { starts_of(inner.value, false) },
+        Node.Concat(items) => {
+            var acc: List<(List<u8>, bool)> = [(List<u8>(), true)]
+            for item in items {
+                if not acc.any(|e| e.1) {
+                    break
+                }
+                let next = starts_of(item, strict) else return none
+                let more = follow(acc, next) else return none
+                acc = more
+            }
+            return some(acc)
+        },
+        Node.Alt(items) => {
+            var out: List<(List<u8>, bool)> = []
+            for item in items {
+                let s = starts_of(item, strict) else return none
+                for e in s {
+                    add_start(mut out, e.0.copy(), e.1)
+                }
+                if out.len() > MAX_GRAMS * 4 {
+                    return none
+                }
+            }
+            return some(out)
+        },
+        Node.Repeat(inner, min, max, _) => {
+            if strict or min > u32.wrap(GRAM_LEN) {
+                return none
+            }
+            let once = starts_of(inner.value, false) else return none
+            var acc: List<(List<u8>, bool)> = [(List<u8>(), true)]
+            if min == 0 {
+                // Nothing, or one or more, after which more may follow.
+                for e in once {
+                    add_start(mut acc, e.0.copy(), e.1 and max == 1)
+                }
+                return some(acc)
+            }
+            for _ in 0u32..min {
+                let more = follow(acc, once.copy()) else return none
+                acc = more
+            }
+            if max != min {
+                // More may follow, which isn't known here.
+                var open: List<(List<u8>, bool)> = []
+                for e in acc {
+                    add_start(mut open, e.0.copy(), false)
+                }
+                return some(open)
+            }
+            return some(acc)
+        },
+    }
+}
+
+// Each of `acc` that's all of a match followed by each of `next`, and the rest as they are.
+fn follow(acc: List<(List<u8>, bool)>, next: List<(List<u8>, bool)>) -> List<(List<u8>, bool)>? {
+    var out: List<(List<u8>, bool)> = []
+    for a in acc {
+        if not a.1 {
+            add_start(mut out, a.0.copy(), false)
+            continue
+        }
+        for b in next {
+            var c = a.0.copy()
+            c.extend(b.0)
+            let (bs, whole) = cut_start(c, b.1)
+            add_start(mut out, bs, whole)
+        }
+        if out.len() > MAX_GRAMS * 4 {
+            return none
+        }
+    }
+    return some(out)
+}
+
+// `bs`, cut to `GRAM_LEN` bytes, past which nothing more is needed.
+fn cut_start(bs: own List<u8>, whole: bool) -> (List<u8>, bool) {
+    if bs.len() > GRAM_LEN {
+        return (bs[..GRAM_LEN], false)
+    }
+    return (bs, whole)
+}
+
+fn add_start(out: mut List<(List<u8>, bool)>, bs: own List<u8>, whole: bool) {
+    for e in out {
+        if e.0 == bs and e.1 == whole {
+            return
+        }
+    }
+    out.push((bs, whole))
 }
 
 // A literal every match of `node` has after something else, which a search can look for first,

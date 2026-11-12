@@ -719,6 +719,9 @@ CX_FN(cx_usize, cx_bytes_rare, (const cx_u8* needle, cx_usize n));
 CX_FN(cx_usize, cx_bytes_find_rare, (const cx_u8* hay, cx_usize len, const cx_u8* needle, cx_usize n, cx_usize k));
 /* For std.regex: the first byte from `from` that's in `set`, or `len`. */
 CX_FN(cx_usize, cx_rx_skip, (const cx_u8* hay, cx_usize len, cx_usize from, const cx_u8* set, cx_u32 count, cx_u32 bytes));
+/* For std.regex: the first place from `from` where one of `count` strings of `k` bytes in `grams`
+ * starts, or `len` (CLX-297). */
+CX_FN(cx_usize, cx_rx_find_grams, (const cx_u8* hay, cx_usize len, cx_usize from, const cx_u8* grams, cx_u32 count, cx_u32 k));
 /* For std.csv: the first byte from `from` that's `a`, `b` or `c`, or `len`. */
 CX_FN(cx_usize, cx_bytes_find3, (const cx_u8* hay, cx_usize len, cx_usize from, cx_u8 a, cx_u8 b, cx_u8 c));
 /* For std.html: the same for five bytes. */
