@@ -1,0 +1,68 @@
+// `split` and `lines` as lists against a `for` loop over the same, which finds its parts another
+// way, and `replace` against the parts joined back (CLX-300): random text with separators at the
+// ends and next to each other, of one byte, several and not ASCII, and parts of every length.
+import std.random.{Random}
+
+fn main() {
+    var r = Random.new(300)
+    let alphabet: List<String> = ["a", "b", ",", ",", "ab", "é", "\r", "\n", "\r\n", "x", "--", "-", "0123456789"]
+    let seps: List<String> = [",", "-", "--", "é", "ab", "\n", "0123456789"]
+    var same = 0
+    var tried = 0
+    for round in 0usize..300 {
+        var text = String()
+        let len = if round < 20 { round } else { r.index(60) }
+        for _ in 0usize..len {
+            text.push_str(alphabet[r.index(alphabet.len())])
+        }
+        for sep in seps {
+            tried += 1
+            let listed = text.split(sep)
+            var looped: List<String> = []
+            for part in text.split(sep) {
+                looped.push(part.copy())
+            }
+            if listed == looped and listed.join(sep) == text and text.replace(sep, "+") == listed.join("+") {
+                same += 1
+            } else {
+                println("{sep} differs on {text}")
+            }
+        }
+        tried += 1
+        let lines = text.lines()
+        var each: List<String> = []
+        for line in text.lines() {
+            each.push(line.copy())
+        }
+        if lines == each {
+            same += 1
+        } else {
+            println("lines differ on {text}")
+        }
+    }
+    println("{same == tried} {tried}")    // out: true 2400
+
+    // Parts of every length up to 40, each copied whole.
+    var long = String()
+    var want = 0usize
+    for n in 0usize..41 {
+        for k in 0usize..n {
+            long.push_str(if k == 0 { "<" } else if k + 1 == n { ">" } else { "." })
+        }
+        long.push_str(",")
+        want += n
+    }
+    let parts = long.split(",")
+    var got = 0usize
+    var whole = true
+    for (n, part) in parts.enumerate() {
+        got += part.len()
+        if n < 41 and part.len() != n {
+            whole = false
+        }
+        if n > 1 and n < 41 and not (part.starts_with("<") and part.ends_with(">")) {
+            whole = false
+        }
+    }
+    println("{parts.len()} {got == want} {whole}")    // out: 42 true true
+}

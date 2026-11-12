@@ -91,9 +91,10 @@ cx_String cx_text_replace(cx_str s, cx_str from, cx_str to, const char* at) {
         }
         return r;
     }
+    cx_usize rare = cx_bytes_rare(from.ptr, from.len);
     cx_usize i = 0;
     for (;;) {
-        cx_usize k = cx_str_find((cx_str){s.ptr + i, s.len - i}, from);
+        cx_usize k = cx_bytes_find_rare(s.ptr + i, s.len - i, from.ptr, from.len, rare);
         if (k == CX_NOT_FOUND) break;
         if (r.cap == 0) cx_string_reserve(&r, s.len + (to.len > from.len ? to.len - from.len : 0) + 16);
         cx_string_push_bytes(&r, s.ptr + i, k);
@@ -139,15 +140,49 @@ cx_String cx_text_pad(cx_str s, cx_usize width, cx_rune fill, cx_bool start, con
     return r;
 }
 
+/* Copies `n` bytes, 1 or more, from `p` to `q`. Up to 16 take two moves that overlap, in place of
+ * a call to `memcpy`, which costs more than the copy for the short parts a split mostly makes. */
+static inline void copy_part(cx_u8* q, const cx_u8* p, cx_usize n) {
+    if (n >= 8 && n <= 16) {
+        cx_u64 a, b;
+        memcpy(&a, p, 8);
+        memcpy(&b, p + n - 8, 8);
+        memcpy(q, &a, 8);
+        memcpy(q + n - 8, &b, 8);
+    } else if (n >= 4 && n < 8) {
+        cx_u32 a, b;
+        memcpy(&a, p, 4);
+        memcpy(&b, p + n - 4, 4);
+        memcpy(q, &a, 4);
+        memcpy(q + n - 4, &b, 4);
+    } else if (n < 4) {
+        q[0] = p[0];
+        q[n >> 1] = p[n >> 1];
+        q[n - 1] = p[n - 1];
+    } else {
+        memcpy(q, p, n);
+    }
+}
+
+/* Adds a copy of the `n` bytes at `p` to `l`, in a buffer of its own of 16 bytes at least, as
+ * `cx_string_grow_to` would make it, but without a call to grow an empty string first. */
 static void list_push(cx_StringList* l, const cx_u8* p, cx_usize n) {
     l->ptr = (cx_String*)cx_grow(l->ptr, &l->cap, l->len, 1, sizeof(cx_String));
     cx_String part = {0, 0, 0};
-    cx_string_push_bytes(&part, p, n);
+    if (n) {
+        cx_usize cap = n < 16 ? 16 : n;
+        part.ptr = (cx_u8*)cx_alloc(cap);
+        copy_part(part.ptr, p, n);
+        part.len = n;
+        part.cap = cap;
+    }
     l->ptr[l->len++] = part;
 }
 
 /* The parts of `s` between each `sep`, empty ones too, so there's one more part than there are
- * separators. An empty `sep` gives each rune as a part of its own. */
+ * separators. An empty `sep` gives each rune as a part of its own. A one-byte `sep` is looked
+ * for as `cx_text_split_next` does, and a longer one's rarest bytes are worked out once, not for
+ * each part (CLX-300). */
 cx_StringList cx_text_split(cx_str s, cx_str sep) {
     cx_StringList l = {0, 0, 0};
     if (sep.len == 0) {
@@ -160,9 +195,20 @@ cx_StringList cx_text_split(cx_str s, cx_str sep) {
         }
         return l;
     }
+    if (sep.len == 1) {
+        const cx_u8* p = s.ptr;
+        const cx_u8* end = s.ptr + s.len;
+        for (;;) {
+            const cx_u8* e = cx_find2(p, end, sep.ptr[0], sep.ptr[0]);
+            list_push(&l, p, (cx_usize)(e - p));
+            if (e == end) return l;
+            p = e + 1;
+        }
+    }
+    cx_usize rare = cx_bytes_rare(sep.ptr, sep.len);
     cx_usize i = 0;
     for (;;) {
-        cx_usize k = cx_str_find((cx_str){s.ptr + i, s.len - i}, sep);
+        cx_usize k = cx_bytes_find_rare(s.ptr + i, s.len - i, sep.ptr, sep.len, rare);
         if (k == CX_NOT_FOUND) break;
         list_push(&l, s.ptr + i, k);
         i += k + sep.len;
@@ -191,8 +237,7 @@ cx_StringList cx_text_lines(cx_str s) {
     cx_StringList l = {0, 0, 0};
     cx_usize i = 0;
     while (i < s.len) {
-        cx_usize j = i;
-        while (j < s.len && s.ptr[j] != '\n' && s.ptr[j] != '\r') j++;
+        cx_usize j = (cx_usize)(cx_find2(s.ptr + i, s.ptr + s.len, '\n', '\r') - s.ptr);
         list_push(&l, s.ptr + i, j - i);
         if (j < s.len && s.ptr[j] == '\r' && j + 1 < s.len && s.ptr[j + 1] == '\n') j++;
         i = j + 1;
