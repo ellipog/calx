@@ -3,8 +3,8 @@
  * these: the server makes a 1024-bit RSA key pair, the client sends a shared secret encrypted with
  * the public key, and both sides then encrypt everything with AES-CFB8, the secret as key and IV.
  *
- * AES is FIPS 197, with AES-NI where the processor has it and a byte-at-a-time version where it
- * doesn't. RSA is RFC 8017: Montgomery multiplication on 64-bit limbs, exponents taken four bits a
+ * AES is FIPS 197, with AES-NI or Arm64's AES instructions where the processor has them and a
+ * byte-at-a-time version where it doesn't. RSA is RFC 8017: Montgomery multiplication on 64-bit limbs, exponents taken four bits a
  * step from a table read whole each time, so the time doesn't depend on the private key's bits,
  * and the Chinese remainder theorem for decryption. Contexts are bytes the caller owns, a
  * `List<u8>` in std.crypto, copied in and out here, so they need no alignment. */
@@ -25,6 +25,9 @@
 #include <cpuid.h>
 #include <immintrin.h>
 #define CX_X86 1
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
+#define CX_ARM 1
 #endif
 
 /* --- random bytes -------------------------------------------------------------------------- */
@@ -63,7 +66,7 @@ void cx_crypto_random(cx_u8* p, cx_usize n) {
 typedef struct {
     cx_u8 rk[11][16];  // the round keys
     cx_u8 iv[16];      // the shift register: the last 16 bytes of ciphertext
-    cx_u32 ni;         // whether to use AES-NI
+    cx_u32 ni;         // whether to use AES-NI, or Arm's AES instructions
 } cfb8;
 
 _Static_assert(sizeof(cfb8) <= CX_CFB8_CTX, "the context fits what std.crypto makes room for");
@@ -91,8 +94,9 @@ static const cx_u8 sbox[256] = {
 
 static cx_u8 xtime(cx_u8 x) { return (cx_u8)((x << 1) ^ ((x >> 7) * 0x1b)); }
 
-/* Whether the processor has AES-NI and SSE4.1, asked once, since a cpuid under a hypervisor costs
-   about a microsecond. Threads that race to ask store the same answer. */
+/* Whether the processor has AES-NI and SSE4.1, or on Arm64 its AES instructions, asked once,
+   since a cpuid under a hypervisor costs about a microsecond. Threads that race to ask store the
+   same answer. */
 static cx_u32 aes_ni(void) {
     static int known = -1;
     int k = __atomic_load_n(&known, __ATOMIC_RELAXED);
@@ -101,6 +105,8 @@ static cx_u32 aes_ni(void) {
 #ifdef CX_X86
     unsigned a, b, c, d;
     if (__get_cpuid(1, &a, &b, &c, &d)) k = (c >> 25) & 1 && (c >> 19) & 1;
+#elif defined(CX_ARM)
+    k = (cx_arm_features() & CX_ARM_AES) != 0;
 #endif
     __atomic_store_n(&known, k, __ATOMIC_RELAXED);
     return (cx_u32)k;
@@ -201,12 +207,64 @@ AES_TARGET static void decrypt_ni(cfb8* c, cx_u8* p, cx_usize n) {
     }
     memcpy(c->iv, w, 16);
 }
+#elif defined(CX_ARM)
+#define AES_TARGET __attribute__((target("aes")))
+
+/* CLX-281: Arm64's aese is AddRoundKey, ShiftRows and SubBytes, and aesmc MixColumns, so the
+ * round key goes in before each round instead of after as with aesenc, and the last is xored on
+ * after the last. The pairs run fused on most cores. */
+AES_TARGET static inline uint8x16_t aes_rounds(uint8x16_t x, const uint8x16_t* k) {
+    for (int r = 0; r < 9; r++) x = vaesmcq_u8(vaeseq_u8(x, k[r]));
+    return veorq_u8(vaeseq_u8(x, k[9]), k[10]);
+}
+
+/* As on x86: a block a byte, each waiting on the last. */
+AES_TARGET static void encrypt_ni(cfb8* c, cx_u8* p, cx_usize n) {
+    uint8x16_t k[11];
+    for (int i = 0; i < 11; i++) k[i] = vld1q_u8(c->rk[i]);
+    uint8x16_t iv = vld1q_u8(c->iv);
+    for (cx_usize i = 0; i < n; i++) {
+        cx_u8 out = (cx_u8)(p[i] ^ vgetq_lane_u8(aes_rounds(iv, k), 0));
+        p[i] = out;
+        iv = vsetq_lane_u8(out, vextq_u8(iv, iv, 1), 15);
+    }
+    vst1q_u8(c->iv, iv);
+}
+
+/* And 16 blocks at once to decrypt, as on x86. */
+AES_TARGET static void decrypt_ni(cfb8* c, cx_u8* p, cx_usize n) {
+    uint8x16_t k[11];
+    for (int i = 0; i < 11; i++) k[i] = vld1q_u8(c->rk[i]);
+    cx_u8 w[32];
+    memcpy(w, c->iv, 16);
+    cx_usize i = 0;
+    for (; n - i >= 16; i += 16) {
+        memcpy(w + 16, p + i, 16);
+        uint8x16_t x[16];
+        for (int j = 0; j < 16; j++) x[j] = vld1q_u8(w + j);
+        for (int r = 0; r < 9; r++) {
+            for (int j = 0; j < 16; j++) x[j] = vaesmcq_u8(vaeseq_u8(x[j], k[r]));
+        }
+        for (int j = 0; j < 16; j++) {
+            x[j] = veorq_u8(vaeseq_u8(x[j], k[9]), k[10]);
+            p[i + j] = (cx_u8)(w[16 + j] ^ vgetq_lane_u8(x[j], 0));
+        }
+        memcpy(w, w + 16, 16);
+    }
+    for (; i < n; i++) {
+        cx_u8 in = p[i];
+        p[i] = (cx_u8)(in ^ vgetq_lane_u8(aes_rounds(vld1q_u8(w), k), 0));
+        memmove(w, w + 1, 15);
+        w[15] = in;
+    }
+    memcpy(c->iv, w, 16);
+}
 #endif
 
 void cx_cfb8_encrypt(cx_u8* ctx, cx_u8* p, cx_usize n) {
     cfb8 c;
     memcpy(&c, ctx, sizeof c);
-#ifdef CX_X86
+#if defined(CX_X86) || defined(CX_ARM)
     if (c.ni) {
         encrypt_ni(&c, p, n);
         memcpy(ctx, &c, sizeof c);
@@ -226,7 +284,7 @@ void cx_cfb8_encrypt(cx_u8* ctx, cx_u8* p, cx_usize n) {
 void cx_cfb8_decrypt(cx_u8* ctx, cx_u8* p, cx_usize n) {
     cfb8 c;
     memcpy(&c, ctx, sizeof c);
-#ifdef CX_X86
+#if defined(CX_X86) || defined(CX_ARM)
     if (c.ni) {
         decrypt_ni(&c, p, n);
         memcpy(ctx, &c, sizeof c);
