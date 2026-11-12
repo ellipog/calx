@@ -1103,12 +1103,55 @@ __attribute__((target("pclmul,sse4.1"))) static cx_u64 crc64_clmul(cx_u64 crc, c
     _mm_storeu_si128((__m128i*)last, x);
     return crc64_tables(crc64_tables(0, last, 16), p, n);
 }
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
+
+/* CLX-281: the same folds with Arm64's PMULL, which comes with its AES instructions: pmull
+ * multiplies the low halves and pmull2 the high ones, as pclmulqdq's 0x00 and 0x11 do. */
+#define CX_PMULL 1
+static inline uint64x2_t crc64_load(const cx_u8* p) { return vreinterpretq_u64_u8(vld1q_u8(p)); }
+
+__attribute__((target("aes"))) static inline uint64x2_t crc64_fold(uint64x2_t x, uint64x2_t k, uint64x2_t y) {
+    poly64x2_t px = vreinterpretq_p64_u64(x), pk = vreinterpretq_p64_u64(k);
+    uint64x2_t lo = vreinterpretq_u64_p128(vmull_p64(vgetq_lane_p64(px, 0), vgetq_lane_p64(pk, 0)));
+    uint64x2_t hi = vreinterpretq_u64_p128(vmull_high_p64(px, pk));
+    return veorq_u64(veorq_u64(lo, hi), y);
+}
+
+__attribute__((target("aes"))) static cx_u64 crc64_pmull(cx_u64 crc, const cx_u8* p, cx_usize n) {
+    static const cx_u64 ks[8] = {0x6ae3efbb9dd441f3ull, 0x081f6054a7842df4ull, 0xb5ea1af9c013aca4ull, 0x69a35d91c3730254ull,
+                                 0x60095b008a9efa44ull, 0x3be653a30fe1af51ull, 0xe05dd497ca393ae4ull, 0xdabe95afc7875f40ull};
+    const uint64x2_t k64 = vld1q_u64(ks), k48 = vld1q_u64(ks + 2), k32 = vld1q_u64(ks + 4), k16 = vld1q_u64(ks + 6);
+    uint64x2_t a = veorq_u64(crc64_load(p), vcombine_u64(vcreate_u64(crc), vcreate_u64(0)));
+    uint64x2_t b = crc64_load(p + 16), c = crc64_load(p + 32), d = crc64_load(p + 48);
+    p += 64;
+    n -= 64;
+    while (n >= 64) {
+        a = crc64_fold(a, k64, crc64_load(p));
+        b = crc64_fold(b, k64, crc64_load(p + 16));
+        c = crc64_fold(c, k64, crc64_load(p + 32));
+        d = crc64_fold(d, k64, crc64_load(p + 48));
+        p += 64;
+        n -= 64;
+    }
+    uint64x2_t x = crc64_fold(a, k48, crc64_fold(b, k32, crc64_fold(c, k16, d)));
+    while (n >= 16) {
+        x = crc64_fold(x, k16, crc64_load(p));
+        p += 16;
+        n -= 16;
+    }
+    cx_u8 last[16];
+    vst1q_u8(last, vreinterpretq_u8_u64(x));
+    return crc64_tables(crc64_tables(0, last, 16), p, n);
+}
 #endif
 
 cx_u64 cx_xz_crc64(cx_u64 crc, const cx_u8* p, cx_usize n) {
     if (!__atomic_load_n(&crc64_ready, __ATOMIC_ACQUIRE)) crc64_init();
 #if defined(__x86_64__) || defined(_M_X64)
     if (n >= 64 && clmul_ok()) return ~crc64_clmul(~crc, p, n);
+#elif defined(CX_PMULL)
+    if (n >= 64 && (cx_arm_features() & CX_ARM_AES)) return ~crc64_pmull(~crc, p, n);
 #endif
     return ~crc64_tables(~crc, p, n);
 }
