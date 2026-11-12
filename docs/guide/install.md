@@ -88,7 +88,7 @@ In bash, add `eval "$(calx completions bash)"` to `~/.bashrc`. zsh and fish are 
 
 ## Where builds go
 
-The compiler caches what it builds. The cache is in `%LOCALAPPDATA%\calx\cache` on Windows, and in `~/.cache/calx` on Linux, or under `XDG_CACHE_HOME` if that's set. `CALX_CACHE` puts it somewhere else. Deleting it is always safe: the next build makes it again. `calx clean` deletes it and says how much room that gave back.
+The compiler caches what it builds. The cache is in `%LOCALAPPDATA%\calx\cache` on Windows, in `~/.cache/calx` on Linux and `~/Library/Caches/calx` on macOS, or under `XDG_CACHE_HOME` if that's set. `CALX_CACHE` puts it somewhere else. Deleting it is always safe: the next build makes it again. `calx clean` deletes it and says how much room that gave back.
 
 ## Uninstalling
 

@@ -421,7 +421,10 @@ std::string cache_dir() {
 #else
     if (!cache.empty()) return cache;
     std::string base = env("XDG_CACHE_HOME");
-    return base.empty() ? (fs::path(env("HOME")) / ".cache" / "calx").string() : (fs::path(base) / "calx").string();
+    if (!base.empty()) return (fs::path(base) / "calx").string();
+    // macOS keeps caches in ~/Library/Caches, which Time Machine leaves out, as pip's are kept.
+    if (kTarget.os == Os::macos) return (fs::path(env("HOME")) / "Library" / "Caches" / "calx").string();
+    return (fs::path(env("HOME")) / ".cache" / "calx").string();
 #endif
 }
 

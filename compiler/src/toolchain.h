@@ -53,9 +53,10 @@ std::string find_sdk();
 // The program `name` (with `.exe` on Windows) in the first folder on PATH that has it, or "".
 std::string which(const std::string& name);
 
-// The cache folder: CALX_CACHE, or `%LOCALAPPDATA%\calx\cache` on Windows and
-// `$XDG_CACHE_HOME/calx` or `~/.cache/calx` on Linux. On Windows, one of more than 100 characters
-// is given in the `\\?\` form, so the paths under it can pass MAX_PATH.
+// The cache folder: CALX_CACHE, or `%LOCALAPPDATA%\calx\cache` on Windows, and elsewhere
+// `$XDG_CACHE_HOME/calx`, or else `~/.cache/calx` on Linux and `~/Library/Caches/calx` on macOS.
+// On Windows, one of more than 100 characters is given in the `\\?\` form, so the paths under it
+// can pass MAX_PATH.
 std::string cache_dir();
 
 // `path` to open, make or remove: on Windows, in the `\\?\` form if it's 248 characters or more,
