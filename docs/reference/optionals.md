@@ -59,12 +59,14 @@ fn main() {
 | `opt ?? b` | The value, or `b` if there's none. `b` runs only when it's needed |
 | `opt!` | The value, or a panic: `unwrapped \`none\` with \`!\`` |
 | `opt?.field` | `some` of the field, or `none` |
+| `opt?.method(args)` | `some` of what the method gives back, or `none`, in which case the method isn't called and its arguments aren't worked out: Python's `m.group(1) if m else ""` as `m?.get(1) ?? ""` |
 | `match opt { some(x) => ..., none => ... }` | Either, with patterns inside `some` ([patterns](patterns.md)) |
 | `opt.map(\|x\| ...)` | `some` of what the [closure](closures.md#methods-that-take-one) gives back for the value, or `none` |
 
 - In `a ?? b`, `b` is a `T` or a `T?`. With a `T` the result is a `T`. With a `T?` it's a `T?`, so `a ?? b ?? 0` tries `a`, then `b`, then gives 0.
 - `??` next to any other binary operator needs parentheses: `(a ?? 0) + 1` ([strictness](strictness.md#parentheses)).
-- `?.` on a field that's already an optional gives that optional, not one wrapped twice.
+- `?.` on a field that's already an optional gives that optional, not one wrapped twice, and so does a method that gives one back, so `a?.next()?.next()` goes one step at a time and stops at the first `none`. A method that gives nothing back is called or isn't, so `opt?.show()` is a statement.
+- `opt?.method(...)` is `if let v = opt { v.method(...) }`, so the method can look at the value or take it, as a method taking `own self` does, but not change it: change one where it is with `if let v = mut opt { v.method(...) }` ([`if let`](patterns.md#if-let)).
 - Reading a field of an optional without `?.` or unwrapping is an error.
 
 ```calx
@@ -85,6 +87,23 @@ fn main() {
     let a = some(2) ?? calls(1)
     let b = gone?.target ?? calls(5)                            // out: calls 5
     println("{a} {b}")                                          // out: 2 5
+}
+```
+
+A method on an optional works the same way:
+
+```calx
+import std.regex.{Regex}
+
+fn main() {
+    var alt = Regex.new("alt=\"([^\"]*)\"")!
+    for tag in ["<img alt=\"a cat\" src=\"cat.png\">", "<img src=\"dog.png\">"] {
+        let name = alt.captures(tag)?.get(1) ?? String("(none)")
+        println(name)    // out: a cat
+                         // out: (none)
+    }
+    let word: String? = some(String("  hi  "))
+    println("[{word?.trim() ?? ""}] {word?.len() ?? 0}")    // out: [hi] 6
 }
 ```
 

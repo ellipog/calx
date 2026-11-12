@@ -1,0 +1,67 @@
+// `opt?.method(args)` (CLX-282): `some` of what the method gives back, or `none`, without calling
+// it or working out its arguments. A result that's an optional isn't wrapped again, and one
+// that's nothing makes the call a statement.
+
+struct Crate {
+    n: i32
+    name: String
+}
+
+impl Crate {
+    fn twice(self) -> i32 {
+        return self.n * 2
+    }
+    fn label(self, prefix: String) -> String {
+        return "{prefix}{self.name}"
+    }
+    fn next(self) -> Crate? {
+        return if self.n < 3 { some(Crate { n: self.n + 1, name: self.name.copy() }) } else { none }
+    }
+    fn show(self) {
+        println("crate {self.n}")
+    }
+    fn take(own self) -> String {
+        return self.name
+    }
+}
+
+fn arg(n: i32) -> String {
+    println("arg {n}")
+    return "#"
+}
+
+fn size<T>(xs: List<T>?) -> usize? {
+    return xs?.len()
+}
+
+fn main() {
+    let c: Crate? = some(Crate { n: 1, name: "one" })
+    let gone: Crate? = none
+    println("{c?.twice() ?? -1} {gone?.twice() ?? -1}")    // out: 2 -1
+    println("{c?.label(arg(1)) ?? String("-")}")    // out: arg 1
+    // out: #one
+    println("{gone?.label(arg(2)) ?? String("-")}")    // out: -
+    println("{c?.next()?.next()?.twice() ?? 0} {c?.next()?.next()?.next()?.twice() ?? 0}")    // out: 6 0
+    println("{c?.twice() == some(2)} {gone?.twice() == none}")    // out: true true
+    c?.show()    // out: crate 1
+    gone?.show()
+
+    // In a closure, a generic function and a loop.
+    let f = |k: Crate?| k?.twice() ?? -1
+    println("{f(c?.next())} {f(none)}")    // out: 4 -1
+    let ns: List<i32>? = some([4, 5, 6])
+    let none_list: List<i32>? = none
+    println("{size(ns) ?? 0} {size(none_list) ?? 0}")    // out: 3 0
+    for k in 0..3 {
+        let x: Crate? = if k == 1 { none } else { some(Crate { n: k, name: "k" }) }
+        println("{k} {x?.twice() ?? -1}")    // out: 0 0
+        // out: 1 -1
+        // out: 2 4
+    }
+
+    // One taking `own self` takes the value.
+    let owned: Crate? = some(Crate { n: 7, name: "seven" })
+    println("{owned?.take() ?? String()}")    // out: seven
+    let s: String? = some(String("  hi  "))
+    println("{s?.len() ?? 0} [{s?.trim() ?? String()}]")    // out: 6 [hi]
+}

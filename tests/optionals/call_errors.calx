@@ -1,0 +1,23 @@
+// What `opt?.method()` can't do (CLX-282).
+
+struct Crate {
+    n: i32
+}
+
+impl Crate {
+    fn twice(self) -> i32 {
+        return self.n * 2
+    }
+    fn bump(mut self) {
+        self.n += 1
+    }
+}
+
+fn main() {
+    let plain = Crate { n: 1 }
+    println("{plain?.twice()}")    // error: `?.` calls a method of an optional, but this is a `Crate`; write `.`
+    let c: Crate? = some(Crate { n: 1 })
+    c?.bump()    // error: `?.bump()` changes the value, and `?.` only looks at it or takes it
+    println("{c?.thrice() ?? 0}")    // error: `Crate` has no method `thrice`
+    c?.twice()    // error: this `i32?` value is unused
+}

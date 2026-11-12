@@ -79,7 +79,7 @@ Built: [Structs](reference/structs.md), [Enums](reference/enums.md), [Tuples](re
 Built: see [Optionals](reference/optionals.md) and [Patterns](reference/patterns.md), and `opt.map(|x| ...)` ([closures](reference/closures.md#methods-that-take-one)). Still to build:
 
 - `opt.or(default)`, as a method beside `??`.
-- `?.` calling a method, `opt?.len()`, as well as reading a field.
+- `?.` calling a method that changes the value, `opt?.push(x)`, where it is. Methods that look at it or take it are built (CLX-282).
 - Binding names in or-patterns, `Circle(r) | Ring(r)`, when every alternative binds the same names with the same types.
 
 ### Errors are values

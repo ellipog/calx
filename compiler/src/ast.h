@@ -306,6 +306,10 @@ struct Expr {
     // call: `a[k]` or `a[k] = v` on a type of one's own, which the checker made a call of
     // `Index.index` or `SetIndex.set_index` (CLX-72). A copy for an instance stays a call.
     bool from_index = false;
+    // if_: `a?.m(args)`, which the checker made `if let v = a { v.m(args) } else { none }` and
+    // wraps the call in `some` once it knows the call's type, unless it's an optional already or
+    // `()` (CLX-282). A copy for an instance stays an `if`.
+    bool optional_call = false;
     // Filled in by the ownership pass (D76).
     bool moves = false;          // name: this use moves the local's value away
     bool temp = false;           // a new value that isn't `Copy`, only looked at: it's kept in a

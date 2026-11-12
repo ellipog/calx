@@ -459,6 +459,8 @@ private:
 
     std::string ident(Name n) const {
         std::string_view s = text(n);
+        // `a?.m()`'s value, `?1`, which the checker names so code can't (CLX-282).
+        if (!s.empty() && s[0] == '?') return "cx_qv" + std::string(s.substr(1));
         if (c_reserved().count(s) || s.find("__") != std::string_view::npos || s.rfind("cx_", 0) == 0) {
             return "cx_v_" + std::string(s);
         }

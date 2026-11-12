@@ -4499,6 +4499,16 @@ private:
             l->used = true;
             return;
         }
+        if (!l->is_var && optional_call_ && !n.empty() && n[0] == '?') {
+            // `a?.m()`'s value, which `m` would change (CLX-282).
+            Expr* call = optional_call_->block->tail;
+            std::string m(text(call->callee->member));
+            std::string where = place_root(optional_call_->cond) ? place_text(optional_call_->cond) : "x";
+            error(place->span, "`?." + m + "()` changes the value, and `?.` only looks at it or takes it; change it where it is with " +
+                                   q("if let v = mut " + where + " { v." + m + "(...) }"));
+            l->used = true;
+            return;
+        }
         if (!l->is_var) {
             error(place->span, q(n) + " can't be changed; declare it with `var` to change it");
             note(l->span, q(n) + " is declared here");
@@ -7067,6 +7077,88 @@ private:
         return ft->kind == TypeKind::optional ? ft : optional_type(ft, e->span);
     }
 
+    // `a?.m(args)` (CLX-282): the method's result, or `none`, as `a?.b` is a field's. It becomes
+    // `if let v = a { v.m(args) } else { none }`, so it's checked, moved and emitted as that is,
+    // and the `if` wraps the call in `some` once it knows the call's type (optional_call_result).
+    Type* optional_call(Expr* e, Type* expected) {
+        Expr* callee = e->callee;
+        Name v = ctx_.names.intern("?" + std::to_string(next_optional_call_++));
+        Expr* recv = ctx_.arena.make<Expr>();
+        recv->kind = ExprKind::name;
+        recv->span = callee->lhs->span;
+        std::vector<Name> parts{v};
+        recv->path.parts = ctx_.arena.copy(parts);
+        recv->path.span = recv->span;
+        Expr* f = ctx_.arena.make<Expr>();
+        f->kind = ExprKind::field;
+        f->span = callee->span;
+        f->lhs = recv;
+        f->member = callee->member;
+        Expr* call = ctx_.arena.make<Expr>(*e);
+        call->callee = f;
+        Pattern* p = ctx_.arena.make<Pattern>();
+        p->kind = PatternKind::binding;
+        p->span = callee->lhs->span;
+        p->name = v;
+        Block* then = ctx_.arena.make<Block>();
+        then->span = e->span;
+        then->tail = call;
+        Expr* none = ctx_.arena.make<Expr>();
+        none->kind = ExprKind::none_lit;
+        none->span = e->span;
+        Block* nothing = ctx_.arena.make<Block>();
+        nothing->span = e->span;
+        nothing->tail = none;
+        Expr* other = ctx_.arena.make<Expr>();
+        other->kind = ExprKind::block;
+        other->span = e->span;
+        other->block = nothing;
+        Expr* value = callee->lhs;
+        e->kind = ExprKind::if_;
+        e->callee = nullptr;
+        e->args = {};
+        e->trailing = nullptr;
+        e->let_pattern = p;
+        e->cond = value;
+        e->block = then;
+        e->else_ = other;
+        e->optional_call = true;
+        return check_if(e, expected, false);
+    }
+
+    // After `a?.m(args)`'s call is checked, as an `if let`'s first block, with its type `t`: the
+    // call in `some`, unless it's an optional already, which isn't wrapped again, and the `if`'s
+    // `else` without its `none` if the call gives `()`, so the call is made or isn't. The call's
+    // type, as the block gives it.
+    Type* optional_call_result(Expr* e, Type* t) {
+        if (t->kind == TypeKind::never || t->kind == TypeKind::optional) return t;
+        // After an error in the call, the `none` would be a second one, of a type it can't tell.
+        if (is_bad(t) || t->kind == TypeKind::unit) {
+            e->else_->block->tail = nullptr;
+            return t;
+        }
+        Expr* call = e->block->tail;
+        Expr* some = ctx_.arena.make<Expr>();
+        some->kind = ExprKind::call;
+        some->span = call->span;
+        Expr* name = ctx_.arena.make<Expr>();
+        name->kind = ExprKind::name;
+        name->span = call->span;
+        std::vector<Name> parts{ctx_.names.intern("some")};
+        name->path.parts = ctx_.arena.copy(parts);
+        name->path.span = call->span;
+        some->callee = name;
+        Arg a;
+        a.value = call;
+        a.span = call->span;
+        std::vector<Arg> args{a};
+        some->args = ctx_.arena.copy(args);
+        some->call = CallKind::some;
+        some->type = optional_type(t, call->span);
+        e->block->tail = some;
+        return some->type;
+    }
+
     // --- literals of structs and arrays ------------------------------------------------------
 
     Type* struct_literal(Expr* e, Type* expected) {
@@ -7327,6 +7419,10 @@ private:
             Type* vt = handled(e->cond);
             find_at_ = nullptr;
             if (vt->kind == TypeKind::never) vt = T.error;
+            if (e->optional_call && !is_bad(vt) && vt->kind != TypeKind::optional) {
+                error(e->span, "`?.` calls a method of an optional, but this is " + a_type(vt) + "; write `.`");
+                vt = T.error;
+            }
             Type* pt = vt;
             if (vt->kind == TypeKind::optional) {
                 e->let_unwraps = true;
@@ -7349,7 +7445,16 @@ private:
             }
             part_views_ = nullptr;
             if (root) hold_part_views(root, e->cond, what);
-            a = check_block(e->block, stmt ? nullptr : expected, stmt ? BlockUse::stmt : BlockUse::value);
+            if (e->optional_call) {
+                // The call's own type, which then says whether to wrap it.
+                Expr* outer = optional_call_;
+                optional_call_ = e;
+                Type* t = check_block(e->block, nullptr, BlockUse::value);
+                optional_call_ = outer;
+                a = optional_call_result(e, t);
+            } else {
+                a = check_block(e->block, stmt ? nullptr : expected, stmt ? BlockUse::stmt : BlockUse::value);
+            }
             if (root) release_part_views();
             if (root && pattern_ok && !is_bad(a)) part_views_changed(views, e->cond);
             pop_scope();
@@ -8610,12 +8715,7 @@ private:
                     return T.error;
             }
         }
-        if (callee->kind == ExprKind::optional_field) {
-            not_yet(callee->span, "`?.` method calls");
-            check(callee->lhs, nullptr);
-            check_args(e);
-            return T.error;
-        }
+        if (callee->kind == ExprKind::optional_field) return optional_call(e, expected);
         if (callee->kind == ExprKind::field && !callee->is_tuple_index && callee->lhs->kind == ExprKind::name &&
             callee->lhs->path.parts.size() == 1 && callee->lhs->path.parts[0] == n_Thread_ && !find_local(n_Thread_) &&
             !env_type(n_Thread_)) {
@@ -12230,6 +12330,8 @@ private:
     // The places the `for` loops around the code go over, outermost first.
     std::vector<LoopBorrow> loop_borrows_;
     std::uint32_t next_loop_ = 1;
+    std::uint32_t next_optional_call_ = 1;  // names `a?.m()`'s value, `?1`, `?2`, which code can't write
+    Expr* optional_call_ = nullptr;         // the `a?.m()` whose call is being checked, innermost
     bool pattern_var_ = false;  // the names a pattern binds are `var`s
     std::vector<std::unique_ptr<DPat>> pool_;
     // Generics.
