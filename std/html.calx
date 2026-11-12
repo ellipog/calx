@@ -1,8 +1,10 @@
 /// HTML text: escaping it, so it shows as it is, and reading the character references in it back,
-/// exactly as Python's `html.escape` and `html.unescape` do, with every name HTML5 has.
+/// exactly as Python's `html.escape` and `html.unescape` do, with every name HTML5 has; and HTML
+/// read into its tags, attributes, text and comments, exactly as Python's `html.parser` reads it.
 module std.html
 
 import std.text.entities.{LONGEST_BARE, NAMES, SLOTS, VALUES}
+import std.text.python.{is_space, lower}
 
 extern "C" {
     fn cx_bytes_find3(hay: *const u8, len: usize, from: usize, a: u8, b: u8, c: u8) -> usize
@@ -242,4 +244,642 @@ fn find(name: String) -> usize? {
         }
         s = (s + 1) % SLOTS.len()
     }
+}
+
+// --- Reading HTML -----------------------------------------------------------------------------
+//
+// `tokens` reads HTML as Python 3.14's `html.parser.HTMLParser` does, given the whole text with
+// `feed` and then `close`, with `convert_charrefs` on, as it is by default. Its regular expressions
+// are written out here as loops: `locatetagend` as `tag_end`, `tagfind_tolerant` as `name_end` and
+// `skip_gap`, and `attrfind_tolerant` as `attribute`, with the places where Python's engine
+// backtracks done by hand, in `value`.
+
+/// What `tokens` reads in HTML, in the order it's written.
+pub enum Token {
+    /// A start tag, such as `<a href="/">`, or `<br/>`, which ends in `/>`.
+    Start(Tag)
+    /// An end tag's name, lowercased: `a` for `</A>`.
+    End(String)
+    /// The text between tags, with its character references read back as `unescape` reads them,
+    /// except inside `script`, `style`, `xmp`, `iframe`, `noembed`, `noframes` and `plaintext`, whose
+    /// text is as it's written. Text next to text is one `Text`.
+    Text(String)
+    /// What's between `<!--` and `-->`, or in a bogus comment such as `<!x>` or `</1>`.
+    Comment(String)
+    /// What's between `<!` and `>` in a doctype, such as `DOCTYPE html`.
+    Declaration(String)
+    /// What's between `<?` and `>`, such as `xml version="1.0"?`.
+    Instruction(String)
+    /// What's between `<![CDATA[` and `]]>`.
+    Cdata(String)
+}
+
+/// A start tag, as `tokens` and `start_tags` read it.
+pub struct Tag {
+    /// Its name, lowercased as Python's `str.lower` does it, which [`std.text.python.lower`](text-python.md)
+    /// does: `link` for `<LINK>`.
+    pub name: String
+    /// Its attributes, in the order they're written, two of the same name too.
+    pub attrs: List<Attr>
+    /// Whether it ends in `/>`, as `<br/>` does: Python's `handle_startendtag`.
+    pub self_closing: bool
+}
+
+/// An attribute of a start tag.
+pub struct Attr {
+    /// Its name, lowercased.
+    pub name: String
+    /// Its value without its quotes and with its character references read back, or `none` for
+    /// one written without `=`, as `disabled` is in `<input disabled>`.
+    pub value: String?
+}
+
+impl Tag {
+    /// The value of the first attribute called `name`, which is lowercase, as a browser's
+    /// `getAttribute` gives it: `""` for one written without a value, and `none` if there's none.
+    /// Python's `dict(attrs)` keeps the last of two of the same name instead.
+    pub fn get(self, name: String) -> String? {
+        for a in self.attrs {
+            if a.name == name {
+                if let v = a.value {
+                    return some(v.copy())
+                }
+                return some(String())
+            }
+        }
+        return none
+    }
+}
+
+/// The HTML `html` as tokens, as Python's `html.parser.HTMLParser` reads it: each start tag with
+/// its attributes, end tag, text, comment, doctype, processing instruction and CDATA section, in
+/// order. Names are lowercased, and character references are read back in text and in values.
+/// Nothing in HTML is a mistake, so it always gives tokens: a tag left open at the end is left out.
+pub fn tokens(html: String) -> List<Token> {
+    var r = Reader { only_tags: false, tokens: List<Token>(), tags: List<Tag>() }
+    r.read(html)
+    return r.tokens
+}
+
+/// The start tags in `html`, as `tokens` reads them, without the rest.
+pub fn start_tags(html: String) -> List<Tag> {
+    var r = Reader { only_tags: true, tokens: List<Token>(), tags: List<Tag>() }
+    r.read(html)
+    return r.tags
+}
+
+// What Python's parser gives what it found to, with only the start tags kept or all of it.
+struct Reader {
+    only_tags: bool
+    tokens: List<Token>
+    tags: List<Tag>
+}
+
+// The elements whose text is read as it's written, up to their end tag, which Python calls CDATA
+// content and HTML5 raw text. `textarea` and `title` are read up to theirs too, but with their
+// references read back, RCDATA.
+fn raw_element(name: String) -> bool {
+    return name == "script" or name == "style" or name == "xmp" or name == "iframe" or name == "noembed" or
+        name == "noframes"
+}
+
+impl Reader {
+    fn read(mut self, text: String) {
+        let n = text.len()
+        // The element whose text is being read as text, or "" for none, and whether its
+        // references are read back. `plain` is `plaintext`, whose text goes to the end.
+        var inside = String()
+        var escapable = true
+        var plain = false
+        var i: usize = 0
+        while i < n {
+            var j = n
+            if inside.is_empty() {
+                j = match text[i..].find("<") {
+                    some(k) => i + k,
+                    none => n,
+                }
+            } else if not plain {
+                let close = end_of_raw(text, i, inside) else break
+                j = close
+            }
+            if i < j {
+                self.text(text[i..j], escapable)
+            }
+            i = j
+            if i == n {
+                break
+            }
+            let next = if i + 1 < n { text.byte_at(i + 1) } else { 0 }
+            var k: usize? = none
+            if letter(next) {
+                k = self.start_tag(text, i, mut inside, mut escapable, mut plain)
+            } else if next == b'/' {
+                k = self.end_tag(text, i)
+                if k != none {
+                    inside.clear()
+                    escapable = true
+                    plain = false
+                }
+            } else if text[i..].starts_with("<!--") {
+                k = self.comment(text, i)
+            } else if next == b'?' {
+                k = match find_from(text, i + 2, ">") {
+                    some(gt) => {
+                        self.push(Token.Instruction(text[i + 2..gt].copy()))
+                        some(gt + 1)
+                    },
+                    none => none,
+                }
+            } else if next == b'!' {
+                k = self.declaration(text, i)
+            } else {
+                self.text("<", false)
+                k = some(i + 1)
+            }
+            i = k ?? self.unfinished(text, i)
+        }
+        if i < n {
+            self.text(text[i..], escapable)
+        }
+    }
+
+    fn push(mut self, t: own Token) {
+        if not self.only_tags {
+            self.tokens.push(t)
+        }
+    }
+
+    // Text, read back or as it is, joined to text just before it. Text that's nothing once read
+    // back, such as `&#1;`, is left out.
+    fn text(mut self, part: String, escapable: bool) {
+        if self.only_tags {
+            return
+        }
+        let read = if escapable { unescape(part) } else { part.copy() }
+        if read.is_empty() {
+            return
+        }
+        if let last = self.tokens.pop() {
+            match last {
+                Text(before) => {
+                    var joined = before
+                    joined.push_str(read)
+                    self.tokens.push(Token.Text(joined))
+                    return
+                },
+                _ => self.tokens.push(last),
+            }
+        }
+        self.tokens.push(Token.Text(read))
+    }
+
+    // `<` and a letter at `at`: Python's `parse_starttag`. Where reading goes on, or `none` if the
+    // tag has no `>` to end it.
+    fn start_tag(mut self, text: String, at: usize, inside: mut String, escapable: mut bool, plain: mut bool) -> usize? {
+        let end = tag_end(text, at + 1)
+        if text.byte_at(end - 1) != b'>' {
+            return none
+        }
+        let name_to = name_end(text, at + 1)
+        let name = lower(text[at + 1..name_to])
+        var attrs = List<Attr>()
+        var k = skip_gap(text, name_to)
+        while k < end {
+            let next = attribute(text, k, mut attrs) else break
+            k = next
+        }
+        let rest = text[k..end]
+        let closing = stripped_is(rest, "/>")
+        if not closing and not stripped_is(rest, ">") {
+            self.text(text[at..end], false)
+            return some(end)
+        }
+        if not closing {
+            if name == "plaintext" {
+                plain = true
+                inside = name.copy()
+                escapable = false
+            } else if raw_element(name) {
+                inside = name.copy()
+                escapable = false
+            } else if name == "textarea" or name == "title" {
+                inside = name.copy()
+                escapable = true
+            }
+        }
+        let tag = Tag { name: name, attrs: attrs, self_closing: closing }
+        if self.only_tags {
+            self.tags.push(tag)
+        } else {
+            self.tokens.push(Token.Start(tag))
+        }
+        return some(end)
+    }
+
+    // `</` at `at`: Python's `parse_endtag`. Where reading goes on, or `none` if there's no `>`.
+    fn end_tag(mut self, text: String, at: usize) -> usize? {
+        let gt = find_from(text, at + 2, ">") else return none
+        let n = text.len()
+        if at + 2 >= n or not letter(text.byte_at(at + 2)) {
+            if text.byte_at(at + 2) == b'>' {
+                // `</>` is nothing.
+                return some(at + 3)
+            }
+            self.push(Token.Comment(text[at + 2..gt].copy()))
+            return some(gt + 1)
+        }
+        let end = tag_end(text, at + 2)
+        if text.byte_at(end - 1) != b'>' {
+            return none
+        }
+        self.push(Token.End(lower(text[at + 2..name_end(text, at + 2)])))
+        return some(end)
+    }
+
+    // `<!--` at `at`: Python's `parse_comment`. An empty comment ends at the first `>` or `->`, and
+    // any other at the first `-->` or `--!>`.
+    fn comment(mut self, text: String, at: usize) -> usize? {
+        let from = at + 4
+        let n = text.len()
+        if from < n and text.byte_at(from) == b'>' {
+            self.push(Token.Comment(String()))
+            return some(from + 1)
+        }
+        if text[from..].starts_with("->") {
+            self.push(Token.Comment(String()))
+            return some(from + 2)
+        }
+        var p = from
+        loop {
+            let dash = find_from(text, p, "--") else return none
+            if dash + 2 < n and text.byte_at(dash + 2) == b'>' {
+                self.push(Token.Comment(text[from..dash].copy()))
+                return some(dash + 3)
+            }
+            if text[dash + 2..].starts_with("!>") {
+                self.push(Token.Comment(text[from..dash].copy()))
+                return some(dash + 4)
+            }
+            p = dash + 1
+        }
+    }
+
+    // `<!` at `at`, not a comment: Python's `parse_html_declaration`, a CDATA section, a doctype
+    // or a bogus comment.
+    fn declaration(mut self, text: String, at: usize) -> usize? {
+        if text[at..].starts_with("<![CDATA[") {
+            let close = find_from(text, at + 9, "]]>") else return none
+            self.push(Token.Cdata(text[at + 9..close].copy()))
+            return some(close + 3)
+        }
+        if doctype(text, at) {
+            let gt = find_from(text, at + 9, ">") else return none
+            self.push(Token.Declaration(text[at + 2..gt].copy()))
+            return some(gt + 1)
+        }
+        let gt = find_from(text, at + 2, ">") else return none
+        self.push(Token.Comment(text[at + 2..gt].copy()))
+        return some(gt + 1)
+    }
+
+    // What Python's `goahead` makes of markup at `at` that the text ends inside, at `close`: the
+    // end of the text, where reading stops.
+    fn unfinished(mut self, text: String, at: usize) -> usize {
+        let n = text.len()
+        let rest = text[at..]
+        let next = if at + 1 < n { text.byte_at(at + 1) } else { 0 }
+        if letter(next) {
+            // A start tag with no end is left out.
+        } else if next == b'/' {
+            if at + 2 == n {
+                self.text("</", false)
+            } else if not letter(text.byte_at(at + 2)) {
+                self.push(Token.Comment(text[at + 2..].copy()))
+            }
+        } else if rest.starts_with("<!--") {
+            var j = n
+            let body = text[at + 4..]
+            if body.ends_with("--!") {
+                j -= 3
+            } else if body.ends_with("--") {
+                j -= 2
+            } else if body.ends_with("-") {
+                j -= 1
+            }
+            self.push(Token.Comment(text[at + 4..j].copy()))
+        } else if rest.starts_with("<![CDATA[") {
+            self.push(Token.Cdata(text[at + 9..].copy()))
+        } else if doctype(text, at) {
+            self.push(Token.Declaration(text[at + 2..].copy()))
+        } else if next == b'!' {
+            self.push(Token.Comment(text[at + 2..].copy()))
+        } else {
+            self.push(Token.Instruction(text[at + 2..].copy()))
+        }
+        return n
+    }
+}
+
+// [\t\n\r\f ], the white space between parts of a tag.
+fn space(c: u8) -> bool {
+    return c == b' ' or c == b'\n' or c == b'\t' or c == b'\r' or c == 0x0C
+}
+
+fn letter(c: u8) -> bool {
+    return (c >= b'a' and c <= b'z') or (c >= b'A' and c <= b'Z')
+}
+
+// Where a tag's name that starts at `at` ends: at white space, `/` or `>`.
+fn name_end(text: String, at: usize) -> usize {
+    let n = text.len()
+    var i = at + 1
+    while i < n {
+        let c = text.byte_at(i)
+        if space(c) or c == b'/' or c == b'>' {
+            break
+        }
+        i += 1
+    }
+    return i
+}
+
+// Past white space, and `/` not just before `>`: (?:[\t\n\r\f ]|/(?!>))*
+fn skip_gap(text: String, at: usize) -> usize {
+    let n = text.len()
+    var i = at
+    while i < n {
+        let c = text.byte_at(i)
+        if space(c) or (c == b'/' and not (i + 1 < n and text.byte_at(i + 1) == b'>')) {
+            i += 1
+        } else {
+            break
+        }
+    }
+    return i
+}
+
+// Past white space and `/`: [\t\n\r\f /]*
+fn skip_space_slash(text: String, at: usize) -> usize {
+    let n = text.len()
+    var i = at
+    while i < n and (space(text.byte_at(i)) or text.byte_at(i) == b'/') {
+        i += 1
+    }
+    return i
+}
+
+// Whether an attribute's name can start at `at`, as Python's lookbehind says: after a quote, white
+// space or `/`, and not at white space, `/` or `>`.
+fn attribute_starts(text: String, at: usize) -> bool {
+    if at >= text.len() {
+        return false
+    }
+    let c = text.byte_at(at)
+    if space(c) or c == b'/' or c == b'>' {
+        return false
+    }
+    let before = text.byte_at(at - 1)
+    return before == b'\'' or before == b'"' or before == b'/' or space(before)
+}
+
+// Where an attribute's name that starts at `at` ends: at white space, `/`, `=` or `>`.
+fn attribute_name_end(text: String, at: usize) -> usize {
+    let n = text.len()
+    var i = at + 1
+    while i < n {
+        let c = text.byte_at(i)
+        if space(c) or c == b'/' or c == b'=' or c == b'>' {
+            break
+        }
+        i += 1
+    }
+    return i
+}
+
+// An attribute's `=` and value from `at`, just after its name:
+//     [\t\n\r\f ]*=[\t\n\r\f ]*('[^']*'|"[^"]*"|(?!['"])[^>\t\n\r\f ]*)
+// as Python's engine matches it: where the value starts and ends, with its quotes, or `none` if no
+// `=` follows. A quote that's never closed fails to match there, so the engine gives back a space
+// after the `=`, if it took one, and the value is the empty one before it.
+fn value_span(text: String, at: usize) -> (usize, usize)? {
+    let n = text.len()
+    var i = at
+    while i < n and space(text.byte_at(i)) {
+        i += 1
+    }
+    if i >= n or text.byte_at(i) != b'=' {
+        return none
+    }
+    i += 1
+    let after = i
+    while i < n and space(text.byte_at(i)) {
+        i += 1
+    }
+    if i < n {
+        let q = text.byte_at(i)
+        if q == b'\'' or q == b'"' {
+            if let close = find_from(text, i + 1, if q == b'"' { "\"" } else { "'" }) {
+                return some((i, close + 1))
+            }
+            if i > after {
+                return some((i - 1, i - 1))
+            }
+            return none
+        }
+    }
+    let start = i
+    while i < n and text.byte_at(i) != b'>' and not space(text.byte_at(i)) {
+        i += 1
+    }
+    return some((start, i))
+}
+
+// Where Python's `locatetagend` stops from `at`, a tag's name: past the name, each attribute and
+// the `>` that ends the tag, if it's there.
+fn tag_end(text: String, at: usize) -> usize {
+    let n = text.len()
+    var i = skip_space_slash(text, name_end(text, at))
+    while attribute_starts(text, i) {
+        i = attribute_name_end(text, i)
+        if let (_, end) = value_span(text, i) {
+            i = end
+        }
+        i = skip_space_slash(text, i)
+    }
+    if i < n and text.byte_at(i) == b'>' {
+        i += 1
+    }
+    return i
+}
+
+// The attribute at `at`, as Python's `attrfind_tolerant` matches it, added to `attrs`: where the
+// next one can start, or `none` if none starts here.
+fn attribute(text: String, at: usize, attrs: mut List<Attr>) -> usize? {
+    if not attribute_starts(text, at) {
+        return none
+    }
+    let name_to = attribute_name_end(text, at)
+    let name = lower(text[at..name_to])
+    let (start, end) = value_span(text, name_to) else {
+        attrs.push(Attr { name: name, value: none })
+        return some(skip_gap(text, name_to))
+    }
+    var from = start
+    var to = end
+    if to > from and (text.byte_at(from) == b'"' or text.byte_at(from) == b'\'') {
+        from += 1
+        to -= 1
+    }
+    let v = if to > from { attribute_value(text[from..to]) } else { String() }
+    attrs.push(Attr { name: name, value: some(v) })
+    return some(skip_gap(text, end))
+}
+
+// An attribute's value with its references read back, as Python's `_unescape_attrvalue` reads
+// them, which is as HTML5 reads them in a value: `&#...` always, and a name only if it's one of
+// HTML5's names whole, with or without `;` as the list has it, and not followed by `=`. So
+// `&amp;`, `&amp` and `&#38` are `&`, but `&ampx`, `&amp=` and `&notin` stay as they are.
+fn attribute_value(v: String) -> String {
+    let first = v.find("&") else return v.copy()
+    var out = String()
+    out.reserve(v.len())
+    out.push_str(v[..first])
+    let n = v.len()
+    var i = first
+    while i < n {
+        let c = v.byte_at(i)
+        if c != b'&' {
+            let next = match v[i..].find("&") {
+                some(k) => i + k,
+                none => n,
+            }
+            out.push_str(v[i..next])
+            i = next
+            continue
+        }
+        if i + 1 < n and v.byte_at(i + 1) == b'#' {
+            i = numeric(v, i, mut out)
+            continue
+        }
+        if i + 1 < n and letter(v.byte_at(i + 1)) {
+            var j = i + 2
+            while j < n and (letter(v.byte_at(j)) or (v.byte_at(j) >= b'0' and v.byte_at(j) <= b'9')) {
+                j += 1
+            }
+            if j < n and v.byte_at(j) == b'=' {
+                out.push_str(v[i..j + 1])
+                i = j + 1
+                continue
+            }
+            if j < n and v.byte_at(j) == b';' {
+                j += 1
+            }
+            match find(v[i + 1..j]) {
+                some(k) => out.push_str(VALUES[k]),
+                none => out.push_str(v[i..j]),
+            }
+            i = j
+            continue
+        }
+        out.push('&')
+        i += 1
+    }
+    return out
+}
+
+// Whether `rest` is `want` once the white space at its ends is taken off, as Python's `str.strip`
+// takes it.
+fn stripped_is(rest: String, want: str) -> bool {
+    var start = rest.len()
+    var end: usize = 0
+    var at: usize = 0
+    for r in rest.runes() {
+        let size = utf8_size(u32(r))
+        if not is_space(u32(r)) {
+            if start == rest.len() {
+                start = at
+            }
+            end = at + size
+        }
+        at += size
+    }
+    if start >= end {
+        return want.is_empty()
+    }
+    return rest[start..end] == want
+}
+
+fn utf8_size(r: u32) -> usize {
+    if r < 0x80 {
+        return 1
+    }
+    if r < 0x800 {
+        return 2
+    }
+    if r < 0x10000 {
+        return 3
+    }
+    return 4
+}
+
+// Whether `<!doctype` starts at `at`, in any case.
+fn doctype(text: String, at: usize) -> bool {
+    if at + 9 > text.len() {
+        return false
+    }
+    let want = "<!doctype"
+    for k in 0usize..9 {
+        var c = text.byte_at(at + k)
+        if c >= b'A' and c <= b'Z' {
+            c += 32
+        }
+        if c != want.byte_at(k) {
+            return false
+        }
+    }
+    return true
+}
+
+// Where `needle` is first in `text` from `from`, if it is.
+fn find_from(text: String, from: usize, needle: str) -> usize? {
+    if from > text.len() {
+        return none
+    }
+    let k = text[from..].find(needle) else return none
+    return some(from + k)
+}
+
+// Where the end tag of the raw text element `name` starts, from `at`: `</` and its name in any
+// case, then white space, `/` or `>`, as Python's `set_cdata_mode` looks for it. `none` if there's
+// none, and the rest is its text.
+fn end_of_raw(text: String, at: usize, name: String) -> usize? {
+    let n = text.len()
+    let m = name.len()
+    var p = at
+    loop {
+        let open = find_from(text, p, "</") else return none
+        let after = open + 2 + m
+        if after < n and space_slash_gt(text.byte_at(after)) {
+            var same = true
+            for k in 0..m {
+                var c = text.byte_at(open + 2 + k)
+                if c >= b'A' and c <= b'Z' {
+                    c += 32
+                }
+                if c != name.byte_at(k) {
+                    same = false
+                    break
+                }
+            }
+            if same {
+                return some(open)
+            }
+        }
+        p = open + 1
+    }
+}
+
+fn space_slash_gt(c: u8) -> bool {
+    return space(c) or c == b'/' or c == b'>'
 }

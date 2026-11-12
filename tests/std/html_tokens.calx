@@ -1,0 +1,84 @@
+// std.html.tokens and start_tags: HTML read as Python 3.14's html.parser reads it, attributes in
+// every form, the elements whose text is raw, comments, doctypes, CDATA, and markup the text ends
+// inside (CLX-321). tools/html/check.calx checks the same against Python itself.
+import std.html.{Tag, Token, start_tags, tokens}
+
+fn attrs(tag: Tag) -> String {
+    var out = String()
+    for a in tag.attrs {
+        out.push(' ')
+        out.push_str(a.name)
+        if let v = a.value {
+            out.push_str("=[{v}]")
+        }
+    }
+    return out
+}
+
+fn show(html: String) {
+    var line = String()
+    for t in tokens(html) {
+        if not line.is_empty() {
+            line.push_str(" | ")
+        }
+        line.push_str(match t {
+            Start(tag) => "<{tag.name}{attrs(tag)}{if tag.self_closing { "/" } else { "" }}>",
+            End(name) => "</{name}>",
+            Text(s) => "text[{s}]",
+            Comment(s) => "comment[{s}]",
+            Declaration(s) => "decl[{s}]",
+            Instruction(s) => "pi[{s}]",
+            Cdata(s) => "cdata[{s}]",
+        })
+    }
+    println(line)
+}
+
+fn main() {
+    // Attributes: quoted either way or not, without a value, names lowercased, across lines.
+    show("<A HREF=\"/x\" rel='icon me' sizes=16x16 hidden\n  data-x = \"a>b\"/>")    // out: <a href=[/x] rel=[icon me] sizes=[16x16] hidden data-x=[a>b]/>
+    // An unquoted value runs to white space or `>`, so a slash before `>` is in it.
+    show("<a b=c/><a b=''>")    // out: <a b=[c/]> | <a b=[]>
+    // References in values: numbers always, names only whole and not before `=`.
+    show("<a t=\"&amp;&amp &ampx &amp=1 &notin &notin; &#38 &#x26;\">")    // out: <a t=[&& &ampx &amp=1 &notin ∉ & &]>
+    // Two of the same name are both kept; `get` gives the first, "" for one without a value.
+    let tags = start_tags("<input id=a ID=b disabled>")
+    println("{tags[0].attrs.len()} {tags[0].get("id")} {tags[0].get("disabled")} {tags[0].get("nope")}")    // out: 3 some(a) some() none
+    // Text has its references read back, and text next to text is one token.
+    show("caf&eacute; a < b &copy2024 &#1;")    // out: text[café a < b ©2024 ]
+    // Raw text: as written up to its end tag, in any case, with white space or `/` after the name.
+    show("<script>if (a<b && c) x = '&amp;'</SCRIPT ><style>p</stylex></style>")    // out: <script> | text[if (a<b && c) x = '&amp;'] | </script> | <style> | text[p</stylex>] | </style>
+    // `textarea` and `title` are read to their end tag too, but with their references read back.
+    show("<title>A &amp; <b>B</b></title>")    // out: <title> | text[A & <b>B</b>] | </title>
+    // `plaintext` has no end: everything after it is its text.
+    show("<plaintext><a>&amp;</plaintext>")    // out: <plaintext> | text[<a>&amp;</plaintext>]
+    // A raw text element that closes itself, as `<script/>`, has no text: Python goes on as usual.
+    show("<script/><b>x</b>")    // out: <script/> | <b> | text[x] | </b>
+    // Comments, empty ones closed early, and bogus ones.
+    show("<!-- a -- b --><!--><!---><!--x--!><!x y><?php echo 1 ?></1></>")    // out: comment[ a -- b ] | comment[] | comment[] | comment[x] | comment[x y] | pi[php echo 1 ?] | comment[1]
+    show("<!doctype html><![CDATA[a<b]]>")    // out: decl[doctype html] | cdata[a<b]
+    // Markup the text ends inside: a tag is left out, a comment ends there.
+    show("x<a href=\"y")    // out: text[x]
+    show("<!-- open --")    // out: comment[ open ]
+    show("a</")    // out: text[a</]
+    show("<![CDATA[open")    // out: cdata[open]
+    // A capital sigma lowercases as Python's `str.lower` does.
+    show("<aΣ x7Σ=1>")    // out: <aς x7σ=[1]>
+    // start_tags: a page's icons, as a dashboard reads them.
+    let page = "<head><LINK rel=icon href='/favicon.svg' type=image/svg+xml><link rel=\"apple-touch-icon\" sizes=180x180 href=/apple.png></head>"
+    for tag in start_tags(page) {
+        if tag.name == "link" and (tag.get("rel") ?? String()).contains("icon") {
+            println("{tag.get("href") ?? String()} {tag.get("type") ?? String("-")} {tag.get("sizes") ?? String("-")}")
+        }
+    }
+    // out: /favicon.svg image/svg+xml -
+    // out: /apple.png - 180x180
+    println("{tokens("").len()} {start_tags("just text").len()}")    // out: 0 0
+    let br = tokens("<br>")
+    match br[0] {
+        Start(tag) => println("{tag.name == "br"} {tag == Tag { name: String("br"), attrs: [], self_closing: false }}"),    // out: true true
+        _ => println("not a start tag"),
+    }
+    let p = tokens("</p>")
+    println("{p[0] == Token.End(String("p"))}")    // out: true
+}

@@ -1,0 +1,279 @@
+// Checks std.html's `tokens` against Python's html.parser on random markup (CLX-321).
+//
+//     calx run --release tools/html/check.calx -- [--python PATH] [--parser DIR] [--seed N] [--count N] [--page FILE]...
+//
+// It makes `count` random texts of tags, attributes in every kind of quote, comments, doctypes,
+// processing instructions, CDATA sections, the elements whose text is raw, character references,
+// white space Python's `strip` takes and the regular expressions don't, and names that aren't
+// ASCII; and pieces of them, cut off anywhere. reference.py reads each with HTMLParser, and this
+// file with `tokens`, and every text's tokens must be the same. Python is `py` on Windows and
+// `python3` elsewhere unless --python says. std.html follows Python 3.14, so with an older Python,
+// --parser names a folder holding CPython 3.14's html/parser.py and _markupbase.py.
+// Each --page adds a file's text, such as a page saved from the web, to the texts checked.
+import std.env
+import std.fs
+import std.html.{Token, tokens}
+import std.json
+import std.json.{Json}
+import std.path
+import std.process
+import std.process.{Command, current_exe}
+import std.random.{Random}
+
+fn stop(why: String) {
+    eprintln("html check: {why}")
+    process.exit(2)
+}
+
+const PIECES: [str; 70] = ["<", ">", "</", "/>", "/", "<!--", "-->", "--!>", "->", "-", "--", "<!", "<?", "?>", "<![CDATA[", "]]>",
+    "<!DOCTYPE html>", "<!doctype", "<!DocType x", "=", "'", "\"", " ", "\t", "\n", "\r", "\u{c}", "\u{b}", "\u{0}", "&", "&amp;",
+    "&amp", "&ampx", "&amp=", "&lt", "&notin", "&notin;", "&#65", "&#x41;", "&#xZ", "&#", "&#150;", "&#0;", "&#1114112;",
+    "&copy2024", "&#x", "é", "\u{a0}", "\u{2028}", "\u{1680}", "\u{3000}", "\u{1c}", "\u{85}", "\u{130}", "Σ", "ΑΣ", "\u{212a}",
+    "😀", "x", "Y", "7", ";", "!", "?", "[", "]", "</script", "</SCRIPT>", "</title >", "text"]
+
+const NAMES: [str; 30] = ["a", "A", "div", "br", "p", "script", "SCRIPT", "Script", "style", "textarea", "title", "TITLE",
+    "plaintext", "xmp", "iframe", "noembed", "noframes", "noscript", "link", "LINK", "img", "x-y", "a:b", "dİv", "ΑΣ", "aΣb",
+    "k\u{212a}", "é", "a\u{a0}", "h1"]
+
+const ATTRS: [str; 20] = ["href", "HREF", "rel", "x-y", "data-ä", "a", "=", "==x", "'q'", "\"q", "b/c", "İd", "ΣΑΣ", "src",
+    "sizes", "type", "media", "disabled", "x\u{a0}", "on"]
+
+const VALUES: [str; 22] = ["/x.svg", "icon", "a b", "", "&amp;", "&amp", "&ampx", "&amp=x", "&notin;", "&notin", "&#38;",
+    "&#x26", "&#65=", "a>b", "a'b", "a\"b", "&lt;&gt", "é&eacute", "&#0;", "x/", "&", "&#xD800;"]
+
+const GAPS: [str; 8] = [" ", "  ", "\t", "\n", "\r\n", "\u{c}", " / ", "/"]
+
+fn piece(r: mut Random) -> str {
+    return PIECES[r.index(PIECES.len())]
+}
+
+fn name(r: mut Random) -> str {
+    return NAMES[r.index(NAMES.len())]
+}
+
+fn attr(r: mut Random) -> str {
+    return ATTRS[r.index(ATTRS.len())]
+}
+
+fn value(r: mut Random) -> str {
+    return VALUES[r.index(VALUES.len())]
+}
+
+fn gap(r: mut Random) -> str {
+    return GAPS[r.index(GAPS.len())]
+}
+
+// A start tag, mostly well formed, with a few attributes.
+fn start_tag(r: mut Random) -> String {
+    var s = String("<")
+    s.push_str(name(mut r))
+    let n = r.index(4)
+    for _ in 0..n {
+        s.push_str(gap(mut r))
+        s.push_str(attr(mut r))
+        let how = r.index(8)
+        if how == 0 {
+            continue
+        }
+        if r.index(4) == 0 {
+            s.push_str(gap(mut r))
+        }
+        s.push('=')
+        if r.index(4) == 0 {
+            s.push_str(gap(mut r))
+        }
+        let v = value(mut r)
+        if how <= 3 {
+            s.push('"')
+            s.push_str(v)
+            s.push('"')
+        } else if how <= 5 {
+            s.push('\'')
+            s.push_str(v)
+            s.push('\'')
+        } else {
+            s.push_str(v)
+        }
+    }
+    if r.index(3) == 0 {
+        s.push_str(gap(mut r))
+    }
+    s.push_str(if r.index(4) == 0 { "/>" } else { ">" })
+    return s
+}
+
+fn case(r: mut Random) -> String {
+    var s = String()
+    let parts = 1 + r.index(24)
+    for _ in 0..parts {
+        let what = r.index(10)
+        if what < 4 {
+            s.push_str(piece(mut r))
+        } else if what < 7 {
+            s.push_str(start_tag(mut r))
+        } else if what == 7 {
+            s.push_str("</")
+            s.push_str(name(mut r))
+            if r.coin() {
+                s.push_str(gap(mut r))
+            }
+            s.push('>')
+        } else if what == 8 {
+            s.push_str(value(mut r))
+        } else {
+            s.push_str(attr(mut r))
+        }
+    }
+    // Cut off a few anywhere, so every kind of markup is left unfinished at the end.
+    if r.index(4) == 0 and s.len() > 1 {
+        var cut = r.index(s.len())
+        while cut > 0 and (s.byte_at(cut) & 0xC0) == 0x80 {
+            cut -= 1
+        }
+        s.truncate(cut)
+    }
+    return s
+}
+
+fn str_json(s: String) -> Json {
+    return Json.Str(s.copy())
+}
+
+fn token_json(t: Token) -> Json {
+    var a = List<Json>()
+    match t {
+        Start(tag) => {
+            a.push(str_json("start"))
+            a.push(str_json(tag.name))
+            var attrs = List<Json>()
+            for at in tag.attrs {
+                var pair = List<Json>()
+                pair.push(str_json(at.name))
+                pair.push(match at.value {
+                    some(v) => str_json(v),
+                    none => Json.Null,
+                })
+                attrs.push(Json.Array(pair))
+            }
+            a.push(Json.Array(attrs))
+            a.push(Json.Bool(tag.self_closing))
+        },
+        End(tag) => {
+            a.push(str_json("end"))
+            a.push(str_json(tag))
+        },
+        Text(s) => {
+            a.push(str_json("text"))
+            a.push(str_json(s))
+        },
+        Comment(s) => {
+            a.push(str_json("comment"))
+            a.push(str_json(s))
+        },
+        Declaration(s) => {
+            a.push(str_json("decl"))
+            a.push(str_json(s))
+        },
+        Instruction(s) => {
+            a.push(str_json("pi"))
+            a.push(str_json(s))
+        },
+        Cdata(s) => {
+            a.push(str_json("cdata"))
+            a.push(str_json(s))
+        },
+    }
+    return Json.Array(a)
+}
+
+fn ours(html: String) -> String {
+    var all = List<Json>()
+    for t in tokens(html) {
+        all.push(token_json(t))
+    }
+    return "{Json.Array(all)}"
+}
+
+fn main() {
+    let a = env.args()
+    var python = String(if env.os() == "windows" { "py" } else { "python3" })
+    var parser = String()
+    var seed: u64 = 1
+    var count: usize = 20000
+    var pages = List<String>()
+    var k: usize = 0
+    while k < a.len() {
+        if a[k] == "--python" and k + 1 < a.len() {
+            python = a[k + 1].copy()
+            k += 2
+        } else if a[k] == "--parser" and k + 1 < a.len() {
+            parser = a[k + 1].copy()
+            k += 2
+        } else if a[k] == "--seed" and k + 1 < a.len() {
+            seed = u64.parse(a[k + 1].copy()) ?? 1
+            k += 2
+        } else if a[k] == "--count" and k + 1 < a.len() {
+            count = usize.wrap(u64.parse(a[k + 1].copy()) ?? 20000)
+            k += 2
+        } else if a[k] == "--page" and k + 1 < a.len() {
+            match fs.read_text(a[k + 1].copy()) {
+                ok(some(text)) => pages.push(text),
+                ok(none) => stop("{a[k + 1]} isn't UTF-8"),
+                err(e) => stop("reading {a[k + 1]}: {e}"),
+            }
+            k += 2
+        } else {
+            stop("usage: calx run --release tools/html/check.calx -- [--python PATH] [--parser DIR] [--seed N] [--count N] [--page FILE]...")
+        }
+    }
+    let here = path.parent_dir(env.script() ?? current_exe()) ?? String(".")
+    var r = Random.new(seed)
+    var cases = List<String>()
+    for _ in 0..count {
+        cases.push(case(mut r))
+    }
+    for p in pages {
+        cases.push(p.copy())
+    }
+    var data = List<u8>()
+    for c in cases {
+        data.extend("{str_json(c)}\n".to_bytes())
+    }
+    var args: List<String> = [String("-I"), "{here}/reference.py"]
+    if not parser.is_empty() {
+        args.push(parser.copy())
+    }
+    let o = match Command.new(python.copy()).args(args).input(data).output() {
+        ok(o) => o,
+        err(e) => {
+            stop("Python: {e}")
+            return
+        },
+    }
+    if not o.status.success() {
+        stop("Python {o.status}:\n{o.error_text()}")
+    }
+    let want = (String.from_utf8(o.stdout) ?? String()).lines()
+    var wrong: usize = 0
+    for i in 0..cases.len() {
+        let w = if i < want.len() {
+            match json.parse(want[i]) {
+                ok(v) => "{v}",
+                err(e) => "(not JSON: {e})",
+            }
+        } else {
+            String("(nothing)")
+        }
+        let g = ours(cases[i])
+        if w != g {
+            wrong += 1
+            if wrong <= 20 {
+                println("{str_json(cases[i])}\n    Python {w}\n    Calx   {g}")
+            }
+        }
+    }
+    println("{cases.len()} texts: {wrong} different")
+    if wrong > 0 {
+        process.exit(1)
+    }
+}

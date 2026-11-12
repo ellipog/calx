@@ -29,6 +29,8 @@
 // - JAVA_ALNUM, the runes up to U+FFFF for which Java's `Character.isAlphabetic` or `isDigit` is
 //   true, for std.nbt's FTB SNBT, which checks each UTF-16 unit: the letters, letter numbers,
 //   Other_Alphabetic and the decimal digits.
+// - PY_CASED and PY_CASE_IGNORABLE, the runes DerivedCoreProperties.txt says are Cased and
+//   Case_Ignorable, which CPython reads for the final sigma in `str.lower`, for std.text.python.
 import std.env
 import std.fs
 import std.http
@@ -423,12 +425,30 @@ fn main() {
     let py_spaces = ranges(py_space)
     let py_print = ranges(is_print)
 
+    // Cased and Case_Ignorable, as CPython's makeunicodedata.py reads them.
+    let derived = rows(ucd_file(cache.copy(), String("DerivedCoreProperties.txt")))
+    var cased: List<bool> = [false; size]
+    for s in property(derived, "Cased") {
+        for c in s.0..(s.1 + 1) {
+            cased[usize(c)] = true
+        }
+    }
+    var ignorable: List<bool> = [false; size]
+    for s in property(derived, "Case_Ignorable") {
+        for c in s.0..(s.1 + 1) {
+            ignorable[usize(c)] = true
+        }
+    }
+    let py_cased = ranges(cased)
+    let py_ignorable = ranges(ignorable)
+
     let dir = "{root}/std/text/ucd"
     let parts: List<String> = [
         String("/// Tables from the Unicode Character Database, for `std.regex`: the runes `\\w`, `\\d` and `\\s`"),
         String("/// match, and simple case folding; for std.textwrap, Python's `str.isalnum`; and for `Regex.python`"),
         String("/// and std.json.schema, the case mappings, `str.isspace` and `str.isprintable` of Python's `re` and `repr`;"),
-        String("/// and for std.nbt, the runes Java's `isAlphabetic` or `isDigit` is true for."),
+        String("/// for std.text.python's `lower`, Cased and Case_Ignorable; and for std.nbt, the runes Java's"),
+        String("/// `isAlphabetic` or `isDigit` is true for."),
         "/// Written by tools/unicode/gen_ucd.calx from Unicode {VERSION}; don't edit by hand.",
         String("module std.text.ucd"),
         String(),
@@ -445,9 +465,11 @@ fn main() {
         table(dir, "PY_UPPER_TO", "The rune `PY_UPPER_FROM[i]` uppers to.", upper_to),
         table(dir, "PY_SPACE", "The runes Python's `str.isspace` is true for, as ranges.", flat(py_spaces)),
         table(dir, "PY_PRINT", "The runes Python's `str.isprintable` is true for, as ranges.", flat(py_print)),
+        table(dir, "PY_CASED", "The runes that are Cased, as ranges.", flat(py_cased)),
+        table(dir, "PY_CASE_IGNORABLE", "The runes that are Case_Ignorable, as ranges.", flat(py_ignorable)),
         table(dir, "JAVA_ALNUM", "The runes up to U+FFFF Java's `Character.isAlphabetic` or `isDigit` is true for, as ranges.", flat(java)),
     ]
     let out = "{root}/std/text/ucd.calx"
     fs.write_text(out.copy(), parts.join("\n"))!
-    println("{out}: {word.len()} word ranges, {digit.len()} digit, {space.len()} space, {alnum.len()} alnum, {pairs.len()} folds, {lower_from.len()} lower, {upper_from.len()} upper, {py_spaces.len()} py space, {py_print.len()} printable, {java.len()} java alnum")
+    println("{out}: {word.len()} word ranges, {digit.len()} digit, {space.len()} space, {alnum.len()} alnum, {pairs.len()} folds, {lower_from.len()} lower, {upper_from.len()} upper, {py_spaces.len()} py space, {py_print.len()} printable, {py_cased.len()} cased, {py_ignorable.len()} case-ignorable, {java.len()} java alnum")
 }

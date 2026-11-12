@@ -1,7 +1,8 @@
 /// Tables from the Unicode Character Database, for `std.regex`: the runes `\w`, `\d` and `\s`
 /// match, and simple case folding; for std.textwrap, Python's `str.isalnum`; and for `Regex.python`
 /// and std.json.schema, the case mappings, `str.isspace` and `str.isprintable` of Python's `re` and `repr`;
-/// and for std.nbt, the runes Java's `isAlphabetic` or `isDigit` is true for.
+/// for std.text.python's `lower`, Cased and Case_Ignorable; and for std.nbt, the runes Java's
+/// `isAlphabetic` or `isDigit` is true for.
 /// Written by tools/unicode/gen_ucd.calx from Unicode 16.0.0; don't edit by hand.
 module std.text.ucd
 
@@ -127,6 +128,16 @@ pub const PY_SPACE_LEN: usize = 20
 pub const PY_PRINT: [u32; 1472] = embed("ucd/py_print.bin")
 /// How many numbers `PY_PRINT` holds.
 pub const PY_PRINT_LEN: usize = 1472
+
+/// The runes that are Cased, as ranges.
+pub const PY_CASED: [u32; 318] = embed("ucd/py_cased.bin")
+/// How many numbers `PY_CASED` holds.
+pub const PY_CASED_LEN: usize = 318
+
+/// The runes that are Case_Ignorable, as ranges.
+pub const PY_CASE_IGNORABLE: [u32; 904] = embed("ucd/py_case_ignorable.bin")
+/// How many numbers `PY_CASE_IGNORABLE` holds.
+pub const PY_CASE_IGNORABLE_LEN: usize = 904
 
 /// The runes up to U+FFFF Java's `Character.isAlphabetic` or `isDigit` is true for, as ranges.
 pub const JAVA_ALNUM: [u32; 872] = embed("ucd/java_alnum.bin")
