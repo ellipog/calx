@@ -387,43 +387,25 @@ done:
     ReleaseSRWLockExclusive(&trace_lock);
 }
 
-#elif defined(__APPLE__)
-
-/* macOS, until its traces read the dSYM's DWARF (CLX-278): each frame's name from dladdr, without
- * a line, so a panic's trace has no frames to show yet. */
-#include <dlfcn.h>
-#include <execinfo.h>
-#include <pthread.h>
-#include <unistd.h>
-
-static pthread_mutex_t trace_lock = PTHREAD_MUTEX_INITIALIZER;
-
-static void found_frames(found* f) {
-    void* frames[MAX_FRAMES];
-    int n = backtrace(frames, MAX_FRAMES);
-    name_frames(f, frames, n);
-}
-
-static void name_frames(found* f, void* const* frames, int n) {
-    pthread_mutex_lock(&trace_lock);
-    if (!getcwd(f->cwd, sizeof f->cwd)) f->cwd[0] = 0;
-    for (int i = 0; i < n; i++) {
-        Dl_info info;
-        if (dladdr((const char*)frames[i] - 1, &info) && info.dli_sname) frame(f, info.dli_sname, "", 0);
-    }
-    pthread_mutex_unlock(&trace_lock);
-}
-
 #else
 
-#include <elf.h>
+/* Linux and macOS read the DWARF clang writes: on Linux from the ELF file itself, on macOS from
+ * the file dsymutil gathers it into beside the program (CLX-278), as its linker leaves it in the
+ * objects. The reader is the same; only finding the sections and the load address differ. */
 #include <execinfo.h>
 #include <fcntl.h>
-#include <link.h>
 #include <pthread.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <dlfcn.h>
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
+#else
+#include <elf.h>
+#include <link.h>
+#endif
 
 static pthread_mutex_t trace_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -1106,9 +1088,40 @@ static int inline_levels(const dwarf* d, cx_u64 at, level* levels, line_header* 
     return 0;
 }
 
+/* The frames at `at`, an address as the DWARF gives them, in the function `name`: the call inlined
+ * innermost at the line the table gives, and each call out from it at the line it was called
+ * from. With `dwarf_name`, or no `name`, the function's own name is the one its DWARF gives, as
+ * macOS's nearest symbol may be another function's. One with no line is kept for its name, such
+ * as a frame in the runtime. */
+static void dwarf_frames(found* f, const dwarf* d, cx_u64 at, const char* name, int dwarf_name) {
+    char path[4096];
+    cx_u64 line;
+    if (!find_line(d, at, path, sizeof path, &line)) {
+        if (name && *name) frame(f, name, "", 0);
+        return;
+    }
+    level levels[MAX_INLINED];
+    line_header h;
+    int depth = d->info.p ? inline_levels(d, at, levels, &h) : 0;
+    if (depth > 0 && levels[0].name && (dwarf_name || !name)) name = levels[0].name;
+    if (!name) name = "";
+    if (depth <= 1) {
+        frame(f, name, path, line);
+    } else {
+        frame(f, levels[depth - 1].name ? levels[depth - 1].name : "", path, line);
+        for (int j = depth - 1; j >= 1; j--) {
+            char call[4096];
+            file_path(&h, levels[j].call_file, call, sizeof call);
+            const char* outer = levels[j - 1].name ? levels[j - 1].name : (j == 1 ? name : "");
+            frame(f, outer, call, levels[j].call_line);
+        }
+    }
+    if (depth > 0) free_header(&h);
+}
+
 /* A program, or a library it opened (D123), mapped to read its symbols and line tables. */
 typedef struct {
-    uintptr_t base; /* where the system loaded it */
+    uintptr_t base; /* where the system loaded it: on macOS, how far from where it was linked */
     const cx_u8* image;
     size_t size;
     span symtab, strtab;
@@ -1116,6 +1129,164 @@ typedef struct {
 } object;
 
 #define MAX_OBJECTS 8
+
+static void found_frames(found* f) {
+    void* frames[MAX_FRAMES];
+    int n = backtrace(frames, MAX_FRAMES);
+    name_frames(f, frames, n);
+}
+
+#ifdef __APPLE__
+
+/* A Mach-O section's name fills 16 bytes, with no 0 after it when it's that long. */
+static int section_is(const char* name, const char* want) {
+    size_t n = strlen(want);
+    return n <= 16 && strncmp(name, want, n) == 0 && (n == 16 || name[n] == 0);
+}
+
+/* The 64-bit Mach-O image at `image`, of `size` bytes: its load commands, or NULL. */
+static const struct load_command* first_command(const cx_u8* image, size_t size, uint32_t* count, const cx_u8** end) {
+    const struct mach_header_64* mh = (const struct mach_header_64*)image;
+    if (size < sizeof *mh || mh->magic != MH_MAGIC_64 || mh->sizeofcmds > size - sizeof *mh) return NULL;
+    *count = mh->ncmds;
+    *end = image + sizeof *mh + mh->sizeofcmds;
+    return (const struct load_command*)(image + sizeof *mh);
+}
+
+/* The next load command after `lc`, or NULL past the last or a malformed one. */
+static const struct load_command* next_command(const struct load_command* lc, const cx_u8* end) {
+    const cx_u8* p = (const cx_u8*)lc;
+    if ((size_t)(end - p) < sizeof *lc || lc->cmdsize < sizeof *lc || lc->cmdsize > (size_t)(end - p)) return NULL;
+    p += lc->cmdsize;
+    return (size_t)(end - p) >= sizeof *lc ? (const struct load_command*)p : NULL;
+}
+
+/* The UUID the linker gave an image, which its DWARF file carries too: 0 if it has none. */
+static int image_uuid(const cx_u8* image, size_t size, cx_u8 uuid[16]) {
+    uint32_t count;
+    const cx_u8* end;
+    const struct load_command* lc = first_command(image, size, &count, &end);
+    for (uint32_t i = 0; lc && i < count; i++, lc = next_command(lc, end)) {
+        if (lc->cmd == LC_UUID && lc->cmdsize >= sizeof(struct uuid_command) && (size_t)(end - (const cx_u8*)lc) >= sizeof(struct uuid_command)) {
+            memcpy(uuid, ((const struct uuid_command*)lc)->uuid, 16);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Maps the DWARF file at `path`, dsymutil's, if it's the one for the image with `uuid`, and finds
+ * its line tables in its __DWARF segment. */
+static int open_dwarf(object* o, const char* path, const cx_u8 uuid[16], uintptr_t slide) {
+    memset(o, 0, sizeof *o);
+    o->base = slide;
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
+        close(fd);
+        return 0;
+    }
+    size_t size = (size_t)st.st_size;
+    const cx_u8* image = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (image == MAP_FAILED) return 0;
+    cx_u8 has[16];
+    uint32_t count;
+    const cx_u8* end;
+    const struct load_command* lc = first_command(image, size, &count, &end);
+    if (!lc || !image_uuid(image, size, has) || memcmp(has, uuid, 16) != 0) {
+        munmap((void*)image, size);
+        return 0;
+    }
+    o->image = image;
+    o->size = size;
+    dwarf* d = &o->d;
+    for (uint32_t i = 0; lc && i < count; i++, lc = next_command(lc, end)) {
+        if (lc->cmd != LC_SEGMENT_64 || lc->cmdsize < sizeof(struct segment_command_64)) continue;
+        const struct segment_command_64* sg = (const struct segment_command_64*)lc;
+        if (strncmp(sg->segname, "__DWARF", 16) != 0) continue;
+        if (sg->nsects > (lc->cmdsize - sizeof *sg) / sizeof(struct section_64)) continue;
+        const struct section_64* s = (const struct section_64*)(sg + 1);
+        for (uint32_t k = 0; k < sg->nsects; k++) {
+            if (s[k].offset > size || s[k].size > size - s[k].offset) continue;
+            span sec = {image + s[k].offset, (size_t)s[k].size};
+            const char* name = s[k].sectname;
+            if (section_is(name, "__debug_line")) d->line = sec;
+            else if (section_is(name, "__debug_line_str")) d->line_str = sec;
+            else if (section_is(name, "__debug_str")) d->str = sec;
+            else if (section_is(name, "__debug_info")) d->info = sec;
+            else if (section_is(name, "__debug_abbrev")) d->abbrev = sec;
+            else if (section_is(name, "__debug_addr")) d->addr = sec;
+            else if (section_is(name, "__debug_str_offs")) d->str_offsets = sec; /* __debug_str_offsets, cut to 16 */
+            else if (section_is(name, "__debug_rnglists")) d->rnglists = sec;
+        }
+    }
+    if (d->line.p) return 1;
+    munmap((void*)image, size);
+    o->image = NULL;
+    return 0;
+}
+
+/* The DWARF of the image loaded at `header` from `path`: `path.dwarf`, as the cache keeps it, or
+ * the `path.dSYM` bundle `calx build` writes beside a program, as debuggers find it. */
+static int open_image(object* o, const void* header, const char* path) {
+    memset(o, 0, sizeof *o);
+    const struct mach_header_64* mh = (const struct mach_header_64*)header;
+    cx_u8 uuid[16];
+    if (mh->magic != MH_MAGIC_64 || !image_uuid((const cx_u8*)header, sizeof *mh + mh->sizeofcmds, uuid)) return 0;
+    intptr_t slide = 0;
+    int loaded = 0;
+    for (uint32_t i = 0, n = _dyld_image_count(); i < n && !loaded; i++) {
+        if ((const void*)_dyld_get_image_header(i) == header) {
+            slide = _dyld_get_image_vmaddr_slide(i);
+            loaded = 1;
+        }
+    }
+    if (!loaded) return 0;
+    char file[4096];
+    snprintf(file, sizeof file, "%s.dwarf", path);
+    if (open_dwarf(o, file, uuid, (uintptr_t)slide)) return 1;
+    const char* base = strrchr(path, '/');
+    snprintf(file, sizeof file, "%s.dSYM/Contents/Resources/DWARF/%s", path, base ? base + 1 : path);
+    return open_dwarf(o, file, uuid, (uintptr_t)slide);
+}
+
+static void name_frames(found* f, void* const* frames, int n) {
+    pthread_mutex_lock(&trace_lock);
+    /* Each image is opened once, when a frame is first in it; one with no DWARF file, such as the
+     * system's libraries, is remembered so it isn't looked for again. */
+    object objects[MAX_OBJECTS];
+    const void* headers[MAX_OBJECTS];
+    int usable[MAX_OBJECTS];
+    int count = 0;
+    if (!getcwd(f->cwd, sizeof f->cwd)) f->cwd[0] = 0;
+    for (int i = 0; i < n; i++) {
+        /* A return address is just past its call, which may end the call's line. */
+        uintptr_t ret = (uintptr_t)frames[i] - 1;
+        Dl_info info;
+        if (!dladdr((const void*)ret, &info) || !info.dli_fbase || !info.dli_fname) continue;
+        int k = 0;
+        for (; k < count; k++) {
+            if (headers[k] == info.dli_fbase) break;
+        }
+        if (k == count) {
+            if (count == MAX_OBJECTS) continue;
+            headers[count] = info.dli_fbase;
+            usable[count] = open_image(&objects[count], info.dli_fbase, info.dli_fname);
+            count++;
+        }
+        if (!usable[k]) continue;
+        /* dladdr's name is the nearest symbol, without macOS's leading '_'. */
+        dwarf_frames(f, &objects[k].d, (cx_u64)(ret - objects[k].base), info.dli_sname, 1);
+    }
+    for (int k = 0; k < count; k++) {
+        if (objects[k].image) munmap((void*)objects[k].image, objects[k].size);
+    }
+    pthread_mutex_unlock(&trace_lock);
+}
+
+#else
 
 /* Maps the ELF file at `path`, and finds its symbols and line tables. */
 static int open_object(object* o, const char* path, uintptr_t base) {
@@ -1209,12 +1380,6 @@ static int find_object(struct dl_phdr_info* info, size_t size, void* data) {
     return 0;
 }
 
-static void found_frames(found* f) {
-    void* frames[MAX_FRAMES];
-    int n = backtrace(frames, MAX_FRAMES);
-    name_frames(f, frames, n);
-}
-
 static void name_frames(found* f, void* const* frames, int n) {
     pthread_mutex_lock(&trace_lock);
     /* Each object is opened once, when a frame is first in it; one without line tables, such as
@@ -1255,35 +1420,14 @@ static void name_frames(found* f, void* const* frames, int n) {
             }
         }
         if (!name || !*name) continue;
-        const dwarf* d = &o->d;
-        char path[4096];
-        cx_u64 line;
-        if (!find_line(d, at, path, sizeof path, &line)) {
-            frame(f, name, "", 0); /* kept for its name, such as a frame in the runtime */
-            continue;
-        }
-        /* The innermost inlined call is at the line the table gives, and each call out from it is
-         * at the line it was called from. */
-        level levels[MAX_INLINED];
-        line_header h;
-        int depth = d->info.p ? inline_levels(d, at, levels, &h) : 0;
-        if (depth <= 1) {
-            frame(f, name, path, line);
-        } else {
-            frame(f, levels[depth - 1].name ? levels[depth - 1].name : "", path, line);
-            for (int j = depth - 1; j >= 1; j--) {
-                char call[4096];
-                file_path(&h, levels[j].call_file, call, sizeof call);
-                const char* outer = levels[j - 1].name ? levels[j - 1].name : (j == 1 ? name : "");
-                frame(f, outer, call, levels[j].call_line);
-            }
-        }
-        if (depth > 0) free_header(&h);
+        dwarf_frames(f, &o->d, at, name, 0);
     }
     for (int k = 0; k < count; k++) {
         if (objects[k].image) munmap((void*)objects[k].image, objects[k].size);
     }
     pthread_mutex_unlock(&trace_lock);
 }
+
+#endif /* __APPLE__ */
 
 #endif
