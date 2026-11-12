@@ -774,7 +774,20 @@ cx_i64 cx_clock_zone_abbreviation(cx_i64 unix_ms, cx_u8* out, cx_usize cap) {
 #endif
 }
 
+/* 1 once a program has started here: a Calx library loaded into another program never does. */
+int cx_is_program;
+
+#ifdef __linux__
+/* In calx_proc.c, which a program has only when it starts others: when this program was run again
+ * as the helper that starts a child to measure, it starts it and exits, never returning. */
+extern void cx_proc_helper(int argc, char** argv) __attribute__((weak));
+#endif
+
 void cx_start(int argc, char** argv) {
+#ifdef __linux__
+    if (cx_proc_helper) cx_proc_helper(argc, argv);
+#endif
+    cx_is_program = 1;
 #ifdef _WIN32
     (void)argc;
     (void)argv;

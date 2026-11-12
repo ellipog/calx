@@ -117,8 +117,9 @@ pub struct Status {
     used: Usage,
 }
 
-/// What a program used: the CPU time of all its threads and the memory it held in RAM. The
-/// numbers differ from one run to the next, as the clock's do, so they're read with `unsafe`.
+/// What a program used: the CPU time of all its threads, the memory it held in RAM, and how long
+/// it ran. The numbers differ from one run to the next, as the clock's do, so they're read with
+/// `unsafe`.
 pub struct Usage {
     /// The nanoseconds of CPU time its threads used, in the kernel and out. Windows adds to it at
     /// each tick of its clock, about every 15.6 ms.
@@ -127,16 +128,21 @@ pub struct Usage {
     /// `top`'s `RES`. 0 once it has ended.
     pub memory: u64,
     /// The most bytes of memory it held in RAM at once: its peak working set on Windows, its
-    /// `VmHWM` on Linux, `ru_maxrss` once it has ended.
+    /// `VmHWM` on Linux, `ru_maxrss` once it has ended. On Linux that starts at the peak of the
+    /// program that started it, unless it was started `measured`.
     pub peak_memory: u64,
+    /// The nanoseconds from just before it was started until it was seen to exit, or until now
+    /// while it runs, on the monotonic clock: GNU `time`'s elapsed time. For one started
+    /// `measured`, from when the helper started it, so the helper's own start doesn't count.
+    pub wall_ns: u64,
 }
 
 impl Status {
-    /// What the program used in all: its CPU time and its peak memory, as the system recorded
-    /// them when it ended, with `memory` 0. On Linux they're `wait4`'s, so they count the
-    /// programs it started and waited for. `unsafe`, as reading the clock is.
+    /// What the program used in all: its CPU time, its peak memory and its wall time, as recorded
+    /// when it ended, with `memory` 0. On Linux they're `wait4`'s, so they count the programs it
+    /// started and waited for. `unsafe`, as reading the clock is.
     pub unsafe fn usage(self) -> Usage {
-        return Usage { cpu_ns: self.used.cpu_ns, memory: 0, peak_memory: self.used.peak_memory }
+        return Usage { cpu_ns: self.used.cpu_ns, memory: 0, peak_memory: self.used.peak_memory, wall_ns: self.used.wall_ns }
     }
 
     /// Whether it exited with status 0, which is how a program says it succeeded.
@@ -205,6 +211,7 @@ pub struct Command {
     limit_ms: u64,
     cpus: List<u32>,
     fast: bool,
+    alone: bool,
 }
 
 impl Command {
@@ -224,6 +231,7 @@ impl Command {
             limit_ms: 0,
             cpus: List<u32>(),
             fast: false,
+            alone: false,
         }
     }
 
@@ -352,6 +360,19 @@ impl Command {
     pub fn full_speed(own self) -> Command {
         var c = self
         c.fast = true
+        return c
+    }
+
+    /// Starts it so that its usage's `peak_memory` is its own on Linux. There a program's peak
+    /// starts at the peak of the one that started it, this one's, so a child of a program holding
+    /// a gigabyte would peak at a gigabyte or more however little it used. A measured one is started
+    /// from a helper, this program's file run again before it holds anything, so its peak starts
+    /// at a megabyte or two, as a program's run through GNU `time` does. That takes a few hundred
+    /// microseconds more. Its ID, waiting for it and killing it are as any child's. Elsewhere a
+    /// program's peak is its own already, so it changes nothing.
+    pub fn measured(own self) -> Command {
+        var c = self
+        c.alone = true
         return c
     }
 
@@ -612,7 +633,7 @@ pub fn output_all(commands: List<Command>, at_once: usize) -> List<Output> ! Pro
     }
     var outputs = List<Output>()
     for _ in commands {
-        outputs.push(Output { status: Status { code: none, signal: none, timed_out: false, used: Usage { cpu_ns: 0, memory: 0, peak_memory: 0 } }, stdout: List<u8>(), stderr: List<u8>() })
+        outputs.push(Output { status: Status { code: none, signal: none, timed_out: false, used: Usage { cpu_ns: 0, memory: 0, peak_memory: 0, wall_ns: 0 } }, stdout: List<u8>(), stderr: List<u8>() })
     }
     let group = unsafe { cx_proc_group() }
     var running = List<i64>()
@@ -812,6 +833,7 @@ fn start(c: Command, in_default: Stdio, out_default: Stdio, err_default: Stdio, 
         push_u32(mut spec, k)
     }
     spec.push(if c.fast { 1 } else { 0 })
+    spec.push(if c.alone { 1 } else { 0 })
     let h = unsafe { cx_proc_spawn(spec.as_ptr(), spec.len(), c.given.as_ptr(), c.given.len(), group) }
     if h != 0 {
         return h
@@ -897,11 +919,11 @@ fn status_of(h: i64) -> Status {
 }
 
 fn usage_of(h: i64) -> Usage {
-    var out: List<u64> = [0, 0, 0]
+    var out: List<u64> = [0, 0, 0, 0]
     unsafe {
         cx_proc_usage(h, out.as_mut_ptr())
     }
-    return Usage { cpu_ns: out[0], memory: out[1], peak_memory: out[2] }
+    return Usage { cpu_ns: out[0], memory: out[1], peak_memory: out[2], wall_ns: out[3] }
 }
 
 // The moment `ms` milliseconds from now on cx_clock_ns's clock, or 0, no limit, if that's past

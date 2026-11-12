@@ -1,0 +1,63 @@
+// A child started with `measured`, whose peak memory is its own on Linux rather than at least this
+// program's, which holds 200 MB when it starts it (CLX-295). Elsewhere a child's peak is its own
+// either way. A measured child is this program's child as any other is: its streams, killing it
+// and waiting for it work as they do.
+
+import std.env.{args, os}
+import std.io.{Lines}
+import std.process.{Command, ProcessError, Stdio, current_exe}
+import std.thread.{sleep}
+
+fn main() {
+    let given = args()
+    if given.len() > 0 {
+        // "child" does nothing, "nap" sleeps a tenth of a second, "echo" says back the line it's
+        // given, and "hang" waits for one that never comes.
+        if given[0] == "nap" {
+            unsafe { sleep(100000000) }
+        } else if given[0] != "child" {
+            var lines = Lines {}
+            let line = lines.next() ?? String()
+            if given[0] == "echo" {
+                println("got {line}")
+            }
+        }
+        return
+    }
+    let held: List<u8> = [1; 200000000]
+    let plain = Command.new(current_exe()).arg("child").status()!
+    let alone = Command.new(current_exe()).arg("child").measured().status()!
+    let p = unsafe { plain.usage() }.peak_memory
+    let a = unsafe { alone.usage() }.peak_memory
+    let floored = if os() == "linux" { p > 200000000 } else { p < 64000000 }
+    println("{plain.success()} {alone.success()} {floored} {a < 64000000} {held.len()}")    // out: true true true true 200000000
+
+    // Its wall time, from when it started until it exited.
+    let napped = Command.new(current_exe()).arg("nap").measured().status()!
+    let wall = unsafe { napped.usage() }.wall_ns
+    println("{wall >= 100000000 and wall < 10000000000}")    // out: true
+
+    // Its input and output.
+    var c = Command.new(current_exe()).arg("echo").measured().stdin(Stdio.Pipe).stdout(Stdio.Pipe).spawn()!
+    c.write_text("hello\n")!
+    c.close_input()
+    let out = c.wait()
+    println("{out.text().trim()} {out.status.code ?? -1}")    // out: got hello 0
+
+    // Killed, and waited for: it's this program's own child, not one it can't wait for, which
+    // would say it exited with 127.
+    var h = Command.new(current_exe()).arg("hang").measured().stdin(Stdio.Pipe).spawn()!
+    h.kill()
+    let ended = h.wait()
+    println("{ended.status.success()} {(ended.status.code ?? -1) != 127}")    // out: false true
+
+    // A program that isn't there, or can't be run.
+    let missing = match Command.new("./no-such-program").measured().status() {
+        ok(_) => false,
+        err(e) => match e {
+            ProcessError.NotFound(_) => true,
+            _ => false,
+        },
+    }
+    println("{missing}")    // out: true
+}

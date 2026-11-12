@@ -178,6 +178,7 @@ struct proc {
     cx_i32 code, signal;
     cx_u64 deadline;    /* when its timeout runs out, on cx_clock_ns's clock, or 0 */
     cx_u64 cpu_ns, peak_memory;   /* what it used in all, recorded as it exited */
+    cx_u64 started_ns, ended_ns;  /* on cx_clock_ns's clock: just before it started, and once it was seen to exit */
     cx_u32 pid;
     group* g;
 #ifdef _WIN32
@@ -233,8 +234,9 @@ typedef struct {
  * of them; whether there's a folder, a byte, and the folder; then a u32 count of changes to the
  * environment, each a byte that's 1 to set the variable and 0 to remove it, its name, and its
  * value if it's set; then the processors it may run on, a u32 count and a u32 each, none for any;
- * and a byte that's 1 to take it out of power throttling. Integers are little-endian, and each
- * text is a u32 length and its bytes. */
+ * a byte that's 1 to take it out of power throttling; and a byte that's 1 to start it from a
+ * helper, so its peak memory is its own. Integers are little-endian, and each text is a u32
+ * length and its bytes. */
 typedef struct {
     cx_u32 io[3];
     int clear_env;
@@ -249,6 +251,7 @@ typedef struct {
     cx_u32* cpus;
     size_t ncpus;
     int full_speed;
+    int measured;
 } spec;
 
 typedef struct {
@@ -315,6 +318,7 @@ static int spec_read(spec* sp, const cx_u8* p, size_t n) {
     sp->cpus = (cx_u32*)grow(NULL, sp->ncpus * sizeof(cx_u32));
     for (size_t i = 0; i < sp->ncpus; i++) sp->cpus[i] = (cx_u32)rd_int(&r, 4);
     sp->full_speed = (int)rd_int(&r, 1);
+    sp->measured = (int)rd_int(&r, 1);
     return !r.bad;
 }
 
@@ -854,6 +858,7 @@ static void child_exited(proc* p) {
     usage_os(p, used);
     p->cpu_ns = used[0];
     p->peak_memory = used[2];
+    p->ended_ns = cx_clock_ns();
     p->exited = 1;
     p->deadline = 0;
     p->code = (cx_i32)code;
@@ -1066,6 +1071,7 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
     /* A child to pin, or to run at full speed, starts suspended, so it runs no instruction before. */
     if (pin || sp->full_speed) flags |= CREATE_SUSPENDED;
     PROCESS_INFORMATION pi;
+    p->started_ns = cx_clock_ns();
     BOOL made = CreateProcessW(exe.p, line.p, NULL, NULL, count > 0, flags, changes ? env.p : NULL, sp->has_dir ? dir.p : NULL,
                                &si.StartupInfo, &pi);
     if (!made && job) {
@@ -1310,6 +1316,7 @@ static void usage_os(proc* p, cx_u64* out) {
 #endif
 
 static void child_exited(proc* p, int status, const struct rusage* used) {
+    p->ended_ns = cx_clock_ns();
     p->exited = 1;
     p->deadline = 0;
     if (used) {
@@ -1541,6 +1548,83 @@ static int same_name(const char* entry, span name) {
     return strncmp(entry, (const char*)name.p, name.n) == 0 && entry[name.n] == '=';
 }
 
+#ifndef __APPLE__
+/* --- A child measured on its own (CLX-295) --------------------------------------------------
+ * On Linux a child's peak memory, wait4's ru_maxrss, is never less than the peak of the memory it
+ * ran in before it exec'd: posix_spawn's child runs in this program's memory until then, a fork's
+ * in a copy of it, and the kernel keeps that memory's peak as the child's. So a child started
+ * with `measured` is started by a helper instead: this program's own file run again, which starts
+ * the child before it has done anything else, when it holds a megabyte or two. It starts it with
+ * CLONE_PARENT, so it's this program's child as any other is, and its ID, waiting for it, killing
+ * it and what wait4 says of it all work as they would. The helper writes the child's ID, why it
+ * couldn't run it, 0 when it could, and the time just before it started it, on cx_clock_ns's
+ * clock, which is the system's, to a pipe this program gave it, and exits. So the child's wall
+ * time doesn't count the helper's starting. */
+#define HELPER_NAME "\x01" "calx-measure"
+
+extern int cx_is_program;
+
+typedef struct {
+    const char* exe;
+    char** argv;
+    volatile int err;
+} helped;
+
+static int helper_child(void* arg) {
+    helped* h = (helped*)arg;
+    execve(h->exe, h->argv, environ);
+    h->err = errno;
+    _exit(127);
+}
+
+/* Called first thing as a program starts: when it's the helper, it never returns. Its arguments
+ * are the name above, the pipe's number, the program's path and the child's arguments, its
+ * name first. The child shares its memory until it execs, as posix_spawn's does, on a stack of
+ * its own, and the helper waits until it has. */
+void cx_proc_helper(int argc, char** argv) {
+    if (argc < 4 || strcmp(argv[0], HELPER_NAME) != 0) return;
+    int report = atoi(argv[1]);
+    fcntl(report, F_SETFD, FD_CLOEXEC);
+    static char stack[65536] __attribute__((aligned(16)));
+    helped h = {argv[2], argv + 3, 0};
+    cx_u64 at = cx_clock_ns();
+    int pid = clone(helper_child, stack + sizeof stack, CLONE_PARENT | CLONE_VM | CLONE_VFORK, &h);
+    cx_u64 said[3] = {(cx_u64)(cx_i64)pid, (cx_u64)(pid < 0 ? errno : h.err), at};
+    ssize_t w;
+    do {
+        w = write(report, said, sizeof said);
+    } while (w < 0 && errno == EINTR);
+    _exit(0);
+}
+
+/* Reads what the helper `hpid` said and waits for it to exit: 0 with the child's ID in `pid` and
+ * when it started it in `at`, or why it couldn't start the child, whose own exit is reaped here. */
+static int helper_said(int fd, pid_t hpid, pid_t* pid, cx_u64* at) {
+    cx_u64 said[3] = {0, 0, 0};
+    size_t got = 0;
+    while (got < sizeof said) {
+        ssize_t r = read(fd, (char*)said + got, sizeof said - got);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        got += (size_t)r;
+    }
+    while (waitpid(hpid, NULL, 0) < 0 && errno == EINTR) {
+    }
+    if (got != sizeof said) return EIO;   /* it ended before it could say */
+    pid_t child = (pid_t)(cx_i64)said[0];
+    int err = (int)said[1];
+    if (child <= 0) return err ? err : EIO;
+    if (err) {
+        while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {
+        }
+        return err;
+    }
+    *pid = child;
+    *at = said[2];
+    return 0;
+}
+#endif
+
 static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n) {
     int ok = 0;
     char* dir = NULL;
@@ -1704,10 +1788,47 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
         pinned = 1;
     }
 #endif
+#ifndef __APPLE__
+    /* A measured child is started by the helper, which this program gives the write end of a pipe
+     * as `slot`, a number of its own for now, so the dup2 replaces nothing the child would have
+     * had. A Calx library in another program, or one without /proc, starts it as any other. */
+    int report[2] = {-1, -1}, slot = -1;
+    char** hargv = NULL;
+    char slot_text[16];
+    if (sp->measured && cx_is_program && access("/proc/self/exe", X_OK) == 0 && pipe2(report, O_CLOEXEC) == 0) {
+        slot = fcntl(report[1], F_DUPFD_CLOEXEC, 3);
+        if (slot >= 0) {
+            snprintf(slot_text, sizeof slot_text, "%d", slot);
+            hargv = (char**)grow(NULL, (sp->argc + 5) * sizeof *hargv);
+            hargv[0] = (char*)HELPER_NAME;
+            hargv[1] = slot_text;
+            hargv[2] = exe.p;
+            memcpy(hargv + 3, argv, (sp->argc + 2) * sizeof *argv);
+            posix_spawn_file_actions_adddup2(&fa, report[1], slot);
+        } else {
+            close(report[0]);
+            close(report[1]);
+        }
+    }
+#endif
     if (sp->io[1] == IO_INHERIT || sp->io[2] == IO_INHERIT || (sp->io[2] == IO_STDOUT && sp->io[1] == IO_INHERIT)) cx_out_flush();
     pid_t pid;
+    p->started_ns = cx_clock_ns();
+#ifdef __APPLE__
     int e = posix_spawn(&pid, exe.p, &fa, &at, argv, envp);
-#ifndef __APPLE__
+#else
+    int e;
+    if (hargv) {
+        pid_t hpid;
+        e = posix_spawn(&hpid, "/proc/self/exe", &fa, &at, hargv, envp);
+        close(report[1]);
+        close(slot);
+        if (!e) e = helper_said(report[0], hpid, &pid, &p->started_ns);
+        close(report[0]);
+        free(hargv);
+    } else {
+        e = posix_spawn(&pid, exe.p, &fa, &at, argv, envp);
+    }
     if (pinned) sched_setaffinity(0, sizeof was, &was);
 #endif
     if (e) {
@@ -1975,9 +2096,10 @@ cx_u32 cx_proc_state(cx_i64 h) {
 cx_i32 cx_proc_code(cx_i64 h) { return P(h)->code; }
 cx_i32 cx_proc_signal(cx_i64 h) { return P(h)->signal; }
 
-/* What the child has used, into `out`: its CPU time in ns, and its memory in RAM now and at its
- * peak, in bytes. Once it has exited, what it used in all, as recorded when it ended, with nothing
- * in RAM now. It's looked at first, so a child that has just exited gives its totals. */
+/* What the child has used, into `out`: its CPU time in ns, its memory in RAM now and at its peak,
+ * in bytes, and its wall time in ns. Once it has exited, what it used in all, as recorded when it
+ * ended, with nothing in RAM now. It's looked at first, so a child that has just exited gives its
+ * totals. */
 void cx_proc_usage(cx_i64 h, cx_u64* out) {
     proc* p = P(h);
     if (!p->exited) pump(&p, 1, 1);
@@ -1985,9 +2107,11 @@ void cx_proc_usage(cx_i64 h, cx_u64* out) {
         out[0] = p->cpu_ns;
         out[1] = 0;
         out[2] = p->peak_memory;
+        out[3] = p->ended_ns - p->started_ns;
         return;
     }
     usage_os(p, out);
+    out[3] = cx_clock_ns() - p->started_ns;
 }
 
 /* Lets the child go: its handles and buffers. One that hasn't exited runs on. */

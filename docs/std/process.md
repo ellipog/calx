@@ -45,6 +45,7 @@ Each method gives the command back with one more thing said, so they chain. A co
 | `c.timeout(ms: u64)` | Kills it if it's still running that many milliseconds after it started. 0, how a command starts, is no limit |
 | `c.affinity(cpus: List<u32>)` | Runs it only on these processors, numbered from 0 as the system numbers them, pinned before it runs anything. Panics if the list is empty: see [Pinning](#pinning-and-the-machines-load) |
 | `c.full_speed()` | Takes it out of Windows' power throttling, so Windows doesn't move it to the efficiency cores or slow it down to save power. Other systems have none, so it does nothing there |
+| `c.measured()` | Starts it so its peak memory is its own on Linux, not at least this program's: see [What it used](#what-it-used). Elsewhere it's its own already, so it does nothing there |
 
 `Stdio` is where a stream goes:
 
@@ -145,13 +146,14 @@ A program has finished once it has exited and what it wrote has been read. Once 
 
 ## What it used
 
-A benchmark that starts a server measures what the server used: its CPU time and its memory, sampled while it runs, and its totals once it ends. `child.usage()` gives what it has used so far, and `status.usage()` what it used in all. Both are `unsafe`, since the numbers differ from run to run, as the clock's do. The same `Usage` comes from both systems:
+A benchmark that starts a server measures what the server used: its CPU time and its memory, sampled while it runs, and its totals once it ends. `child.usage()` gives what it has used so far, and `status.usage()` what it used in all, what GNU `time` says of a program. Both are `unsafe`, since the numbers differ from run to run, as the clock's do. The same `Usage` comes from every system:
 
 | `Usage` | Is |
 | --- | --- |
 | `cpu_ns: u64` | The nanoseconds of CPU time all its threads used, in the kernel and out. Windows adds to it at each tick of its clock, about every 15.6 ms |
 | `memory: u64` | The bytes of its memory in RAM now: its working set on Windows, its resident set on Linux, `top`'s `RES`, and its footprint on macOS, Activity Monitor's "Memory". 0 once it has ended |
-| `peak_memory: u64` | The most bytes it held in RAM at once: its peak working set on Windows, `VmHWM` on Linux and its lifetime peak footprint on macOS while it runs, and `ru_maxrss` once it has ended |
+| `peak_memory: u64` | The most bytes it held in RAM at once: its peak working set on Windows, `VmHWM` on Linux and its lifetime peak footprint on macOS while it runs, and `ru_maxrss` once it has ended. On Linux that's at least this program's own peak, unless it was started [`measured`](#a-peak-of-its-own-on-linux) |
+| `wall_ns: u64` | The nanoseconds from just before it started until it was seen to exit, or until now while it runs, on the monotonic clock |
 
 ```calx
 import std.env.{args}
@@ -176,7 +178,31 @@ fn main() {
 - On Linux, while it runs, they're `/proc/<pid>/stat` and `/proc/<pid>/status`. Once it ends, they're `wait4`'s, as Python's `os.wait4` gives them, so they also count the programs it started and waited for.
 - On macOS, while it runs, they're `proc_pid_rusage`'s, and once it ends `wait4`'s, as on Linux.
 - Once it has ended, `child.usage()` gives what `status.usage()` will, so a sampler that's late still gets the totals.
+- **The wall time** starts just before the system is asked to start it, so it counts the system starting it, as a stopwatch around `status()` would, but not looking for the program or making its pipes. It ends when this program sees it exit, which is at once while it waits for it. One waited for late ends late, so time it with `status()`, `output()` or `wait()`.
 - [This process's](#this-process) own are `memory()` and `cpu_time()`.
+
+### A peak of its own on Linux
+
+On Linux a program's peak memory starts at the peak of the program that started it. Every way of starting a program there runs the new one in the old one's memory until it loads its own, in a copy of it after a `fork` and in the same memory after `posix_spawn`, and the kernel keeps that memory's peak as the new program's. So `true`, started by a program that once held a gigabyte, says it peaked at a gigabyte. Python's `os.wait4` and `resource.getrusage(RUSAGE_CHILDREN)` say the same, for the same reason.
+
+`c.measured()` starts it from a helper instead: this program's own file run again, which starts the child before it has done anything else, when it holds a megabyte or two. That's what GNU `time` does, from its own small process. The helper starts it as this program's child, so its ID, its streams, killing it and waiting for it are as any child's, and the helper exits once it has started it.
+
+```calx
+import std.env.{args}
+import std.process.{Command, current_exe}
+
+fn main() {
+    if args().len() > 0 {
+        return
+    }
+    let held: List<u8> = [1; 100000000]    // 100 MB
+    let alone = Command.new(current_exe()).arg("child").measured().status()!
+    let used = unsafe { alone.usage() }
+    println("{used.peak_memory < 50000000} {held.len()}")    // out: true 100000000
+}
+```
+
+Starting it takes a few hundred microseconds more, 0.6 ms in all on the reference machine rather than 0.3 ms, but its wall time starts when the helper starts it, so it's the same as if it had been started directly. On Windows and macOS a program's peak is its own however it starts, so `measured` does nothing there. A Calx library in another program, or a system without `/proc`, starts it as any other.
 
 ## Errors
 

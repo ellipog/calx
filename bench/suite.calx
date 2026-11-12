@@ -11,9 +11,11 @@
 //
 // Each program runs once to warm up and to check its output, then `--rounds` times, the languages
 // taking turns, in the other order every other round. A program that took more than 10 s to warm
-// up runs 3 rounds. Each run is timed from outside, as a fresh process: its wall time, the CPU
-// time of all its threads, and the most memory it held (peak working set on Windows, peak resident
-// set on Linux). The tables give the median wall time and the median peak memory; the record has
+// up runs 3 rounds. Each run is timed from outside, as a fresh process, as GNU `time` times it: its
+// wall time from just before it starts until it exits, the CPU time of all its threads, and the
+// most memory it held (peak working set on Windows, peak resident set on Linux), from std.process's
+// `Usage`. Each starts `measured`, so on Linux its peak is its own, not at least the runner's
+// (CLX-295). The tables give the median wall time and the median peak memory; the record has
 // every run.
 //
 // The machine is shared, so each run also measures how busy the rest of the machine was while it
@@ -158,12 +160,10 @@ fn benches() -> List<Bench> {
     return b
 }
 
-// Where the programs run: the processors they're pinned to. On Linux each program starts through
-// `meter` (bench/meter.calx), which says what it used, when that's set.
+// Where the programs run: the processors they're pinned to.
 struct Pin {
     cpus: List<u32>
     threads: u32
-    meter: String
 }
 
 // The processors a run of `threads` threads gets. A single-threaded program, or a parallel one at
@@ -171,16 +171,16 @@ struct Pin {
 // 8; more get every processor.
 fn pin_for(threads: u32, processors: u32) -> Pin {
     if threads <= 7 {
-        return Pin { cpus: [2, 4, 6, 8, 10, 12, 14], threads: threads, meter: String() }
+        return Pin { cpus: [2, 4, 6, 8, 10, 12, 14], threads: threads }
     }
     if threads == 8 {
-        return Pin { cpus: [0, 2, 4, 6, 8, 10, 12, 14], threads: threads, meter: String() }
+        return Pin { cpus: [0, 2, 4, 6, 8, 10, 12, 14], threads: threads }
     }
     var all: List<u32> = []
     for k in 0u32..processors {
         all.push(k)
     }
-    return Pin { cpus: all, threads: threads, meter: String() }
+    return Pin { cpus: all, threads: threads }
 }
 
 // Pins this program, and so what it starts, out of power throttling on Windows.
@@ -207,67 +207,43 @@ struct Run {
     out: String
 }
 
-// Runs a command, stopping on nothing: an error comes back as the text of what went wrong.
-fn run_once(cmd: List<String>, dir: String, envs: List<(String, String)>, pin: Pin) -> Run ! String {
-    var full: List<String> = []
-    let report = "{pin.meter}.report"
-    let metered = env.os() == "linux" and not pin.meter.is_empty()
-    if metered {
-        full.push(pin.meter.copy())
-        full.push(report.copy())
-        if fs.exists(report.copy()) {
-            fs.remove_file(report.copy())!
-        }
-    }
-    for c in cmd {
-        full.push(c.copy())
-    }
+// Runs a command, stopping on nothing: an error comes back as the text of what went wrong. Each
+// program starts `measured`, so on Linux its peak memory is its own rather than at least this
+// program's, which holds the inputs and outputs, and its wall time, CPU time and peak are what the
+// system says of it: from just before it starts until it exits, as GNU `time` gives them.
+fn run_once(cmd: List<String>, dir: String, envs: List<(String, String)>) -> Run ! String {
     var rest: List<String> = []
-    for k in 1usize..full.len() {
-        rest.push(full[k].copy())
+    for k in 1usize..cmd.len() {
+        rest.push(cmd[k].copy())
     }
-    var c = Command.new(full[0].copy()).args(rest).dir(dir).timeout(1800000)
+    var c = Command.new(cmd[0].copy()).args(rest).dir(dir).timeout(1800000).measured()
     for (k, v) in envs {
         c = c.env(k.copy(), v.copy())
     }
     let before = cpu_times()
-    let t0 = unsafe { Instant.now() }
     let out = match c.output() {
         ok(o) => o,
-        err(e) => fail "can't run {full[0]}: {e}",
+        err(e) => fail "can't run {cmd[0]}: {e}",
     }
-    let wall = f64.nearest(unsafe { Instant.now() }.nanos_since(t0)) / 1e6
     let after = cpu_times()
     if not out.status.success() {
         let why = out.error_text().trim()
-        fail "{full.join(" ")} {out.status}: {why[..why.len().min(2000usize)]}"
+        fail "{cmd.join(" ")} {out.status}: {why[..why.len().min(2000usize)]}"
     }
     let u = unsafe { out.status.usage() }
     let busy = f64.nearest(after.0 - before.0) - f64.nearest(u.cpu_ns)
     let total = f64.nearest(after.1 - before.1)
     let load = if total > 0.0 { (busy / total).max(0.0) } else { 0.0 }
-    var run = Run { wall: wall, cpu: f64.nearest(u.cpu_ns) / 1e6, peak: f64.nearest(u.peak_memory) / 1048576.0, load: load, out: out.text().replace("\r\n", "\n") }
-    if metered {
-        // The program's own wall time, CPU time and peak, without meter's.
-        let text = fs.read_text(report.copy())! ?? String()
-        let f = text.split_whitespace()
-        if f.len() != 3 {
-            fail "meter wrote no report for {cmd[0]}"
-        }
-        run.wall = f64.nearest(u64.parse(f[0].copy()) ?? 0) / 1e6
-        run.cpu = f64.nearest(u64.parse(f[1].copy()) ?? 0) / 1e6
-        run.peak = f64.nearest(u64.parse(f[2].copy()) ?? 0) / 1048576.0
-    }
-    return run
+    return Run { wall: f64.nearest(u.wall_ns) / 1e6, cpu: f64.nearest(u.cpu_ns) / 1e6, peak: f64.nearest(u.peak_memory) / 1048576.0, load: load, out: out.text().replace("\r\n", "\n") }
 }
 
 // Runs it until the machine was quiet enough, at most three times, and keeps the quietest run.
-fn run_quiet(cmd: List<String>, dir: String, envs: List<(String, String)>, pin: Pin) -> (Run, u32) ! String {
-    var best = try run_once(cmd.copy(), dir.copy(), envs.copy(), pin.copy())
+fn run_quiet(cmd: List<String>, dir: String, envs: List<(String, String)>) -> (Run, u32) ! String {
+    var best = try run_once(cmd.copy(), dir.copy(), envs.copy())
     var again: u32 = 0
     while best.load > BUSY and again < 2 {
         again += 1
-        let r = try run_once(cmd.copy(), dir.copy(), envs.copy(), pin.copy())
+        let r = try run_once(cmd.copy(), dir.copy(), envs.copy())
         if r.load < best.load {
             best = r
         }
@@ -360,12 +336,12 @@ fn agree(progs: mut List<Prog>, title: String) {
 }
 
 // Warms each program up and checks it, then times them in turns.
-fn measure(progs: mut List<Prog>, dir: String, pin: Pin, rounds: u32, title: String) {
+fn measure(progs: mut List<Prog>, dir: String, rounds: u32, title: String) {
     for p in mut progs {
         if p.status != "ok" {
             continue
         }
-        match run_once(p.cmd.copy(), dir.copy(), p.envs.copy(), pin.copy()) {
+        match run_once(p.cmd.copy(), dir.copy(), p.envs.copy()) {
             ok(r) => {
                 p.out = r.out.copy()
                 p.rounds = if r.wall > 10000.0 { rounds.min(3) } else { rounds }
@@ -387,7 +363,7 @@ fn measure(progs: mut List<Prog>, dir: String, pin: Pin, rounds: u32, title: Str
             if progs[k].status != "ok" or r >= progs[k].rounds {
                 continue
             }
-            match run_quiet(progs[k].cmd.copy(), dir.copy(), progs[k].envs.copy(), pin.copy()) {
+            match run_quiet(progs[k].cmd.copy(), dir.copy(), progs[k].envs.copy()) {
                 ok(got) => {
                     if checked_part(got.0.out.copy()) != checked_part(progs[k].out.copy()) {
                         progs[k].status = String("output differs")
@@ -1062,7 +1038,7 @@ fn dx_group(work: String, langs: List<String>, calx: String, python: String, rou
         }
     }
     println("hello, started and run to the end")
-    measure(mut progs, work.copy(), single.copy(), rounds.max(20), String("hello"))
+    measure(mut progs, work.copy(), rounds.max(20), String("hello"))
     var startup = LinkedMap<String, Json>()
     for p in progs {
         startup.insert(p.lang.copy(), prog_json(p.copy()))
@@ -1389,7 +1365,7 @@ fn main() {
     }
 
     let work = fs.temp_dir()!.replace("\\", "/")
-    var single = pin_for(1, processors)
+    let single = pin_for(1, processors)
     apply_pin(single.copy())
     let quiet = cpu_times()
     println("suite: building in {work}")
@@ -1398,25 +1374,15 @@ fn main() {
     if after.1 > quiet.1 {
         println("suite: the machine was {f64.nearest(after.0 - quiet.0) / f64.nearest(after.1 - quiet.1) * 100.0:.0}% busy while it built")
     }
-    // On Linux every program starts through meter, so the peak memory is the program's own and
-    // not this one's (bench/meter.calx). What a program that does nothing gets is the floor.
-    var meter = String()
+    // On Linux every program starts `measured`, from a helper, so its peak memory is its own and
+    // not this one's. What a program that does nothing gets is the floor.
     var floor = Json.Null
     if env.os() == "linux" {
-        meter = "{work}/bin/meter"
-        let m = match Command.new(calx.copy()).args(["build", "--release", "{root}/bench/meter.calx", "-o", meter.copy()]).output() {
-            ok(o) => o,
-            err(e) => stop("can't build bench/meter.calx: {e}"),
-        }
-        if not m.status.success() {
-            stop("bench/meter.calx didn't build: {m.error_text().trim()}")
-        }
-        single.meter = meter.copy()
-        let ok(r) = run_once(["true"], work.copy(), [], single.copy()) else {
-            stop("meter can't run `true`")
+        let ok(r) = run_once(["true"], work.copy(), []) else {
+            stop("can't run `true`")
         }
         floor = Json.Float(round_to(r.peak, 2))
-        println("suite: a program that does nothing peaks at {mb(r.peak)} through meter")
+        println("suite: a program that does nothing peaks at {mb(r.peak)}")
     }
 
     var inputs = LinkedMap<String, String>()
@@ -1429,7 +1395,7 @@ fn main() {
         let args = resolve(if a.quick { b.quick.copy() } else { b.args.copy() }, mut inputs, work.copy(), a.quick, String("1"))
         var progs = progs_for(b.copy(), langs.copy(), built.copy(), python.copy(), args, 1)
         println("{b.title}")
-        measure(mut progs, work.copy(), single.copy(), rounds, b.title.copy())
+        measure(mut progs, work.copy(), rounds, b.title.copy())
         for p in progs {
             if p.status == "ok" and not p.runs.is_empty() {
                 println("  {lang_name(p.lang.copy())}: {ms(median(walls(p)))} median, {ms(best_of(walls(p)))} best, {mb(median(peaks(p)))}, {p.runs.len()} runs, {p.again} repeated")
@@ -1469,14 +1435,13 @@ fn main() {
         // count either.
         var varied = Set<String>()
         for t in thread_counts {
-            var pin = pin_for(t, processors)
-            pin.meter = meter.copy()
+            let pin = pin_for(t, processors)
             apply_pin(pin.copy())
             let args = resolve(if a.quick { b.quick.copy() } else { b.args.copy() }, mut inputs, work.copy(), a.quick, "{t}")
             var progs = progs_for(b.copy(), langs.copy(), built.copy(), python.copy(), args, t)
             let title = if t == 1 { "{b.title}, 1 thread" } else { "{b.title}, {t} threads" }
             println(title)
-            measure(mut progs, work.copy(), pin.copy(), rounds, title.copy())
+            measure(mut progs, work.copy(), rounds, title.copy())
             var per = LinkedMap<String, Json>()
             for p in progs {
                 if p.status == "ok" and not p.runs.is_empty() {
