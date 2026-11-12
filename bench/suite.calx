@@ -1308,29 +1308,51 @@ fn print_tables(root: String) {
 // `--langs`, kept from its old record, `before`, each with the commit and time it was recorded
 // at: a language that can't run here this time, such as Go missing under WSL, keeps its numbers.
 fn with_langs_kept(now: own Json, before: own Json?, langs: List<String>) -> Json {
+    let Json.Object(old) = before ?? Json.Null else {
+        return now
+    }
+    var marks = LinkedMap<String, Json>()
+    for key in ["recorded", "commit"] {
+        if let v = old.find(key) {
+            marks.insert(String(key), v.copy())
+        }
+    }
+    return langs_kept(now, old, langs, marks)
+}
+
+// `now`, with what `old` has under the languages left out, at every level of objects both have,
+// as the dx group's builds keep each language's results a level down. An object copied from
+// `old` gets `marks`, its commit and time, unless it has its own.
+fn langs_kept(now: own Json, old: LinkedMap<String, Json>, langs: List<String>, marks: LinkedMap<String, Json>) -> Json {
     let Json.Object(fresh) = now else {
         return now
     }
-    let Json.Object(old) = before ?? Json.Null else {
-        return Json.Object(fresh)
+    var out = LinkedMap<String, Json>()
+    for (k, v) in fresh {
+        if let Json.Object(inner) = old.find(k) {
+            out.insert(k.copy(), langs_kept(v.copy(), inner.copy(), langs.copy(), marks.copy()))
+        } else {
+            out.insert(k.copy(), v.copy())
+        }
     }
-    var out = fresh.copy()
     for l in LANGS {
         if langs.contains(l) or out.contains(l) {
             continue
         }
-        let Json.Object(entry) = old.find(l) else {
+        let held = old.find(l) else {
             continue
         }
-        var e = entry.copy()
-        if not e.contains("recorded") {
-            for key in ["recorded", "commit"] {
-                if let v = old.find(key) {
-                    e.insert(String(key), v.copy())
+        if let Json.Object(entry) = held {
+            var e = entry.copy()
+            for (key, v) in marks {
+                if not e.contains(key) {
+                    e.insert(key.copy(), v.copy())
                 }
             }
+            out.insert(String(l), Json.Object(e))
+        } else {
+            out.insert(String(l), held.copy())
         }
-        out.insert(String(l), Json.Object(e))
     }
     return Json.Object(out)
 }
@@ -1550,7 +1572,7 @@ fn main() {
             }
         }
         if dx_record != Json.Null {
-            merged.insert("dx", dx_record)
+            merged.insert("dx", with_langs_kept(dx_record, old.get("dx"), langs.copy()))
         } else if let j = old.get("dx") {
             merged.insert("dx", j)
         }
