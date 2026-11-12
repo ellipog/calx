@@ -831,6 +831,9 @@ static void io_done(stream* s, DWORD n) {
     DWORD got = 0;
     DWORD err = GetOverlappedResult(s->h, &s->ov, &got, FALSE) ? 0 : GetLastError();
     if (!s->open) {
+        /* Input closed with a write in flight, as when the child exits: unless that write went
+         * in whole with nothing after it, the child didn't read it all (CLX-312). */
+        if (s->index == 0 && (err || s->b.start + n < s->b.len || s->more.len)) s->broken = 1;
         CloseHandle(s->h);
         s->h = NULL;
         return;
@@ -883,7 +886,11 @@ static void child_exited(proc* p) {
     p->deadline = 0;
     p->code = (cx_i32)code;
     p->has_code = !p->killed;
-    close_stream(&p->s[0]);
+    /* Input still waiting to go in wasn't read. A write in flight is cancelled by close_stream,
+     * and its completion, which io_done takes, says whether it went in whole (CLX-312). */
+    stream* in = &p->s[0];
+    if (in->open && !in->pending && (in->b.start < in->b.len || in->more.len)) in->broken = 1;
+    close_stream(in);
     for (int i = 1; i < 3; i++) {
         stream* s = &p->s[i];
         if (!s->open) continue;
@@ -1352,6 +1359,8 @@ static void child_exited(proc* p, int status, const struct rusage* used) {
         close(p->pidfd);
         p->pidfd = -1;
     }
+    /* Input still waiting to go in, its exit seen before a write's EPIPE, wasn't read (CLX-312). */
+    if (queued(&p->s[0])) p->s[0].broken = 1;
     close_stream(&p->s[0]);
     for (int i = 1; i < 3; i++) {
         if (!p->s[i].open) continue;
@@ -2017,11 +2026,13 @@ cx_i32 cx_proc_write(cx_i64 h, const cx_u8* d, cx_usize n) {
 #ifdef _WIN32
     bytes_add(&s->more, d, n);
     start_write(s);
+    /* A write cancelled as the child exits says how it went when its completion comes. */
+    while (queued(s) || s->pending) pump(&p, 1, 0);
 #else
     bytes_add(&s->b, d, n);
     write_some(s);
-#endif
     while (queued(s)) pump(&p, 1, 0);
+#endif
     return s->broken ? E_CLOSED : 0;
 }
 
