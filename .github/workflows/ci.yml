@@ -36,6 +36,10 @@ jobs:
           - os: windows-11-arm
             calx: build/compiler/windows/calx.exe
             experimental: true
+          # macOS on Apple Silicon (CLX-277 to CLX-280), with Apple's clang and the image's SDK.
+          - os: macos-latest
+            calx: build/compiler/macos/calx
+            experimental: true
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental == true }}
     env:
@@ -78,6 +82,9 @@ jobs:
           "$bin/clang" --version | head -1
           "$bin/ld.lld" --version
           ninja --version
+      - name: Install Ninja
+        if: runner.os == 'macOS'
+        run: command -v ninja || brew install ninja
       # Ninja's own release, pinned and checked. GitHub's release downloads fail for minutes at a
       # time now and then, so after a few tries this falls back to the Ninja Visual Studio ships.
       - name: Install Ninja

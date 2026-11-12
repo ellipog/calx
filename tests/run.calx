@@ -5,7 +5,7 @@
 //     calx run tests/run.calx -- tests/integers docs/std     # the tests under folders, or single files
 //
 // It tests the compiler in build/compiler/<os>, so build that first, with
-// `ninja -C build/compiler/windows` or `.../linux`.
+// `ninja -C build/compiler/windows`, `.../linux` or `.../macos`.
 //
 // A test is a `.calx` file under `tests/`, or a fenced `calx` block in `docs/reference/`,
 // `docs/std/` or `docs/guide/` (D41). It says what should happen in comments:
@@ -381,7 +381,7 @@ fn main() {
                 for name in t.libs {
                     let lib_source = path.join(path.parent_dir(source.copy()) ?? String("."), name.copy())
                     let stem = path.file_stem(name.copy()) ?? name.copy()
-                    let lib_out = "{dir}/libs/{stem}{if windows { ".dll" } else { ".so" }}"
+                    let lib_out = "{dir}/libs/{stem}{if windows { ".dll" } else if env.os() == "macos" { ".dylib" } else { ".so" }}"
                     var words: List<String> = ["build"]
                     if job.release {
                         words.push("--release")
@@ -523,7 +523,7 @@ fn main() {
     fs.remove_dir_all(tmp)!
     let skips = if skipped > 0 { ", {skipped} skipped" } else { "" }
     let formats = if unformatted > 0 { ", {unformatted} not formatted" } else { "" }
-    let system = if windows { "Windows" } else { "Linux" }
+    let system = if windows { "Windows" } else if env.os() == "macos" { "macOS" } else { "Linux" }
     println("{jobs.len() - failed} passed, {failed} failed{formats}{skips} ({tests.len()} tests, modes: {modes.join(", ")}, {system})")
     if failed > 0 or unformatted > 0 {
         process.exit(1)
