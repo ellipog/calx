@@ -313,7 +313,8 @@ pid_t start(const std::vector<std::string>& argv, Redirect r = {}, const std::st
 // Starts the program `calx run` stands for, which the system kills when this process ends, however
 // it ends, as the job does on Windows: a test runner that stops `calx run` stops the program, which
 // would otherwise keep the runner's pipes open. The death signal follows the thread that forks,
-// which is the main one, there till the end.
+// which is the main one, there till the end. macOS has no such signal, so there `calx run` takes
+// the program's place instead (run_last).
 pid_t start_bound(const std::vector<std::string>& argv, const std::string& name) {
     std::vector<char*> args;
     for (const std::string& a : argv) args.push_back(const_cast<char*>(a.c_str()));
@@ -592,6 +593,23 @@ int run_process(const std::vector<std::string>& argv, const std::string& name) {
     if (h < 0) return -1;
 #endif
     return finish(h);
+}
+
+int run_last(const std::vector<std::string>& argv, const std::string& name) {
+#ifdef __APPLE__
+    // macOS can't end a child with its parent, as Linux's death signal and Windows' job do, so
+    // `calx run` becomes the program: whatever kills it, a test runner or the terminal, kills the
+    // program, and its signals and its status are the program's own (CLX-284). What this process
+    // has open, the build's locks, is close-on-exec.
+    std::vector<char*> args;
+    for (const std::string& a : argv) args.push_back(const_cast<char*>(a.c_str()));
+    if (!name.empty()) args[0] = const_cast<char*>(name.c_str());
+    args.push_back(nullptr);
+    execvp(argv[0].c_str(), args.data());
+    return -1;
+#else
+    return run_process(argv, name);
+#endif
 }
 
 bool start_detached(const std::vector<std::string>& argv) {

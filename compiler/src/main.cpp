@@ -782,7 +782,7 @@ int finish(const Options& opt, bool serve, const std::string& exe, const std::ve
         run.insert(run.end(), opt.program_args.begin(), opt.program_args.end());
         std::fflush(stdout);
         std::fflush(stderr);
-        int status = run_process(run, opt.command);
+        int status = run_last(run, opt.command);
         if (status < 0) {
             std::fprintf(stderr, "calx: can't run %s\n", exe.c_str());
             return 1;
@@ -798,7 +798,7 @@ int finish(const Options& opt, bool serve, const std::string& exe, const std::ve
     // Its full path is `std.env.script()`, as Python's `__file__` is, and this compiler's is in
     // CALX, as Python's `sys.executable` is.
     set_run_environment(opt.input);
-    int status = run_process(run, opt.input);
+    int status = run_last(run, opt.input);
     if (status < 0) {
         std::fprintf(stderr, "calx: can't run %s\n", exe.c_str());
         return 1;

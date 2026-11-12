@@ -74,6 +74,11 @@ std::string hash_hex(const std::vector<std::string_view>& parts);
 // `name`, the program sees that as its `argv[0]`, rather than its path.
 int run_process(const std::vector<std::string>& argv, const std::string& name = "");
 
+// Runs the program `calx run` stands for, as the last thing this process does, and returns its
+// status, or -1 if it couldn't start: on macOS in this process's place, so it doesn't return if it
+// started, and elsewhere as run_process, which ties the program's life to this process's.
+int run_last(const std::vector<std::string>& argv, const std::string& name);
+
 // Sets this process's environment for the program `calx run` starts next: CALX, this compiler's
 // path, for a script that builds or checks with the compiler that ran it, as Python's
 // `sys.executable`, and CALX_SCRIPT, the full path of `source`, which is `std.env.script()`. The
