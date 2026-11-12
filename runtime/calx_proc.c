@@ -8,7 +8,8 @@
  * it. On Windows the pipes are named pipes opened for overlapped I/O, whose reads and writes
  * complete on an I/O completion port, and a thread pool wait posts each child's exit to the same
  * port, as libuv does. On Linux they're nonblocking pipes, and `poll` waits on them and on a pidfd
- * that says when the child exits.
+ * that says when the child exits; on macOS that's a kqueue watching for the exit, which `poll`
+ * waits on as it does a pidfd.
  *
  * A child is finished once it has exited and what it wrote has been read: after it exits, each
  * pipe is read until it's empty, not until every end of it is closed, since a program it started
@@ -43,13 +44,20 @@
 #include <stdio.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 extern char** environ;
+#ifdef __APPLE__
+#include <libproc.h>
+#include <mach-o/dyld.h>
+#include <mach/mach_time.h>
+#include <sys/event.h>
+#else
+#include <sys/syscall.h>
 #ifndef SYS_pidfd_open
 #define SYS_pidfd_open 434
+#endif
 #endif
 #endif
 #include <stddef.h>
@@ -1202,6 +1210,21 @@ static void read_some(stream* s) {
 /* What the process has used while it runs: its CPU time in ns from /proc/<pid>/stat, and its
  * resident set now and at its peak from /proc/<pid>/status, in bytes, each 0 where /proc can't
  * say. */
+#ifdef __APPLE__
+/* On macOS, from proc_pid_rusage: its CPU time, counted in the machine's ticks, its resident set,
+ * and as its peak the most its footprint has been, which is what Activity Monitor shows. */
+static void usage_os(proc* p, cx_u64* out) {
+    out[0] = out[1] = out[2] = 0;
+    struct rusage_info_v4 ri;
+    if (proc_pid_rusage((int)p->pid, RUSAGE_INFO_V4, (rusage_info_t*)&ri) != 0) return;
+    mach_timebase_info_data_t tb;
+    if (mach_timebase_info(&tb) == 0 && tb.denom) {
+        out[0] = (cx_u64)((unsigned __int128)(ri.ri_user_time + ri.ri_system_time) * tb.numer / tb.denom);
+    }
+    out[1] = ri.ri_resident_size;
+    out[2] = ri.ri_lifetime_max_phys_footprint;
+}
+#else
 static void usage_os(proc* p, cx_u64* out) {
     out[0] = out[1] = out[2] = 0;
     char path[64], line[512];
@@ -1231,6 +1254,7 @@ static void usage_os(proc* p, cx_u64* out) {
         fclose(f);
     }
 }
+#endif
 
 static void child_exited(proc* p, int status, const struct rusage* used) {
     p->exited = 1;
@@ -1238,7 +1262,11 @@ static void child_exited(proc* p, int status, const struct rusage* used) {
     if (used) {
         p->cpu_ns = ((cx_u64)used->ru_utime.tv_sec + (cx_u64)used->ru_stime.tv_sec) * 1000000000ull +
                     ((cx_u64)used->ru_utime.tv_usec + (cx_u64)used->ru_stime.tv_usec) * 1000ull;
+#ifdef __APPLE__
+        p->peak_memory = (cx_u64)used->ru_maxrss;   /* in bytes on macOS */
+#else
         p->peak_memory = (cx_u64)used->ru_maxrss * 1024;   /* in KiB on Linux */
+#endif
     }
     if (WIFEXITED(status)) {
         p->code = WEXITSTATUS(status);
@@ -1526,10 +1554,21 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
         switch (sp->io[i]) {
         case IO_PIPE: {
             int fds[2];
+#ifdef __APPLE__
+            /* macOS has no pipe2. Another thread's child can't take these ends before they're
+             * marked, as every child here starts with POSIX_SPAWN_CLOEXEC_DEFAULT. */
+            if (pipe(fds) != 0) {
+                fail(E_OS, errno);
+                goto done;
+            }
+            fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+            fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+#else
             if (pipe2(fds, O_CLOEXEC) != 0) {
                 fail(E_OS, errno);
                 goto done;
             }
+#endif
             ours[i] = i == 0 ? fds[1] : fds[0];
             theirs[i] = i == 0 ? fds[0] : fds[1];
             /* dup2 onto the same number would leave close-on-exec set, and close it. */
@@ -1553,6 +1592,10 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
             posix_spawn_file_actions_adddup2(&fa, 1, 2);
             break;
         default:
+#ifdef __APPLE__
+            /* Kept through CLOEXEC_DEFAULT, where this program has it open. */
+            if (fcntl(i, F_GETFD) != -1) posix_spawn_file_actions_addinherit_np(&fa, i);
+#endif
             break;
         }
     }
@@ -1566,7 +1609,12 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
     sigemptyset(&mask);
     posix_spawnattr_setsigdefault(&at, &def);
     posix_spawnattr_setsigmask(&at, &mask);
+#ifdef __APPLE__
+    /* Only the three streams reach the child, whatever else is open and not yet close-on-exec. */
+    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT);
+#else
     posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK);
+#endif
     if (sp->io[1] == IO_INHERIT || sp->io[2] == IO_INHERIT || (sp->io[2] == IO_STDOUT && sp->io[1] == IO_INHERIT)) cx_out_flush();
     pid_t pid;
     int e = posix_spawn(&pid, exe.p, &fa, &at, argv, envp);
@@ -1575,7 +1623,21 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
         goto done;
     }
     p->pid = (cx_u32)pid;
+#ifdef __APPLE__
+    /* A kqueue that's ready once the child exits; one that has exited already is looked for. */
+    p->pidfd = kqueue();
+    if (p->pidfd >= 0) {
+        struct kevent ev;
+        EV_SET(&ev, pid, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, NULL);
+        fcntl(p->pidfd, F_SETFD, FD_CLOEXEC);
+        if (kevent(p->pidfd, &ev, 1, NULL, 0, NULL) != 0) {
+            close(p->pidfd);
+            p->pidfd = -1;
+        }
+    }
+#else
     p->pidfd = (int)syscall(SYS_pidfd_open, pid, 0);
+#endif
     p->backoff = 1;
     list_live(p);
     for (int i = 0; i < 3; i++) {
@@ -1877,6 +1939,21 @@ cx_i32 cx_proc_exe(void) {
     set_result(u, (size_t)k);
     free(u);
     if (w != small) free(w);
+    return 1;
+#elif defined(__APPLE__)
+    /* The path it was started by, which may go through links, so resolved, as /proc/self/exe is. */
+    uint32_t cap = 0;
+    _NSGetExecutablePath(NULL, &cap);
+    char* b = (char*)grow(NULL, (size_t)cap + 1);
+    if (_NSGetExecutablePath(b, &cap) != 0) {
+        free(b);
+        return 0;
+    }
+    char* full = realpath(b, NULL);
+    free(b);
+    if (!full) return 0;
+    set_result(full, strlen(full));
+    free(full);
     return 1;
 #else
     size_t cap = 256;

@@ -23,6 +23,12 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <copyfile.h>
+/* macOS names stat's times so. */
+#define st_atim st_atimespec
+#define st_mtim st_mtimespec
+#endif
 #endif
 #include <stdint.h>
 #include <stdio.h>
@@ -966,9 +972,19 @@ cx_i32 cx_fs_write(cx_i64 h, const cx_u8* from, size_t n) {
     return 1;
 }
 
+/* fsync, which on macOS leaves the bytes in the drive's own cache, so there F_FULLFSYNC, with
+ * fsync for a file system that has no F_FULLFSYNC. */
+static int sync_fd(int fd) {
+#ifdef __APPLE__
+    if (fcntl(fd, F_FULLFSYNC) == 0) return 0;
+    if (errno == EINTR) return -1;
+#endif
+    return fsync(fd);
+}
+
 /* Returns once what was written through the descriptor is on the disk, as Java's force(true). */
 cx_i32 cx_fs_sync(cx_i64 h) {
-    while (fsync((int)h) != 0) {
+    while (sync_fd((int)h) != 0) {
         if (errno != EINTR) {
             fail_errno(errno);
             return 0;
@@ -1067,7 +1083,7 @@ static int sync_folder(const char* p, size_t n) {
         return 0;
     }
     int ok = 1;
-    while (fsync(fd) != 0) {
+    while (sync_fd(fd) != 0) {
         if (errno == EINTR) continue;
         if (errno != EINVAL) {
             fail_errno(errno);
@@ -1297,8 +1313,8 @@ cx_i32 cx_fs_list_typed(const cx_u8* path, size_t len) { return list_dir(path, l
 
 /* Copies the file at `from` to `to`, replacing a file there, keeping its permission bits and
  * modified time, as Windows' own copy keeps them. The kernel copies the bytes, with
- * `copy_file_range`, which shares them on a file system that can, or with reads and writes where
- * it can't. */
+ * `copy_file_range`, which shares them on a file system that can, or `fcopyfile` on macOS, or with
+ * reads and writes where neither can. */
 cx_i32 cx_fs_copy(const cx_u8* from, size_t from_len, const cx_u8* to, size_t to_len) {
     char* a = cpath(from, from_len);
     if (!a) return 0;
@@ -1330,11 +1346,21 @@ cx_i32 cx_fs_copy(const cx_u8* from, size_t from_len, const cx_u8* to, size_t to
         for (;;) {
             ssize_t n;
             if (kernel) {
+#ifdef __APPLE__
+                /* macOS copies all of it in one call; where it can't, the copy starts over. */
+                n = fcopyfile(in, out, NULL, COPYFILE_DATA) == 0 ? 0 : -1;
+                if (n < 0 && errno == ENOTSUP && lseek(in, 0, SEEK_SET) == 0 && lseek(out, 0, SEEK_SET) == 0 &&
+                    ftruncate(out, 0) == 0) {
+                    kernel = 0;
+                    continue;
+                }
+#else
                 n = copy_file_range(in, NULL, out, NULL, 1 << 30, 0);
                 if (n < 0 && (errno == EXDEV || errno == ENOSYS || errno == EINVAL || errno == EOPNOTSUPP)) {
                     kernel = 0;
                     continue;
                 }
+#endif
             } else {
                 static _Thread_local char chunk[1 << 16];
                 n = read(in, chunk, sizeof chunk);

@@ -37,6 +37,14 @@ void cx_crypto_random(cx_u8* p, cx_usize n) {
         p += take;
         n -= take;
     }
+#elif defined(__APPLE__)
+    // macOS has no getrandom; getentropy takes at most 256 bytes a call.
+    while (n) {
+        cx_usize take = n > 256 ? 256 : n;
+        if (getentropy(p, take) != 0) cx_panic_capacity();
+        p += take;
+        n -= take;
+    }
 #else
     while (n) {
         ssize_t got = getrandom(p, n, 0);

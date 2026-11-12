@@ -1087,6 +1087,19 @@ static void* large_grow(void* p, cx_usize old, cx_usize n, cx_usize keep) {
     } else {
         q = p;
     }
+#elif defined(__APPLE__)
+    /* macOS has no mremap: the block grows where it is when the addresses after it are free, which
+     * a hint gives without taking what's there, and is copied when they aren't. */
+    cx_u8* end = (cx_u8*)p + have;
+    void* more = mmap(end, want - have, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (more == (void*)end) {
+        q = p;
+    } else {
+        if (more != MAP_FAILED) munmap(more, want - have);
+        q = os_alloc(want);
+        memcpy(q, p, keep < old ? keep : old);
+        os_free(p, have);
+    }
 #else
     /* mremap moves only a range that's one mapping, and a block isn't once part of it has other
      * flags, as std.xz's tables have for 2 MiB pages; then it's copied. */

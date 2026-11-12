@@ -4,8 +4,9 @@
  * each connection's buffers: what arrived, waiting for `read`, and what `send` queued, waiting
  * for the socket. `poll` reports what happened as events: a connection accepted, an outgoing one
  * open, bytes received, a connection closed, or a waker woke it. On Windows that's IOCP, whose
- * operations complete into the runtime's buffers. On Linux it's edge-triggered epoll, and the
- * runtime reads and writes when the socket is ready. Either way the program sees the same events.
+ * operations complete into the runtime's buffers. On Linux it's edge-triggered epoll, and on macOS
+ * a kqueue with EV_CLEAR, which is the same, and the runtime reads and writes when the socket is
+ * ready. Either way the program sees the same events.
  *
  * What `send` queues waits for the next poll or flush, so everything a program writes to a
  * connection between two polls goes to the system at once: one `WSASend` or `send` for many
@@ -41,12 +42,21 @@
 #include <netinet/tcp.h>
 #include <pthread.h>
 #include <signal.h>
-#include <sys/epoll.h>
-#include <sys/eventfd.h>
-#include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <sys/event.h>
+#include <sys/types.h>
+#include <sys/uio.h>
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0 /* each socket has SO_NOSIGPIPE instead */
+#endif
+#else
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <sys/sendfile.h>
+#endif
 #endif
 #include <stdint.h>
 #include <stdlib.h>
@@ -185,7 +195,7 @@ typedef struct {
 #ifdef _WIN32
     HANDLE iocp;
 #else
-    int ep;
+    int ep;  /* the epoll, or on macOS the kqueue */
 #endif
     net_slot** slots;
     size_t nslots, slots_cap;
@@ -202,8 +212,8 @@ typedef struct {
     int woken;      /* a wake is on its way, set and cleared atomically, so wakes come as one */
     int woke;       /* this poll's events have a Woken already */
     int has_waker;  /* other threads may wake it */
-#ifndef _WIN32
-    int wake_fd;    /* the eventfd a wake writes to, once there's a waker */
+#if !defined(_WIN32) && !defined(__APPLE__)
+    int wake_fd;    /* the eventfd a wake writes to, once there's a waker; macOS's is in the kqueue */
 #endif
 } net;
 
@@ -977,6 +987,18 @@ static void lost(net* n, net_slot* s) {
  * in pieces, and one that sent some before the other end went gives back what it sent with the
  * signal raised all the same, so a short count is looked at too. */
 static ssize_t sendfile_quiet(int out, int in, off_t* at, size_t n) {
+#ifdef __APPLE__
+    /* macOS's sendfile takes the file first, and says in `len` what it sent even when it stops
+     * early with an error, such as EAGAIN once the socket is full. Each socket's SO_NOSIGPIPE keeps
+     * SIGPIPE away, and macOS has no sigtimedwait for the dance below. */
+    off_t len = (off_t)n;
+    int rc = sendfile(in, out, *at, &len, NULL, 0);
+    if (len > 0) {
+        *at += len;
+        return (ssize_t)len;
+    }
+    return rc == 0 ? 0 : -1;
+#else
     sigset_t pipe_set, old, pending;
     sigemptyset(&pipe_set);
     sigaddset(&pipe_set, SIGPIPE);
@@ -993,6 +1015,7 @@ static ssize_t sendfile_quiet(int out, int in, off_t* at, size_t n) {
     pthread_sigmask(SIG_SETMASK, &old, NULL);
     errno = e;
     return r;
+#endif
 }
 
 static void flush(net* n, net_slot* s) {
@@ -1040,12 +1063,51 @@ static void flush(net* n, net_slot* s) {
     }
 }
 
-static int watch(net* n, net_slot* s, int fd, cx_u32 events) {
+/* What a socket is ready for, as `ready` takes it from epoll's or kqueue's events: bytes or the
+ * end to read, room to write, or an error or hang-up. */
+enum { RD_IN = 1, RD_OUT = 2, RD_ERR = 4 };
+
+/* Watches the socket, edge-triggered: a listener for connections, a connection for reads and
+ * writes. */
+static int watch(net* n, net_slot* s, int fd, int conn) {
+#ifdef __APPLE__
+    struct kevent e[2];
+    EV_SET(&e[0], fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, (void*)(uintptr_t)s->index);
+    EV_SET(&e[1], fd, EVFILT_WRITE, EV_ADD | EV_CLEAR, 0, 0, (void*)(uintptr_t)s->index);
+    return kevent(n->ep, e, conn ? 2 : 1, NULL, 0, NULL);
+#else
     struct epoll_event e;
     memset(&e, 0, sizeof e);
-    e.events = events;
+    e.events = conn ? EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET : EPOLLIN | EPOLLET;
     e.data.u32 = s->index;
     return epoll_ctl(n->ep, EPOLL_CTL_ADD, fd, &e);
+#endif
+}
+
+#ifdef __APPLE__
+/* A socket made nonblocking and close-on-exec, as Linux's SOCK_NONBLOCK and SOCK_CLOEXEC make it,
+ * which macOS has neither of, and with SO_NOSIGPIPE, as it has no MSG_NOSIGNAL. -1, with the
+ * socket closed, if it can't be. */
+static int own_socket(int fd) {
+    if (fd < 0) return -1;
+    int yes = 1;
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0 || fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) != 0 ||
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof yes) != 0) {
+        int e = errno;
+        close(fd);
+        errno = e;
+        return -1;
+    }
+    return fd;
+}
+#endif
+
+static int new_socket(int family) {
+#ifdef __APPLE__
+    return own_socket(socket(family, SOCK_STREAM, IPPROTO_TCP));
+#else
+    return socket(family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_TCP);
+#endif
 }
 
 static void opened(net* n, net_slot* s) {
@@ -1085,7 +1147,12 @@ static void readable(net* n, net_slot* s) {
 
 static void accept_all(net* n, net_slot* l) {
     for (;;) {
+#ifdef __APPLE__
+        int fd = accept(l->fd, NULL, NULL);
+        if (fd >= 0 && own_socket(fd) < 0) continue;
+#else
         int fd = accept4(l->fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+#endif
         if (fd < 0) {
             if (errno == EINTR || errno == ECONNABORTED) continue;
             return;
@@ -1096,7 +1163,7 @@ static void accept_all(net* n, net_slot* l) {
             continue;
         }
         c->fd = fd;
-        if (watch(n, c, fd, EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET) != 0) {
+        if (watch(n, c, fd, 1) != 0) {
             close(fd);
             c->fd = -1;
             release_slot(n, c);
@@ -1114,7 +1181,7 @@ static void ready(net* n, net_slot* s, cx_u32 e) {
     }
     if (s->state == CONN_CLOSED) return;
     if (s->state == CONN_CONNECTING) {
-        if (!(e & (EPOLLOUT | EPOLLERR | EPOLLHUP))) return;
+        if (!(e & (RD_OUT | RD_ERR))) return;
         int err = 0;
         socklen_t len = sizeof err;
         if (getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0 || err != 0) {
@@ -1124,8 +1191,8 @@ static void ready(net* n, net_slot* s, cx_u32 e) {
         emit(n, EV_CONNECTED, s);
         opened(n, s);
     }
-    if (e & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR)) readable(n, s);
-    if (s->state != CONN_CLOSED && (e & EPOLLOUT)) {
+    if (e & (RD_IN | RD_ERR)) readable(n, s);
+    if (s->state != CONN_CLOSED && (e & RD_OUT)) {
         s->writable = 1;
         flush(n, s);
     }
@@ -1144,13 +1211,34 @@ static void wait_events(net* n, cx_i64 timeout_ms) {
     cx_i64 deadline = timeout_ms > 0 ? monotonic_ms() + timeout_ms : 0;
     int wait = timeout_ms < 0 ? -1 : timeout_ms > 0x7FFFFFFF ? 0x7FFFFFFF : (int)timeout_ms;
     for (;;) {
+#ifdef __APPLE__
+        struct kevent evs[64];
+        struct timespec ts = {wait / 1000, (long)(wait % 1000) * 1000000};
+        int got = kevent(n->ep, NULL, 0, evs, 64, wait < 0 ? NULL : &ts);
+        if (got < 0 && errno != EINTR) return;
+        if (got > 0) {
+            for (int i = 0; i < got; i++) {
+                if (evs[i].filter == EVFILT_USER) {
+                    woke(n);  /* EV_CLEAR set it back */
+                    continue;
+                }
+                /* The end, or an error, reads as readable, which finds it, as epoll's RDHUP does. */
+                cx_u32 e = evs[i].filter == EVFILT_WRITE ? RD_OUT : RD_IN;
+                if (evs[i].flags & (EV_EOF | EV_ERROR)) e |= RD_IN | RD_ERR;
+                ready(n, n->slots[(uintptr_t)evs[i].udata], e);
+            }
+#else
         struct epoll_event evs[64];
         int got = epoll_wait(n->ep, evs, 64, wait);
         if (got < 0 && errno != EINTR) return;
         if (got > 0) {
             for (int i = 0; i < got; i++) {
                 if (evs[i].data.u32 != NET_NONE) {
-                    ready(n, n->slots[evs[i].data.u32], evs[i].events);
+                    cx_u32 k = evs[i].events, e = 0;
+                    if (k & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR)) e |= RD_IN;
+                    if (k & EPOLLOUT) e |= RD_OUT;
+                    if (k & (EPOLLHUP | EPOLLERR)) e |= RD_ERR;
+                    ready(n, n->slots[evs[i].data.u32], e);
                     continue;
                 }
                 /* The eventfd: reading it sets it back to 0. */
@@ -1159,6 +1247,7 @@ static void wait_events(net* n, cx_i64 timeout_ms) {
                 (void)r;
                 woke(n);
             }
+#endif
             if (got == 64) {
                 /* There may be more already. */
                 wait = 0;
@@ -1180,7 +1269,11 @@ cx_u64 cx_net_open(void) {
     net_check_thread();
     net* n = calloc(1, sizeof *n);
     if (!n) net_out_of_memory();
+#ifdef __APPLE__
+    n->ep = kqueue();  /* never inherited by a child, so no close-on-exec needed */
+#else
     n->ep = epoll_create1(EPOLL_CLOEXEC);
+#endif
     if (n->ep < 0) {
         fail_os();
         free(n);
@@ -1195,11 +1288,11 @@ cx_i32 cx_net_listen(cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port) {
     struct addrinfo* a = resolve(host, len, port, 1);
     if (!a) return -1;
     const struct addrinfo* b = listen_addr(a, len == 0);
-    int fd = socket(b->ai_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_TCP);
+    int fd = new_socket(b->ai_family);
     if (fd < 0 && b != a) {
         /* No IPv6 on this machine: every IPv4 address, then. */
         b = a;
-        fd = socket(b->ai_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_TCP);
+        fd = new_socket(b->ai_family);
     }
     int yes = 1, no = 0;
     if (fd >= 0) setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
@@ -1215,7 +1308,7 @@ cx_i32 cx_net_listen(cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port) {
     socklen_t at_len = sizeof at;
     getsockname(fd, (struct sockaddr*)&at, &at_len);
     net_slot* l = new_slot(n, SLOT_LISTENER);
-    if (!l || watch(n, l, fd, EPOLLIN | EPOLLET) != 0) {
+    if (!l || watch(n, l, fd, 0) != 0) {
         fail_os();
         close(fd);
         if (l) release_slot(n, l);
@@ -1230,7 +1323,7 @@ cx_u32 cx_net_connect(cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port) {
     net* n = (net*)(uintptr_t)h;
     struct addrinfo* a = resolve(host, len, port, 0);
     if (!a) return NET_NONE;
-    int fd = socket(a->ai_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_TCP);
+    int fd = new_socket(a->ai_family);
     if (fd < 0) {
         fail_os();
         freeaddrinfo(a);
@@ -1247,7 +1340,7 @@ cx_u32 cx_net_connect(cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port) {
     c->state = CONN_CONNECTING;
     int r = connect(fd, a->ai_addr, a->ai_addrlen);
     freeaddrinfo(a);
-    if (watch(n, c, fd, EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET) != 0 || (r != 0 && errno != EINPROGRESS)) {
+    if (watch(n, c, fd, 1) != 0 || (r != 0 && errno != EINPROGRESS)) {
         lost(n, c);
     }
     return slot_id(c);
@@ -1257,7 +1350,9 @@ static void close_all(net* n) {
     for (size_t i = 0; i < n->nslots; i++) {
         if (n->slots[i]->fd >= 0) close(n->slots[i]->fd);
     }
+#ifndef __APPLE__
     if (n->has_waker) close(n->wake_fd);
+#endif
     close(n->ep);
 }
 
@@ -1430,7 +1525,12 @@ cx_bool cx_net_waker(cx_u64 h) {
     net_check_thread();
     net* n = (net*)(uintptr_t)h;
     if (n->has_waker) return 1;
-#ifndef _WIN32
+#ifdef __APPLE__
+    /* On macOS a wake triggers a user event in the kqueue, which EV_CLEAR sets back once seen. */
+    struct kevent e;
+    EV_SET(&e, 0, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
+    if (kevent(n->ep, &e, 1, NULL, 0, NULL) != 0) return 0;
+#elif !defined(_WIN32)
     /* On Windows a wake is a completion posted to the port, which needs nothing made first. */
     int fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (fd < 0) return 0;
@@ -1456,6 +1556,10 @@ void cx_net_wake(cx_u64 h) {
     if (__atomic_exchange_n(&n->woken, 1, __ATOMIC_SEQ_CST)) return;
 #ifdef _WIN32
     PostQueuedCompletionStatus(n->iocp, 0, 0, NULL);
+#elif defined(__APPLE__)
+    struct kevent e;
+    EV_SET(&e, 0, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
+    kevent(n->ep, &e, 1, NULL, 0, NULL);
 #else
     cx_u64 one = 1;
     ssize_t r = write(n->wake_fd, &one, sizeof one);
