@@ -53,7 +53,7 @@ A literal is a list only where a list is wanted, such as `let xs: List<i32> = [1
 | `xs.clear()` | Frees every element, keeping the memory |
 | `xs.contains(x)` | Whether an element `== x`. The element type must have `==` |
 | `xs.sort()` | Puts the elements in order, from least to greatest. The element type must have [`Order`](comparing.md#order) ([sorting](#sorting)) |
-| `xs.reverse()` | Puts the elements in the opposite order, in place, swapping each pair from the ends in |
+| `xs.reverse()` | Puts the elements in the opposite order, in place, swapping each pair from the ends in. Elements of 1, 2, 4 or 8 bytes are swapped 16 bytes from each end at a time |
 | `xs.sum()` | The numbers added up, as Python's `sum`: integers wrap as `+` does, and floats are added with Neumaier's compensation, as Python adds them since 3.12, so `[0.1; 10].sum()` is `1.0`. 0 for none ([sum, min and max](#sum-min-and-max)) |
 | `xs.min()`, `xs.max()` | A copy of the least or greatest element, the first of equal ones, or `none` when there are none. The element type must have [`Order`](comparing.md#order), or be a float |
 | `xs.as_ptr()`, `xs.as_mut_ptr()`, `xs.set_len(n)` | A pointer to the elements, and setting the length, for [unsafe code](unsafe.md#pointers) |
@@ -113,6 +113,7 @@ fn main() {
 
 - The list, then the ends, are worked out in the order they're written. A range that starts after it ends, or goes past the end, panics.
 - A slice is a new list, so it can't be assigned to: `xs[0..2] = ys` is an error. Change the elements by index.
+- `xs.extend(ys[a..b])` with `Copy` elements copies them straight from `ys`, with no list of them made in between, and checks the range as a slice does.
 - `xs.extend(xs)` is an error, since `xs` would grow under the elements being copied. Add a copy: `xs.extend(xs.copy())`.
 
 ## Loops

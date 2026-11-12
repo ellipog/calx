@@ -1,0 +1,8 @@
+// `xs.extend(ys[a..b])` copies straight from `ys` (CLX-308), with the bounds check a slice has.
+fn main() {
+    let src: List<u8> = [1, 2, 3]
+    var out: List<u8> = []
+    out.extend(src[1..])
+    println("{out}")    // out: [2, 3]
+    out.extend(src[2..5])    // panic: the range 2..5 is out of bounds for length 3
+}

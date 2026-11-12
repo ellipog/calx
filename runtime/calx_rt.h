@@ -1247,6 +1247,43 @@ CX_INLINE cx_usize cx_text_find(cx_str hay, cx_str needle) {
     }
     return cx_str_find(hay, needle);
 }
+/* `reverse` on a list or an array whose elements are 1, 2, 4 or 8 bytes: 16 bytes from each end
+ * at a time, each block's elements put in the other order and the two blocks swapped, then an
+ * element at a time in the middle. Moving elements whole, it suits any type of those sizes. A
+ * loop of swaps from both ends wasn't vectorized, as clang can't tell the ends never meet, and
+ * took more of reverse-complement's time than pairing the bases did (CLX-308). */
+typedef cx_u8 cx_bytes16 __attribute__((vector_size(16)));
+CX_INLINE cx_bytes16 cx_reverse16(cx_bytes16 x, cx_usize size) {
+    switch (size) {
+        case 1: return __builtin_shufflevector(x, x, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+        case 2: return __builtin_shufflevector(x, x, 14, 15, 12, 13, 10, 11, 8, 9, 6, 7, 4, 5, 2, 3, 0, 1);
+        case 4: return __builtin_shufflevector(x, x, 12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3);
+        default: return __builtin_shufflevector(x, x, 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7);
+    }
+}
+CX_INLINE void cx_reverse_elems(void* ptr, cx_usize n, cx_usize size) {
+    cx_u8* a = (cx_u8*)ptr;
+    cx_u8* z = a + n * size;
+    while (z - a >= 32) {
+        cx_bytes16 x, y;
+        __builtin_memcpy(&x, a, 16);
+        __builtin_memcpy(&y, z - 16, 16);
+        x = cx_reverse16(x, size);
+        y = cx_reverse16(y, size);
+        __builtin_memcpy(a, &y, 16);
+        __builtin_memcpy(z - 16, &x, 16);
+        a += 16;
+        z -= 16;
+    }
+    while ((cx_usize)(z - a) >= 2 * size) {
+        z -= size;
+        cx_u8 t[8];
+        __builtin_memcpy(t, a, size);
+        __builtin_memcpy(a, z, size);
+        __builtin_memcpy(z, t, size);
+        a += size;
+    }
+}
 /* A loop over `s.split(sep)`: the next part from `*at`, and where the one after starts, or
  * CX_NOT_FOUND after the last. 0 when there are no more. */
 CX_INLINE cx_bool cx_text_split_next(cx_str s, cx_str sep, cx_usize* at, cx_str* part) {

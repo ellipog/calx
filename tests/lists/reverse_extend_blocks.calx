@@ -1,0 +1,112 @@
+// `reverse` on elements of 1, 2, 4 and 8 bytes moves 16 bytes from each end at a time, and
+// `xs.extend(ys[a..b])` copies `Copy` elements straight from `ys`, with no list made of them
+// first (CLX-308). Each against the same done an element at a time, at every length up to 70,
+// past two 16-byte blocks of each size, with structs of 8 bytes, which go in blocks too, and of
+// 12, which don't.
+struct Pair {
+    a: i32
+    b: i32
+}
+
+struct Triple {
+    a: i32
+    b: i32
+    c: i32
+}
+
+// `xs` in the other order, an element at a time.
+fn backwards<T: Copy>(xs: List<T>) -> List<T> {
+    var out: List<T> = []
+    var i = xs.len()
+    while i > 0 {
+        i -= 1
+        out.push(xs[i])
+    }
+    return out
+}
+
+fn main() {
+    var same = 0
+    var tried = 0
+    for n in 0usize..71 {
+        var a: List<u8> = []
+        var b: List<i16> = []
+        var c: List<i32> = []
+        var d: List<f32> = []
+        var e: List<i64> = []
+        var f: List<f64> = []
+        var g: List<bool> = []
+        var p: List<Pair> = []
+        var t: List<Triple> = []
+        for k in 0usize..n {
+            a.push(u8.wrap(k * 7 + 1))
+            b.push(i16.wrap(k * 301) - 5)
+            c.push(i32.wrap(k * 70001) - 9)
+            d.push(f32.nearest(k) * 0.5)
+            e.push(i64.wrap(k) * 1000000007 - 3)
+            f.push(f64.nearest(k) / 3.0)
+            g.push(k % 3 == 0)
+            p.push(Pair { a: i32.wrap(k), b: -i32.wrap(k) })
+            t.push(Triple { a: i32.wrap(k), b: 1, c: -i32.wrap(k) })
+        }
+        let (a0, b0, c0, d0, e0) = (backwards(a), backwards(b), backwards(c), backwards(d), backwards(e))
+        let (f0, g0, p0, t0) = (backwards(f), backwards(g), backwards(p), backwards(t))
+        a.reverse()
+        b.reverse()
+        c.reverse()
+        d.reverse()
+        e.reverse()
+        f.reverse()
+        g.reverse()
+        p.reverse()
+        t.reverse()
+        tried += 1
+        if a == a0 and b == b0 and c == c0 and d == d0 and e == e0 and f == f0 and g == g0 and p == p0 and t == t0 {
+            same += 1
+        } else {
+            println("reverse differs at length {n}")
+        }
+    }
+    println("{same == tried} {tried}")    // out: true 71
+
+    // An array of bytes, in blocks too.
+    var arr: [u8; 50] = [0; 50]
+    for k in 0usize..50 {
+        arr[k] = u8.wrap(k)
+    }
+    arr.reverse()
+    var right = true
+    for k in 0usize..50 {
+        right = right and arr[k] == u8.wrap(49 - k)
+    }
+    println("{right} {arr[0]} {arr[49]}")    // out: true 49 0
+
+    // extend from slices of a list, with every kind of end, and of an array.
+    var src: List<u16> = []
+    for k in 0u16..100 {
+        src.push(k)
+    }
+    var dst: List<u16> = [7]
+    dst.extend(src[3..6])
+    dst.extend(src[..2])
+    dst.extend(src[98..])
+    dst.extend(src[5..=6])
+    dst.extend(src[10..10])
+    let four = [1u16, 2, 3, 4]
+    dst.extend(four[1..3])
+    println("{dst}")    // out: [7, 3, 4, 5, 0, 1, 98, 99, 5, 6, 2, 3]
+    // A long one, so the list grows while it's copied.
+    var long: List<u16> = []
+    long.extend(src[1..])
+    println("{long.len()} {long[0]} {long[98]}")    // out: 99 1 99
+    // The list, then the ends, are worked out in the order they're written.
+    var at = 0usize
+    var picked: List<u16> = []
+    picked.extend(src[{ at += 1; at }..{ at += 2; at }])
+    println("{picked} {at}")    // out: [1, 2] 3
+    // Elements that aren't `Copy` are copied each with its `copy`, as before.
+    let words: List<String> = ["a", "b", "c", "d"]
+    var kept: List<String> = []
+    kept.extend(words[1..3])
+    println("{kept} {words}")    // out: [b, c] [a, b, c, d]
+}

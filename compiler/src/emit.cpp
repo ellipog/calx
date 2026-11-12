@@ -7134,6 +7134,26 @@ $dropall    m->len = 0;
                 // The list, then what's added, in order; one copy of the bytes for `Copy` elements.
                 Expr* from = e->args[0].value;
                 Type* at = from->type;
+                Type* ft = from->kind == ExprKind::slice && from->lhs->type ? from->lhs->type : nullptr;
+                if (ft && (ft->kind == TypeKind::list || ft->kind == TypeKind::array) && is_copy(et)) {
+                    // `xs.extend(ys[a..b])`: the elements are copied from where they are, with the
+                    // same bounds check a slice makes, and no list made of them first (CLX-308).
+                    // Their address is read after the list grows, in case they're its own.
+                    Expr* r = from->rhs;
+                    std::vector<Operand> sops = {{recv, t, Pass::address}, {from->lhs, ft, Pass::address}};
+                    if (r->lhs) sops.push_back({r->lhs, r->lhs->type});
+                    if (r->rhs) sops.push_back({r->rhs, r->rhs->type});
+                    std::string decls, b = tmp(), lo = tmp(), end = tmp(), n = tmp();
+                    std::vector<std::string> v = sequence(sops, decls);
+                    bool farr = ft->kind == TypeKind::array;
+                    std::string flen = farr ? std::to_string(ft->length) : b + "->len";
+                    return "({ " + decls + l + "* " + p + " = " + v[0] + "; const " + ctype(ft) + "* " + b + " = " + v[1] + "; cx_usize " +
+                           lo + " = " + (r->lhs ? v[2] : std::string("0")) + "; cx_usize " + end + " = cx_slice_end(" + lo + ", " +
+                           (r->rhs ? v.back() : flen) + ", " + (r->rhs && r->inclusive ? "1" : "0") + ", " + flen + ", " +
+                           location(from->span) + "); cx_usize " + n + " = " + end + " - " + lo + "; if (" + n + ") { if (" + n + " > " +
+                           p + "->cap - " + p + "->len) " + grow(n) + " __builtin_memcpy(" + p + "->ptr + " + p + "->len, " + b +
+                           (farr ? "->v" : "->ptr") + " + " + lo + ", " + n + " * sizeof(" + el + ")); " + p + "->len += " + n + "; } })";
+                }
                 std::string decls, s = tmp(), n = tmp();
                 std::vector<std::string> ops = sequence({{recv, t, Pass::address}, {from, at, Pass::address}}, decls);
                 std::string src = s + (at->kind == TypeKind::array ? "->v" : "->ptr");
@@ -7176,11 +7196,15 @@ $dropall    m->len = 0;
                        "); (void)cx_index(" + j + ", " + len + ", " + index_at(1) + "); " + el + " " + v + " = " + ptr + "[" + i +
                        "]; " + ptr + "[" + i + "] = " + ptr + "[" + j + "]; " + ptr + "[" + j + "] = " + v + "; })";
             case BMethod::sort: return head + sort_call(et, ptr, len, location(e->span)) + "; })";
-            case BMethod::reverse:
-                // From both ends to the middle, each pair swapped once.
-                return head + "cx_usize " + i + " = 0, " + j + " = " + len + "; while (" + i + " + 1 < " + j + ") { " + j + "--; " + el +
-                       " " + v + " = " + ptr + "[" + i + "]; " + ptr + "[" + i + "] = " + ptr + "[" + j + "]; " + ptr + "[" + j + "] = " + v +
-                       "; " + i + "++; } })";
+            case BMethod::reverse: {
+                // From both ends to the middle, each pair swapped once: 16 bytes at a time for
+                // elements of 1, 2, 4 or 8 bytes (CLX-308), which C's `sizeof` decides.
+                std::string size = "sizeof(" + el + ")";
+                return head + "if (" + size + " == 1 || " + size + " == 2 || " + size + " == 4 || " + size + " == 8) cx_reverse_elems(" + ptr +
+                       ", " + len + ", " + size + "); else { cx_usize " + i + " = 0, " + j + " = " + len + "; while (" + i + " + 1 < " + j +
+                       ") { " + j + "--; " + el + " " + v + " = " + ptr + "[" + i + "]; " + ptr + "[" + i + "] = " + ptr + "[" + j + "]; " +
+                       ptr + "[" + j + "] = " + v + "; " + i + "++; } } })";
+            }
             case BMethod::join:
                 if (recv->kind == ExprKind::call && recv->call == CallKind::builtin_method &&
                     (recv->bmethod == BMethod::split || recv->bmethod == BMethod::lines || recv->bmethod == BMethod::split_whitespace)) {
