@@ -445,6 +445,9 @@ impl Div<BigInt> for BigInt {
         if other.mag.len() == 0 {
             panic("division by zero")
         }
+        if let qh = small_quotient(self.mag, other.mag) {
+            return small(self.negative != other.negative, qh)
+        }
         let (q, _) = divmod_mag(self.mag, other.mag)
         return make(self.negative != other.negative, q)
     }
@@ -477,7 +480,8 @@ impl Sub<i64> for BigInt {
 
 impl Mul<i64> for BigInt {
     fn mul(self, other: i64) -> BigInt {
-        return self * BigInt.from(other)
+        let bits = u64.wrap(other)
+        return make(self.negative != (other < 0), mul_small(self.mag, if other < 0 { 0 - bits } else { bits }))
     }
 }
 
@@ -509,7 +513,7 @@ impl Sub<i32> for BigInt {
 
 impl Mul<i32> for BigInt {
     fn mul(self, other: i32) -> BigInt {
-        return self * BigInt.from(other)
+        return self * i64(other)
     }
 }
 
@@ -643,6 +647,113 @@ fn sub_mag(a: List<u64>, b: List<u64>) -> List<u64> {
     }
     trim(mut out)
     return out
+}
+
+/// `a * m`, a limb at a time into a list of its own, which the top limb of `a` times `m`, at least
+/// 1, can't leave with a zero limb at the top.
+fn mul_small(a: List<u64>, m: u64) -> List<u64> {
+    if m == 0 or a.is_empty() {
+        return []
+    }
+    var out: List<u64> = []
+    out.reserve(a.len() + 1)
+    unsafe {
+        let pa = a.as_ptr()
+        let po = out.as_mut_ptr()
+        var carry: u64 = 0
+        var i: usize = 0
+        while i < a.len() {
+            let p = pa.add(i).read().widening_mul(m)
+            let lo = p.0 + carry
+            carry = p.1 + (if lo < p.0 { 1 } else { 0 })
+            po.add(i).write(lo)
+            i += 1
+        }
+        if carry != 0 {
+            po.add(i).write(carry)
+            i += 1
+        }
+        out.set_len(i)
+    }
+    return out
+}
+
+/// The quotient of `a` by `b`, if it's one limb and `b` two or more: `a` is at most a limb longer
+/// than `b`, as when a spigot divides two numbers of about the same size for a digit. Knuth's guess
+/// from the top limbs, shifted as if `b`'s top bit were set, is at most one too big after the same
+/// test algorithm D makes (4.3.1, D3), and one pass that reads `a` and `b` and writes nothing says
+/// whether it is. So neither is copied or shifted, as the general division does. `none` when the
+/// quotient may not fit in a limb.
+fn small_quotient(a: List<u64>, b: List<u64>) -> u64? {
+    let n = b.len()
+    if n < 2 or a.len() < n or a.len() > n + 1 {
+        return none
+    }
+    let s = u64.wrap(b[n - 1].leading_zeros())
+    let a3: u64 = if n >= 3 { a[n - 3] } else { 0 }
+    let b3: u64 = if n >= 3 { b[n - 3] } else { 0 }
+    let top: u64 = if a.len() > n { a[n] } else { 0 }
+    // Bits of `a` shifted past limb `n` make a quotient of more than a limb.
+    if s > 0 and top >> (64 - s) != 0 {
+        return none
+    }
+    let vt = limb_shl(b[n - 1], b[n - 2], s)
+    let vs = limb_shl(b[n - 2], b3, s)
+    let ut = limb_shl(top, a[n - 1], s)
+    let un = limb_shl(a[n - 1], a[n - 2], s)
+    let u2 = limb_shl(a[n - 2], a3, s)
+    if ut >= vt {
+        return none
+    }
+    let p = u64.div_wide(ut, un, vt)
+    var qh = p.0
+    var rh = p.1
+    var refine = true
+    while refine {
+        let w = qh.widening_mul(vs)
+        if w.1 > rh or (w.1 == rh and w.0 > u2) {
+            qh -= 1
+            let r2 = rh + vt
+            refine = r2 >= rh
+            rh = r2
+        } else {
+            refine = false
+        }
+    }
+    while qh > 0 and mul_exceeds(a, b, qh) {
+        qh -= 1
+    }
+    return some(qh)
+}
+
+/// The limb `hi` shifted left by `s` bits, below 64, with the top bits of `lo` coming in.
+fn limb_shl(hi: u64, lo: u64, s: u64) -> u64 {
+    return if s == 0 { hi } else { (hi << s) | (lo >> (64 - s)) }
+}
+
+/// Whether `qh * b` is more than `a`, where `a` is `b`'s length or a limb longer: `a - qh * b`
+/// worked out a limb at a time for its borrow alone.
+fn mul_exceeds(a: List<u64>, b: List<u64>, qh: u64) -> bool {
+    let n = b.len()
+    var carry: u64 = 0
+    var borrow: u64 = 0
+    unsafe {
+        let pa = a.as_ptr()
+        let pb = b.as_ptr()
+        var i: usize = 0
+        while i < n {
+            let p = pb.add(i).read().widening_mul(qh)
+            let lo = p.0 + carry
+            carry = p.1 + (if lo < p.0 { 1 } else { 0 })
+            let x = pa.add(i).read()
+            let d = x - lo
+            borrow = if x < lo or d < borrow { 1 } else { 0 }
+            i += 1
+        }
+    }
+    let x: u64 = if a.len() > n { a[n] } else { 0 }
+    let d = x - carry
+    return x < carry or d < borrow
 }
 
 /// `xs * m + add`, in place.

@@ -1,0 +1,63 @@
+// `a / b` where the quotient is one limb and `a` at most a limb longer than `b`, which is found
+// from the top limbs and checked in one pass without dividing (CLX-298), against `div_rem`'s
+// quotient and against q * |b| <= |a| < (q + 1) * |b|: dividends as long as the divisor and a limb
+// longer, divisors of two limbs up and with their top bit set or not, quotients of 0, 1 and near
+// 2^64, and every sign.
+import std.bigint.{BigInt}
+import std.random.{Random}
+
+fn limbs(r: mut Random, n: usize, top_bit: bool) -> BigInt {
+    var x = BigInt.zero()
+    for k in 0usize..n {
+        var limb = r.next_u64()
+        if k == 0 {
+            limb = if top_bit { limb | (1u64 << 63) } else { (limb >> r.below(63)) | 1 }
+        }
+        x = x.shl(64) + BigInt.from(limb)
+    }
+    return x
+}
+
+fn check(a: BigInt, b: BigInt) -> bool {
+    let q = a / b
+    let (q2, _) = a.div_rem(b)
+    let qa = q.abs()
+    let fits = qa * b.abs() <= a.abs() and (qa + 1) * b.abs() > a.abs()
+    return q == q2 and fits
+}
+
+fn main() {
+    var r = Random.new(298)
+    var good = 0
+    var tried = 0
+    for _ in 0..4000 {
+        let n = 2usize + usize.wrap(r.below(5))
+        let top_bit = r.coin()
+        let b = limbs(mut r, n, top_bit)
+        // A quotient below 2^64: b times a random limb, plus something below b.
+        let q = BigInt.from(r.next_u64() >> r.below(64))
+        let rest = limbs(mut r, n, false) % b
+        let a = b * q + rest
+        for (x, y) in [(a.copy(), b.copy()), (-a.copy(), b.copy()), (a.copy(), -b.copy()), (-a.copy(), -b.copy())] {
+            tried += 1
+            if check(x, y) {
+                good += 1
+            }
+        }
+        // A dividend below the divisor, and one equal to it.
+        tried += 2
+        if check(rest.copy(), b.copy()) {
+            good += 1
+        }
+        if check(b.copy(), b.copy()) {
+            good += 1
+        }
+    }
+    println("{good == tried} {tried}")    // out: true 24000
+
+    // The largest one-limb quotient, and one just past it, which the general division gives.
+    let b = BigInt.parse("340282366920938463463374607431768211455")!    // 2^128 - 1
+    let most = b * BigInt.from(u64.MAX) + (b - 1)
+    let past = b * BigInt.parse("18446744073709551616")!    // 2^64
+    println("{most / b} {past / b} {check(most, b.copy())} {check(past, b)}")    // out: 18446744073709551615 18446744073709551616 true true
+}
