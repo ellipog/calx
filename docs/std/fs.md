@@ -66,7 +66,9 @@ fn main() {
 | `try_lock(path: String, bytes: List<u8>) -> FileLock? ! FsError` | Opens the file to write, creating it if nothing's there and keeping what it holds, writes `bytes` at its start and syncs them, then takes an exclusive lock on the whole file without waiting, as Java's `FileChannel.tryLock`. `none` if another lock is held on it, by this program or another |
 | `separator() -> String` | What the system puts between a path's names, as Java's `File.separator`: `\` on Windows and `/` elsewhere, as in the paths `real_path` and `temp_dir` give. Either works in the paths `std.fs` is given |
 | `temp_dir() -> String ! FsError` | A new, empty directory of the program's own in the system's temporary folder, for it to remove. On Linux and macOS its links are followed, as `current_dir` names it: macOS's is under `/private/var` |
+| `unsafe disk_usage(path: String) -> DiskUsage ! FsError` | How big the file system that holds the path is, and how much of it is used and free, as Python's `shutil.disk_usage` and `df` count them. See [Room on the disk](#room-on-the-disk) |
 | `Metadata` | `size: u64`, the length in bytes, which for a directory is whatever the system says, and `modified: Timestamp`, when what it holds last changed, to the millisecond. Writing or appending to a file sets it. And `mode: u32`, its permission bits, such as `0o644`. On Windows, which has only a read-only flag, they're `0o666`, or `0o444` when it's read-only, with `0o111` added for a directory. And `kind: Kind`, `File`, `Dir` or `Other`, what `is_file` and `is_dir` would say, from the same look at it |
+| `DiskUsage` | `total: u64`, how big a file system is, `used: u64`, how much of it is in use, and `available: u64`, how much more this program may write to it, `df`'s `Avail`, all in bytes |
 | `open(path: String) -> File ! FsError` | The file kept open to read and write, made if nothing's there, keeping what it holds. Other programs, and this one, can read, write and remove it while it's open, as Java lets them while it has a `FileChannel` open. See [Files kept open](#files-kept-open) |
 | `open_read(path: String) -> File ! FsError` | The file kept open only to read, as Python's `open(path, "rb")`: `NotFound` if nothing's there, rather than a new empty file, and writing through it fails |
 | `File` | An open file: its `path()`, `size() -> u64`, `metadata() -> Metadata`, what `metadata` says of its path but from the file already open, which on Windows is quicker than opening it again, `read_part(from, n)` and `read_parts(ranges)`, which give what the functions of those names do, `write_parts(parts, sync)`, as the function does, `sync()`, `close(own self)`, and `raw() -> i64`, the system's handle to it, as Python's `fileno()`: a `HANDLE` on Windows, a file descriptor on Linux. All but `path` and `raw` fail with `FsError`. It's open until `close`, or until the program ends. It's a [handle](../reference/ownership.md#handles), so it can't be copied |
@@ -200,6 +202,22 @@ fn main() {
 - `copy` keeps the permission bits and the modified time, as Python's `shutil.copy2` does. On Linux the kernel copies the bytes with `copy_file_range`, without bringing them into the program, and a file system that can, such as Btrfs or XFS, shares them instead. Windows copies with its own `CopyFileW`.
 - `copy_dir_all` is Python's `shutil.copytree` with `symlinks=True` and `dirs_exist_ok=True`: it makes a link again as a link to the same target, so nothing outside `from` is copied, and passes over devices, sockets and pipes. Each directory is listed before anything is made in it, so a copy into a directory inside `from` doesn't copy itself. On Windows a tree with a link in it needs the right to make links ([Links](#links)).
 
+## Room on the disk
+
+`disk_usage` says how big the file system that holds a path is, and how much of it is used and free, in bytes, as Python's `shutil.disk_usage` and `df -B1` count them. The path can be any file or directory on it. It's `unsafe`, since the numbers change as any program writes, as the clock's do.
+
+```calx
+import std.fs.{disk_usage}
+
+fn main() {
+    let d = unsafe { disk_usage("/") }!
+    let percent = d.used * 100 / d.total
+    println("{percent < 100} {d.used + d.available <= d.total}")    // out: true true
+}
+```
+
+`available` is what this program may still write, which `df` calls `Avail` and Python `free`. On Linux and macOS a file system keeps some room back for root, 5% on a new ext4, which counts in neither `used` nor `available`, so the two add up to less than `total`, as they do in `df`. On Windows, `used` is the size less what's free, and a user's quota can make `available` less than that.
+
 ## The current folder
 
 A relative path is on the folder the program runs in, `current_dir`, which `set_current_dir` changes for the whole program: every thread, and each program [`std.process`](process.md) starts without a folder of its own. A script that works in one folder can pass that folder to each call instead, which leaves the rest of the program alone.
@@ -287,8 +305,8 @@ To keep a file whole through a power cut, write the new bytes with `write_parts`
 
 | Platform | Source |
 | --- | --- |
-| Windows | `CreateFileW`, `ReadFile` and `WriteFile`; `LockFileEx`; `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, and `MOVEFILE_WRITE_THROUGH` to sync; `CopyFileW`; `FindFirstFileExW`; `GetFinalPathNameByHandleW`, without the `\\?\` it puts first; `GetFullPathNameW`; `GetCurrentDirectoryW` and `SetCurrentDirectoryW`; `GetTempPathW` |
-| Linux | `open`, `read` and `write`; `fcntl` with `F_OFD_SETLK`; `rename`, then `fsync` on the folder it moved into and the one it moved from, to sync, where a file system that can't sync a folder offers nothing more; `copy_file_range`, or reads and writes where a file system can't, then `fchmod` and `futimens`; `opendir`; `realpath`; `getcwd` and `chdir`; `mkdtemp` in `TMPDIR` or `/tmp` |
+| Windows | `CreateFileW`, `ReadFile` and `WriteFile`; `LockFileEx`; `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, and `MOVEFILE_WRITE_THROUGH` to sync; `CopyFileW`; `FindFirstFileExW`; `GetFinalPathNameByHandleW`, without the `\\?\` it puts first; `GetFullPathNameW`; `GetCurrentDirectoryW` and `SetCurrentDirectoryW`; `GetTempPathW`; `GetDiskFreeSpaceExW`, on the folder a file is in |
+| Linux | `open`, `read` and `write`; `fcntl` with `F_OFD_SETLK`; `rename`, then `fsync` on the folder it moved into and the one it moved from, to sync, where a file system that can't sync a folder offers nothing more; `copy_file_range`, or reads and writes where a file system can't, then `fchmod` and `futimens`; `opendir`; `realpath`; `getcwd` and `chdir`; `mkdtemp` in `TMPDIR` or `/tmp`; `statvfs`, or on macOS `statfs` |
 
 `read` asks for the file's size and reads it whole in one call, so the list never grows, and a second call sees the end. A file can still grow as it's read, and `read` keeps going until the end.
 

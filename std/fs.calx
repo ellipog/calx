@@ -1,7 +1,7 @@
 /// Files and directories: whole files read and written, parts of files read and written in
 /// place, copies, renames, sizes and modified times, directories made, listed, walked, copied
-/// and removed, globs, links read and made, the current folder, absolute and real paths, and
-/// temporary directories.
+/// and removed, globs, links read and made, the current folder, absolute and real paths,
+/// temporary directories, and the room on a disk.
 module std.fs
 
 import std.path.{join, normalize, glob_matches_name, root as path_root, parts as path_parts}
@@ -41,6 +41,7 @@ extern "C" {
     fn cx_fs_stat_kind() -> u32
     fn cx_fs_handle_stat(h: i64) -> i32
     fn cx_fs_set_mode(path: *const u8, len: usize, mode: u32) -> i32
+    fn cx_fs_disk_usage(path: *const u8, len: usize, out: *u64) -> i32
     fn cx_fs_result_len() -> usize
     fn cx_fs_result_copy(to: *u8)
     fn cx_fs_error_kind() -> u32
@@ -96,6 +97,19 @@ pub struct Metadata {
     /// What it is, following links: a `File`, a `Dir` or `Other`, so one `metadata` says what
     /// `is_file` or `is_dir` would, without asking the system again.
     pub kind: Kind
+}
+
+/// The room on a file system, in bytes, as `disk_usage` reads it.
+pub struct DiskUsage {
+    /// How big it is.
+    pub total: u64
+    /// How much of it is in use.
+    pub used: u64
+    /// How much more this program may write to it, `df`'s `Avail` and Python's `free`. On Linux
+    /// and macOS what the file system keeps back for root counts in neither this nor `used`, so
+    /// the two can add up to less than `total`: by 5% on a new ext4. On Windows a user's quota
+    /// can make it less than what's free.
+    pub available: u64
 }
 
 /// What a link points to, as `read_link` reads it.
@@ -756,6 +770,18 @@ pub fn temp_dir() -> String ! FsError {
         fail last_error()
     }
     return result()
+}
+
+/// How big the file system that holds `path` is, and how much of it is used and free, in bytes,
+/// as Python's `shutil.disk_usage` and `df` count them: from `statvfs` on Linux, `statfs` on
+/// macOS and `GetDiskFreeSpaceExW` on Windows. `path` can be any file or directory on it. It's
+/// `unsafe`, since the numbers change as any program writes, as the clock's do.
+pub unsafe fn disk_usage(path: String) -> DiskUsage ! FsError {
+    var out: List<u64> = [0, 0, 0]
+    if unsafe { cx_fs_disk_usage(path.as_ptr(), path.len(), out.as_mut_ptr()) } == 0 {
+        fail last_error()
+    }
+    return DiskUsage { total: out[0], used: out[1], available: out[2] }
 }
 
 /// Whether anything is at `path`, following links, as Python's `os.path.exists`: `false` for a
