@@ -44,7 +44,7 @@ Calx compiles programs to C and has clang build that C. A release brings its own
 
 The toolchain is a download of its own, which changes only with LLVM, so most updates leave it as it is. `calx update --toolchain` installs it again if it goes missing, and `calx doctor` says if it is. `CALX_CC` picks another clang, such as one from LLVM's installer; on Windows that one builds with Visual Studio's C runtime and SDK, from its Build Tools with the "Desktop development with C++" workload.
 
-Release builds use x86-64-v3 instructions, so the programs they make need a processor with AVX2, as most made since 2015 have. Debug builds run on any 64-bit x86 processor.
+Release builds use x86-64-v3 instructions, so the programs they make need a processor with AVX2, as most made since 2015 have. Debug builds run on any 64-bit x86 processor. On Arm64, release builds count on ARMv8.2, which the Raspberry Pi 5, AWS's Graviton 2 and later, Ampere's processors and every Snapdragon laptop have, and debug builds run on any Arm64 processor, the Raspberry Pi 4's too. `calx doctor` says which a build counts on.
 
 ## Check that it works
 
@@ -100,7 +100,7 @@ removes Calx: its folder, with the toolchain it carries, its build cache, and th
 
 ## Building from source
 
-To work on Calx itself, build the compiler from a checkout. As well as clang and lld, you need **Git**, **CMake** 3.20 or later and **Ninja**, and **Python 3** to run the test suite.
+To work on Calx itself, build the compiler from a checkout. As well as clang and lld, you need **Git**, **CMake** 3.20 or later and **Ninja**. The test suite is a Calx program, so it needs nothing more. It builds the same way on x64 and on Arm64.
 
 ```sh
 git clone https://github.com/ellipog/calx
@@ -113,7 +113,7 @@ On Ubuntu or Debian, `sudo apt install git cmake ninja-build clang lld` gets the
 
 That makes `build/compiler/calx`, or `calx.exe` on Windows. It finds its runtime in the checkout it was built from, so leave the checkout where it is. If you move it, set `CALX_HOME` to the new place. `calx version` says `0.1.0-dev (built from source)`, where a release names its commit and date. `calx update` doesn't update a build from source: `git pull` and `ninja` do.
 
-`build/compiler/calx run tests/run.calx` runs the test suite with that compiler, and it includes every example in these docs. CI runs it in debug and release builds, on Windows and Linux.
+`build/compiler/calx run tests/run.calx` runs the test suite with that compiler, and it includes every example in these docs. CI runs it in debug and release builds, on Windows and Linux, on x64 and on Arm64.
 
 ## Next
 
