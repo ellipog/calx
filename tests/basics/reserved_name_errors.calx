@@ -1,0 +1,20 @@
+// A reserved word where a name goes says it's reserved, and suggests another name for the ones a
+// program most often reaches for (CLX-305).
+
+fn fail(msg: String) {    // error: `fail` is a reserved word, so it can't be used as the function's name; pick another name, such as `die` or `abort`
+    eprintln(msg)
+}
+
+fn show(type: i32) {    // error: `type` is a reserved word, so it can't be used as a parameter name; pick another name, such as `kind`
+    println("{type}")
+}
+
+struct Holder {
+    in: i32    // error: `in` is a reserved word, so it can't be used as a field name; pick another name, such as `input`
+}
+
+const while: i32 = 1    // error: `while` is a reserved word, so it can't be used as the constant's name; pick another name
+
+fn main() {
+    let match = 1    // error: `match` is a reserved word, so it can't be used as a name; pick another name, such as `found`
+}

@@ -186,9 +186,35 @@ private:
 
     const Token& expect(Tok t, const char* context) {
         if (!at(t)) {
-            fail(peek().span, std::string("expected ") + tok_text(t) + " " + context + ", found " + tok_text(peek().kind));
+            Tok found = peek().kind;
+            // A name that's a reserved word, as `fn fail()` or `let type = 1`, says so (CLX-305).
+            if (t == Tok::ident && found >= Tok::kw_and && found <= Tok::kw_while) {
+                fail(peek().span, std::string(tok_text(found)) + " is a reserved word, so it can't be used " + context +
+                                      "; pick another name" + other_name(found));
+            }
+            fail(peek().span, std::string("expected ") + tok_text(t) + " " + context + ", found " + tok_text(found));
         }
         return next();
+    }
+
+    // A name to suggest for one that's a reserved word, for those a program most often reaches for.
+    static std::string other_name(Tok t) {
+        switch (t) {
+            case Tok::kw_fail: return ", such as `die` or `abort`";
+            case Tok::kw_type: return ", such as `kind`";
+            case Tok::kw_in: return ", such as `input`";
+            case Tok::kw_match: return ", such as `found`";
+            case Tok::kw_module: return ", such as `module_name`";
+            case Tok::kw_own: return ", such as `owned`";
+            case Tok::kw_loop: return ", such as `cycle`";
+            case Tok::kw_try: return ", such as `attempt`";
+            case Tok::kw_self: return ", such as `this`";
+            case Tok::kw_checkout: return ", such as `check_out`";
+            case Tok::kw_parallel: return ", such as `in_parallel`";
+            case Tok::kw_interface: return ", such as `api`";
+            case Tok::kw_extern: return ", such as `external`";
+            default: return "";
+        }
     }
 
     Name ident(const char* context) { return expect(Tok::ident, context).name; }
@@ -1269,6 +1295,10 @@ private:
             }
             case Tok::ident: return path_expr(path());  // a constant, as a range's end
             default:
+                if (peek().kind >= Tok::kw_and && peek().kind <= Tok::kw_while) {
+                    fail(start, std::string(tok_text(peek().kind)) + " is a reserved word, so it can't be used as a name; pick another name" +
+                                    other_name(peek().kind));
+                }
                 fail(start, std::string("expected a pattern, found ") + tok_text(peek().kind));
         }
     }
