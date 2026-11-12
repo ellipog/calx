@@ -3,14 +3,18 @@
 // differ by library, so they're printed as `info` lines, which the runner keeps but doesn't
 // compare. Calx uses std.zlib, std.zstd and std.xz; Rust flate2, the zstd crate and xz2; Go
 // compress/gzip, klauspost/compress and ulikunitz/xz; Python gzip, compression.zstd and lzma.
+// Calx's zstd and xz compress on all the processors by default, and the others on one thread,
+// so this sets one worker, and every language does the same work on one thread.
 import std.env.{args}
 import std.fs
+import std.pool
 import std.xz
 import std.zlib
 import std.zlib.{Format}
 import std.zstd
 
 fn main() {
+    pool.set_workers(1)
     let data = fs.read(args()[0].copy())!
     let gz = zlib.compress(data, Format.Gzip, 6)
     let gz_back = zlib.decompress(gz, Format.Gzip, data.len())!

@@ -1,8 +1,9 @@
-// PNG: a 2,048 by 2,048 RGB image, 12 MB of pixels, encoded as a PNG at the library's default
-// setting and decoded again, and the pixels checked against the original. The files' sizes differ
-// by library, so they're printed as an `info` line. Calx uses std.image.png, Rust the png crate,
-// and Go image/png; Python has no PNG in its standard library. Go has no RGB image type, so the
-// pixels go into an opaque NRGBA image, which image/png writes as RGB, and come back as one.
+// PNG: a 2,048 by 2,048 RGB image, 12 MB of pixels, encoded as a PNG with zlib at its default
+// level and each row's filter chosen as libpng chooses it, decoded again, and the pixels checked
+// against the original. The files' sizes differ by library, so they're printed as an `info`
+// line. Calx uses std.image.png, Rust the png crate, and Go image/png; Python has no PNG in its
+// standard library. Go has no RGB image type, so the pixels go into an opaque NRGBA image, which
+// image/png writes as RGB, and come back as one.
 package main
 
 import (
