@@ -2387,7 +2387,8 @@ void cx_table_free(cx_u8* ctrl, cx_usize buckets, cx_usize size, cx_usize extra)
 
 #define PAR_NONE (~(cx_u64)0)
 #define PAR_SPIN_NS 200000u /* how long a thread spins before it sleeps */
-#define PAR_CHUNKS 8        /* chunks per thread, so a slow chunk doesn't hold the rest up */
+#define PAR_CHUNKS 64       /* chunks per thread, so the last chunk to finish holds the rest up little */
+#define PAR_CHUNK_US 20     /* at least, for a loop whose time an iteration is known, so claiming a chunk costs little */
 #define PAR_NESTED 64       /* inner jobs open at once, one bit each of a pool's `open` */
 #define PAR_SHARED __attribute__((aligned(128))) /* its own pair of cache lines */
 #define PAR_ALONE_US 3      /* a loop that looks like less work than this runs on one thread */
@@ -3001,9 +3002,17 @@ static void par_start_workers(par_pool* p, cx_usize threads) {
 }
 
 /* Sets up `j` of `p` for iterations `base` to `base + n` of `body`, as its owner, on `threads`
- * threads: with its chunks split evenly between their ranges if `spread`, or all in its owner's. */
-static void par_setup(par_pool* p, par_job* j, cx_u64 base, cx_u64 n, par_body body, void* ctx, cx_usize threads, int spread) {
+ * threads: with its chunks split evenly between their ranges if `spread`, or all in its owner's.
+ * A loop's iterations can cost very different amounts, as a row through the middle of the
+ * Mandelbrot set does, and the thread that has the last chunk works on while the rest wait, so
+ * there are `PAR_CHUNKS` a thread, as long as each, for a loop whose time an iteration `cost` is
+ * known, takes `PAR_CHUNK_US` (CLX-296). */
+static void par_setup(par_pool* p, par_job* j, cx_u64 base, cx_u64 n, par_body body, void* ctx, cx_usize threads, int spread, cx_u64 cost) {
     cx_u64 chunk = n / ((cx_u64)threads * PAR_CHUNKS);
+    if (cost) {
+        cx_u64 least = ((cx_u64)par_tick_hz / 1000000u * PAR_CHUNK_US << 20) / cost;
+        if (chunk < least) chunk = least;
+    }
     if (chunk == 0) chunk = 1;
     cx_u64 chunks = n / chunk + (n % chunk != 0);
     par_size(j, chunks);
@@ -3034,7 +3043,7 @@ static void par_setup(par_pool* p, par_job* j, cx_u64 base, cx_u64 n, par_body b
 /* Iterations `base` to `base + n` of a loop inside a chunk of `p`, on a slot of its own that idle
  * threads help with. Returns 0 if every slot is taken. Never inlined, so a stack trace finds
  * where the loop starts. */
-static __attribute__((noinline)) int par_inner(par_pool* p, cx_u64 base, cx_u64 n, par_body body, void* ctx, cx_usize threads, par_meter* m) {
+static __attribute__((noinline)) int par_inner(par_pool* p, cx_u64 base, cx_u64 n, par_body body, void* ctx, cx_usize threads, cx_u64 cost, par_meter* m) {
     cx_u64 taken = __atomic_load_n(&p->taken, __ATOMIC_RELAXED);
     unsigned k;
     do {
@@ -3042,7 +3051,7 @@ static __attribute__((noinline)) int par_inner(par_pool* p, cx_u64 base, cx_u64 
         k = (unsigned)__builtin_ctzll(~taken);
     } while (!__atomic_compare_exchange_n(&p->taken, &taken, taken | ((cx_u64)1 << k), 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED));
     par_job* j = &p->nest[k];
-    par_setup(p, j, base, n, body, ctx, threads, 0);
+    par_setup(p, j, base, n, body, ctx, threads, 0, cost);
     j->slot = k;
     j->up = par_cur;
     j->up_chunk = par_chunk;
@@ -3094,7 +3103,7 @@ static void par_top(par_pool* p, cx_usize threads, cx_u64 base, cx_u64 n, par_bo
     par_start_workers(p, threads);
     par_job* j = &p->top;
     par_slot = 0;
-    par_setup(p, j, base, n - base, body, ctx, threads, 1);
+    par_setup(p, j, base, n - base, body, ctx, threads, 1, site ? par_cost(site, body) : 0);
     j->up = 0;
     cx_u32 w = j->word + 1;
     __atomic_store_n(&j->word, w, __ATOMIC_SEQ_CST);
@@ -3155,7 +3164,7 @@ static void par_run(par_pool* p, cx_usize threads, cx_u64 n, par_body body, void
     }
     par_meter m = {0, 0};
     if (base == n) {
-    } else if (threads <= 1 || n == 1 || (par_cur && !par_inner(p, base, n - base, body, ctx, threads, &m))) {
+    } else if (threads <= 1 || n == 1 || (par_cur && !par_inner(p, base, n - base, body, ctx, threads, site ? par_cost(site, body) : 0, &m))) {
         par_depth++;
         body(ctx, base, n);
         par_depth--;
