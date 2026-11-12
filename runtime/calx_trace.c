@@ -168,6 +168,17 @@ static void show_range(void (*text)(const char*), const found* f, int from, int 
 static void found_frames(found* f);
 static void name_frames(found* f, void* const* frames, int n);
 
+/* With CALX_TRACE_DEBUG=1, what the system's tables say of each frame, on standard error: for
+ * bringing traces up on a new system, such as Windows on Arm (CLX-276) or macOS (CLX-278). */
+static int trace_debug(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char* v = getenv("CALX_TRACE_DEBUG");
+        on = v && v[0] == '1';
+    }
+    return on;
+}
+
 /* The first frame from `from` on that is a chunk's body: called by the runtime's `par_claim`, not
  * by a loop that runs where it is. -1 if there's none. */
 static int chunk_body(const found* f, int from) {
@@ -327,17 +338,6 @@ static void found_frames(found* f) {
 }
 
 typedef BOOL(WINAPI* module_fn)(HANDLE, DWORD64, PIMAGEHLP_MODULEW64);
-
-/* With CALX_TRACE_DEBUG=1, what dbghelp said of each frame, on standard error: for bringing
- * traces up on a new system, such as Windows on Arm (CLX-276). */
-static int trace_debug(void) {
-    static int on = -1;
-    if (on < 0) {
-        const char* v = getenv("CALX_TRACE_DEBUG");
-        on = v && v[0] == '1';
-    }
-    return on;
-}
 
 static void name_frames(found* f, void* const* frames, int n) {
     AcquireSRWLockExclusive(&trace_lock);
@@ -1137,6 +1137,14 @@ static void dwarf_frames(found* f, const dwarf* d, cx_u64 at, const char* name, 
     level levels[MAX_INLINED];
     line_header h;
     int depth = d->info.p ? inline_levels(d, at, levels, &h) : 0;
+    if (trace_debug()) {
+        fprintf(stderr, "trace: at 0x%llx %s, %s:%llu, %d levels\n", (unsigned long long)at, name ? name : "?", path,
+                (unsigned long long)line, depth);
+        for (int j = 0; j < depth; j++) {
+            fprintf(stderr, "trace:   %d %s, called at file %llu line %llu\n", j, levels[j].name ? levels[j].name : "?",
+                    (unsigned long long)levels[j].call_file, (unsigned long long)levels[j].call_line);
+        }
+    }
     if (depth > 0 && levels[0].name && (dwarf_name || !name)) name = levels[0].name;
     if (!name) name = "";
     if (depth <= 1) {
@@ -1309,6 +1317,10 @@ static void name_frames(found* f, void* const* frames, int n) {
             headers[count] = info.dli_fbase;
             usable[count] = open_image(&objects[count], info.dli_fbase, info.dli_fname);
             count++;
+        }
+        if (trace_debug()) {
+            fprintf(stderr, "trace: frame %d %p in %s, %s\n", i, frames[i], info.dli_fname,
+                    usable[k] ? "with its DWARF" : "with no DWARF found");
         }
         if (!usable[k]) continue;
         /* dladdr's name is the nearest symbol, without macOS's leading '_'. */
