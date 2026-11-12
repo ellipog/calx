@@ -537,6 +537,14 @@ jobs:
             echo "::notice::main has moved on with changes to the workflows, so its own run publishes the nightly"
             exit 0
           fi
+          # Runs of main overlap and reach this in any order, so one whose commit the nightly has
+          # already moved past leaves it, rather than putting an older build back (CLX-286).
+          if current=$(gh api "repos/$GH_REPO/git/ref/tags/nightly" --jq .object.sha 2> /dev/null); then
+            if [ "$(gh api "repos/$GH_REPO/compare/$GITHUB_SHA...$current" --jq .status)" = ahead ]; then
+              echo "::notice::the nightly is from $current, which is newer than $GITHUB_SHA, so it stays"
+              exit 0
+            fi
+          fi
           notes="The newest build of main that passed CI: Calx $version, from $GITHUB_SHA. \`calx update --nightly\` follows these."
           if gh release view nightly > /dev/null 2>&1; then
             gh api -X PATCH "repos/$GH_REPO/git/refs/tags/nightly" -f sha="$GITHUB_SHA" -F force=true > /dev/null
