@@ -31,15 +31,13 @@ jobs:
           # runtime's threads are tested where a missing acquire or release would show.
           - os: ubuntu-24.04-arm
             calx: build/compiler/linux/calx
-          # A new platform is `experimental` until it passes, so its failures don't fail the run.
-          # Windows on Arm (CLX-276), with the image's LLVM and Visual Studio's ARM64 tools.
+          # A new platform is `experimental: true` until it passes, so its failures don't fail the
+          # run. Windows on Arm (CLX-276), with the image's LLVM and Visual Studio's ARM64 tools.
           - os: windows-11-arm
             calx: build/compiler/windows/calx.exe
-            experimental: true
           # macOS on Apple Silicon (CLX-277 to CLX-280), with Apple's clang and the image's SDK.
           - os: macos-latest
             calx: build/compiler/macos/calx
-            experimental: true
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental == true }}
     env:
@@ -208,21 +206,17 @@ jobs:
           - os: ubuntu-22.04
             platform: linux
             cpu: x64
-          # Linux on Arm (CLX-275) and Windows on Arm (CLX-276), experimental, as in the test job,
-          # until they pass.
+          # Linux on Arm (CLX-275), Windows on Arm (CLX-276) and macOS on Apple Silicon (CLX-280).
+          # A new one is `experimental: true`, as in the test job, until it passes.
           - os: ubuntu-22.04-arm
             platform: linux
             cpu: arm64
-            experimental: true
           - os: windows-11-arm
             platform: windows
             cpu: arm64
-            experimental: true
-          # macOS on Apple Silicon (CLX-280), experimental too until it passes.
           - os: macos-latest
             platform: macos
             cpu: arm64
-            experimental: true
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental == true }}
     steps:

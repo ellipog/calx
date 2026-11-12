@@ -11,7 +11,7 @@ Calx's first large program is [Calcite](https://github.com/ellipog/calcite), a M
 
 ## Built
 
-Everything in the [reference](README.md#reference) and the [standard library](README.md#standard-library) is built, and every example on those pages is compiled and run on Windows and Linux on every push:
+Everything in the [reference](README.md#reference) and the [standard library](README.md#standard-library) is built, and every example on those pages is compiled and run on every push, on Windows and Linux on x64 and Arm64, and on macOS on Apple Silicon:
 
 - The types: integers and floats with defined results on every platform, structs, enums, tuples, optionals, error values, generics, and interfaces, with operators, indexing, associated types, and `dyn` values of any type that has one.
 - Memory safety without a garbage collector: ownership, views, arenas, `Box<T>` and `Shared<T>`, with `unsafe` code and C functions for what the checker can't see.
@@ -20,6 +20,7 @@ Everything in the [reference](README.md#reference) and the [standard library](RE
 - Lists, deques, priority queues, maps and sets, the [Java-compatible](README.md#java-compatibility) hash tables, and slot maps, whose handles say when a value is gone instead of reading freed memory.
 - Standard library modules for input and output, files, the network, threads, time, math, hashing, compression and the terminal.
 - The `calx` command, with cached builds that redo only what changed, and the [VS Code extension](reference/editors.md).
+- Windows and Linux on x64 and Arm64, and macOS on Apple Silicon, each with its own release, its own toolchain, and one command that installs it ([Install Calx](guide/install.md)). On Arm the runtime uses Arm's own instructions where it has fast paths for x86: SHA, AES, CRC32 and PMULL, and NEON for text search, compression and JPEG.
 
 ## Designed, not built
 
@@ -29,7 +30,6 @@ The [spec](CALX_SPEC.md) has the design of each of these:
 
 ## Later
 
-- **More platforms**: macOS on Apple Silicon, and Windows and Linux on Arm processors, each with its own release, install and CI, and Arm's own instructions where the runtime has fast paths for x86.
 - **Plugins as WebAssembly**, built from the same source, for hosts that run code they don't trust.
 - **A language server**, so editors other than VS Code get errors, completion and go-to-definition, and `calx` commands for building and testing plugins.
 - **Limits on plugins' time**: checks the compiler puts in plugin builds, so a plugin that runs too long can be stopped.

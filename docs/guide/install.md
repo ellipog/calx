@@ -1,11 +1,11 @@
 ---
 title: Install Calx
-description: Install Calx with one command on Windows or Linux, keep it up to date with calx update, add completions, remove it with calx uninstall, or build it from source.
+description: Install Calx with one command on Windows, Linux or macOS, keep it up to date with calx update, add completions, remove it with calx uninstall, or build it from source.
 ---
 
 # Install Calx
 
-One command installs Calx. It runs on Windows and Linux, on 64-bit x86.
+One command installs Calx. It runs on Windows and Linux, on x64 and on Arm64, and on macOS 14 or later on Apple Silicon. Each has a release of its own, and the scripts pick the one for your machine.
 
 On Windows, in PowerShell:
 
@@ -13,7 +13,7 @@ On Windows, in PowerShell:
 irm https://calxlang.com/install.ps1 | iex
 ```
 
-On Linux:
+On Linux or macOS:
 
 ```sh
 curl -fsSL https://calxlang.com/install.sh | sh
@@ -26,6 +26,8 @@ In a terminal, Calx's mark dissolves in, each download draws a bar with how much
 <!-- terminal: install -->
 
 On Linux, the script needs `curl` or `wget`, `sha256sum`, and `tar` with `xz` for the toolchain, which most systems have. It says how to install the C library's headers if they're missing ([clang](#clang)), and libcurl, which `calx update` downloads with: on Ubuntu or Debian, `sudo apt install libcurl4`.
+
+On macOS, the script needs Apple's Command Line Tools, for the SDK programs are built against, and says to run `xcode-select --install` if they're missing. Calx is signed ad hoc, not by an Apple developer, so install it with the script: a copy downloaded with a browser is quarantined, and macOS won't open it. An Intel Mac has no release; it can [build from source](#building-from-source).
 
 Calx is pre-release, so until the first stable release, the scripts install the newest nightly: the newest build of `main` that passed every test.
 
@@ -41,10 +43,11 @@ Calx compiles programs to C and has clang build that C. A release brings its own
 
 - **On Windows**, with [mingw-w64](https://www.mingw-w64.org/)'s headers and libraries for the Windows C runtime, the UCRT, which every Windows from 10 on has. The programs it builds need only Windows 10 or later. It's a 60 MB download.
 - **On Linux**, programs use the system's C library, glibc 2.35 or later, with its headers and start files, and compiler-rt in place of GCC's parts, so GCC needn't be installed. It's a 90 MB download. Most systems have glibc's headers; the install script says if they're missing, which on Ubuntu or Debian is `sudo apt install libc6-dev`, and on Fedora `sudo dnf install glibc-devel`.
+- **On macOS**, with the SDK from Apple's Command Line Tools, which holds the system's headers and libraries and which Apple's license doesn't let Calx carry, and `dsymutil`, which gathers a program's line tables beside it for stack traces and debuggers. The programs it builds run on macOS 11 and later, and are signed ad hoc as they link, as Apple Silicon needs.
 
 The toolchain is a download of its own, which changes only with LLVM, so most updates leave it as it is. `calx update --toolchain` installs it again if it goes missing, and `calx doctor` says if it is. `CALX_CC` picks another clang, such as one from LLVM's installer; on Windows that one builds with Visual Studio's C runtime and SDK, from its Build Tools with the "Desktop development with C++" workload.
 
-Release builds use x86-64-v3 instructions, so the programs they make need a processor with AVX2, as most made since 2015 have. Debug builds run on any 64-bit x86 processor. On Arm64, release builds count on ARMv8.2, which the Raspberry Pi 5, AWS's Graviton 2 and later, Ampere's processors and every Snapdragon laptop have, and debug builds run on any Arm64 processor, the Raspberry Pi 4's too. `calx doctor` says which a build counts on.
+Release builds use x86-64-v3 instructions, so the programs they make need a processor with AVX2, as most made since 2015 have. Debug builds run on any 64-bit x86 processor. On Arm64, release builds count on ARMv8.2, which the Raspberry Pi 5, AWS's Graviton 2 and later, Ampere's processors and every Snapdragon laptop have, and debug builds run on any Arm64 processor, the Raspberry Pi 4's too. On macOS, release builds count on the Apple M1's instructions, which every Apple Silicon Mac has. `calx doctor` says which a build counts on.
 
 ## Check that it works
 
@@ -74,7 +77,7 @@ If it says it can't find clang, `calx update --toolchain` installs the toolchain
 calx update
 ```
 
-installs the newest release, and `calx update --rollback` goes back. Once a day, a `calx` command checks for a newer release in the background and says when there is one. [The calx command](../reference/command.md#updating) has the details, and how to turn the check off.
+installs the newest release, and `calx update --rollback` goes back. An x64 Calx that Windows runs on an Arm processor, translating it as it goes, updates to the Arm64 release, which runs natively. Once a day, a `calx` command checks for a newer release in the background and says when there is one. [The calx command](../reference/command.md#updating) has the details, and how to turn the check off.
 
 ## Completions
 
@@ -109,11 +112,11 @@ cmake -S compiler -B build/compiler -G Ninja -DCMAKE_CXX_COMPILER=clang++
 ninja -C build/compiler
 ```
 
-On Ubuntu or Debian, `sudo apt install git cmake ninja-build clang lld` gets the tools; on Windows, `winget install Git.Git Kitware.CMake Ninja-build.Ninja LLVM.LLVM`, with Visual Studio's Build Tools and the "Desktop development with C++" workload, from [visualstudio.microsoft.com](https://visualstudio.microsoft.com/downloads/), for the C runtime and SDK that LLVM's clang links with. A build from source uses the clang on PATH, or `CALX_CC`; set that to a release's `toolchain\bin\clang.exe` to build programs the way a release does.
+On Ubuntu or Debian, `sudo apt install git cmake ninja-build clang lld` gets the tools; on macOS, `xcode-select --install` and then `brew install cmake ninja`, where Apple's clang builds the compiler and its programs, with ThinLTO only if `CALX_CC` names a clang with lld beside it, such as a release's `toolchain/bin/clang`; on Windows, `winget install Git.Git Kitware.CMake Ninja-build.Ninja LLVM.LLVM`, with Visual Studio's Build Tools and the "Desktop development with C++" workload, from [visualstudio.microsoft.com](https://visualstudio.microsoft.com/downloads/), for the C runtime and SDK that LLVM's clang links with. A build from source uses the clang on PATH, or `CALX_CC`; set that to a release's `toolchain\bin\clang.exe` to build programs the way a release does.
 
 That makes `build/compiler/calx`, or `calx.exe` on Windows. It finds its runtime in the checkout it was built from, so leave the checkout where it is. If you move it, set `CALX_HOME` to the new place. `calx version` says `0.1.0-dev (built from source)`, where a release names its commit and date. `calx update` doesn't update a build from source: `git pull` and `ninja` do.
 
-`build/compiler/calx run tests/run.calx` runs the test suite with that compiler, and it includes every example in these docs. CI runs it in debug and release builds, on Windows and Linux, on x64 and on Arm64.
+`build/compiler/calx run tests/run.calx` runs the test suite with that compiler, and it includes every example in these docs. CI runs it in debug and release builds, on Windows and Linux, on x64 and on Arm64, and on macOS on Apple Silicon.
 
 ## Next
 

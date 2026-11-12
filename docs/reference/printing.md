@@ -96,7 +96,7 @@ Into a `String`, on our benchmark, an i9-13900K otherwise quiet, each program on
 
 The Rust is Rust 1.91's `write!(out, "{:.3},", v)` and the same for the rest, into a `String`, built for release with `x86-64-v3`. The values are a xorshift's: doubles from 0 to 1,000 and integers below 1,048,576. Calx writes integers two digits at a time from a table, as Rust does.
 
-Standard output is buffered and written at exit, or when a panic starts. It's the same bytes on Windows and Linux: `\n` is never turned into `\r\n`.
+Standard output is buffered and written at exit, or when a panic starts. It's the same bytes on every platform: `\n` is never turned into `\r\n`.
 
 Standard error isn't buffered. `eprint` and `eprintln` first write out whatever standard output has waiting, so when both go to one terminal they appear in the order they were written. A program whose standard output is a protocol, such as the rig's adapter, logs with them. [`std.io`](../std/io.md) reads and writes bytes.
 

@@ -3,7 +3,7 @@
   <img src="assets/logo/calx-banner.png" alt="Calx" width="100%">
 </picture>
 
-Calx is a general-purpose compiled language. Its compiler is written in C++ and emits C, which clang builds on Windows and Linux. The largest Calx program so far is [Calcite](https://github.com/ellipog/calcite), a Minecraft Java Edition server in development, which aims to behave exactly as the official server does.
+Calx is a general-purpose compiled language. Its compiler is written in C++ and emits C, which clang builds on Windows and Linux, on x64 and Arm64, and on macOS on Apple Silicon. The largest Calx program so far is [Calcite](https://github.com/ellipog/calcite), a Minecraft Java Edition server in development, which aims to behave exactly as the official server does.
 
 Website and docs: **[calxlang.com](https://calxlang.com)**
 
@@ -16,7 +16,7 @@ What sets it apart:
 - **Strict by default.** No implicit conversions, no dropped values, no unused names and no shadowing. Each mistake gets an error that says what to write instead.
 - **Fast to build.** `calx run` on a small program takes about 0.3 s from an empty cache and under 25 ms when nothing changed.
 
-Status: Calcite's Phases 0 to 5 have passed their gates, the compiler's core, the protocol, and chunks, storage, regions and world generation among them, and Phase 6, simulation, is under way. The compiler builds integers, floats, arrays, structs, enums, tuples, optionals, `match`, generics, interfaces, modules, `String`, `List`, `Map` and `Set`, error values (`T ! E`, `fail`, `try`), closures, `unsafe` code with C functions, `parallel for`, libraries a program opens while it runs, for plugins, and attributes that libraries define in Calx, which generate code while the program compiles. They give Java's results on Windows and Linux. The standard library has:
+Status: Calcite's Phases 0 to 5 have passed their gates, the compiler's core, the protocol, and chunks, storage, regions and world generation among them, and Phase 6, simulation, is under way. The compiler builds integers, floats, arrays, structs, enums, tuples, optionals, `match`, generics, interfaces, modules, `String`, `List`, `Map` and `Set`, error values (`T ! E`, `fail`, `try`), closures, `unsafe` code with C functions, `parallel for`, libraries a program opens while it runs, for plugins, and attributes that libraries define in Calx, which generate code while the program compiles. They give Java's results on every platform. The standard library has:
 
 - **Files, processes and the terminal:** `std.fs`, `std.path`, `std.process`, `std.env`, `std.io`, `std.term`, `std.cli`, `std.shell` and `std.log`.
 - **Text and data:** `std.json`, `std.yaml`, `std.toml`, `std.ini`, `std.csv`, `std.xml`, `std.html`, `std.sqlite`, `std.regex`, `std.textwrap`, `std.diff`, `std.unicode`, `std.url` and `std.uuid`.
@@ -89,7 +89,7 @@ ninja -C build/compiler
 build/compiler/calx run tests/basics/hello.calx
 ```
 
-`build/compiler/calx run tests/run.calx` runs the test suite with that compiler, and it includes every example in the docs. CI runs it in debug and release on Windows and Linux.
+`build/compiler/calx run tests/run.calx` runs the test suite with that compiler, and it includes every example in the docs. CI runs it in debug and release on Windows and Linux, on x64 and Arm64, and on macOS.
 
 ## Editors
 

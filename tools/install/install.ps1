@@ -188,7 +188,7 @@ function Get-Text($url) {
 }
 
 if (-not [Environment]::Is64BitOperatingSystem) {
-    Stop-Install 'Calx releases are for 64-bit Windows and Linux.'
+    Stop-Install 'Calx releases are for 64-bit Windows, on x64 or Arm64.'
 }
 
 $releases = if ($env:CALX_RELEASES) { $env:CALX_RELEASES.TrimEnd('/') } else { 'https://github.com/ellipog/calx/releases' }
