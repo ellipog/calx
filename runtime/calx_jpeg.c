@@ -8,7 +8,7 @@
  * integer DCT ("islow", 13-bit constants, two passes), each coefficient then divided by its
  * quantizer times 8, rounding a half away from zero. Written from those formulas; the AVX2 code is
  * our own arrangement of them, and gives the same integers as the plain C beside it, which builds
- * without AVX2 use.
+ * without AVX2 use. On Arm64 NEON code does the same work in the same integers (CLX-281).
  *
  * The DCT works on 16-bit lanes, two blocks at once, one in each half of a 256-bit register, so a
  * row of a block is 8 lanes. Each multiply-and-add is pmaddwd on a pair of values, so each output
@@ -28,6 +28,9 @@
 
 #if defined(__AVX2__)
 #include <immintrin.h>
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
+#define CX_NEON 1
 #endif
 
 /* Where each coefficient, in zigzag order, is in a block, row by row. */
@@ -225,6 +228,111 @@ static inline V halves(const void* a, const void* b) {
 }
 #endif
 
+/* --- NEON ------------------------------------------------------------------------------------ */
+
+#ifdef CX_NEON
+/* CLX-281: the same DCT on Arm64, one block at a time, a row in each of 8 registers of 8 16-bit
+ * lanes. Each product sum is the AVX2 code's pair, as a widening multiply and a multiply-add on
+ * each half of the lanes, and sqrshrn rounds, shifts, narrows and saturates as DESCALE and packs
+ * do, so the integers are the same. */
+typedef struct {
+    int32x4_t lo, hi;
+} wide_t;
+
+static inline __attribute__((always_inline)) wide_t pair_n(int16x8_t a, cx_i16 ka, int16x8_t b, cx_i16 kb) {
+    wide_t w;
+    w.lo = vmlal_n_s16(vmull_n_s16(vget_low_s16(a), ka), vget_low_s16(b), kb);
+    w.hi = vmlal_high_n_s16(vmull_high_n_s16(a, ka), b, kb);
+    return w;
+}
+
+static inline __attribute__((always_inline)) wide_t wide_add(wide_t a, wide_t b) {
+    a.lo = vaddq_s32(a.lo, b.lo);
+    a.hi = vaddq_s32(a.hi, b.hi);
+    return a;
+}
+
+#define NARROW(w, n) vqrshrn_high_n_s32(vqrshrn_n_s32((w).lo, n), (w).hi, n)
+
+/* 8 rows of 8 lanes turned into 8 columns: lanes swapped in pairs, then pairs of lanes, then
+ * halves. */
+static inline __attribute__((always_inline)) void transpose_neon(int16x8_t* r) {
+    int16x8_t b[8];
+    for (int i = 0; i < 8; i += 2) {
+        b[i] = vtrn1q_s16(r[i], r[i + 1]);
+        b[i + 1] = vtrn2q_s16(r[i], r[i + 1]);
+    }
+    int32x4_t c[8];
+    for (int i = 0; i < 8; i += 4) {
+        c[i] = vtrn1q_s32(vreinterpretq_s32_s16(b[i]), vreinterpretq_s32_s16(b[i + 2]));
+        c[i + 2] = vtrn2q_s32(vreinterpretq_s32_s16(b[i]), vreinterpretq_s32_s16(b[i + 2]));
+        c[i + 1] = vtrn1q_s32(vreinterpretq_s32_s16(b[i + 1]), vreinterpretq_s32_s16(b[i + 3]));
+        c[i + 3] = vtrn2q_s32(vreinterpretq_s32_s16(b[i + 1]), vreinterpretq_s32_s16(b[i + 3]));
+    }
+    for (int i = 0; i < 4; i++) {
+        r[i] = vreinterpretq_s16_s64(vtrn1q_s64(vreinterpretq_s64_s32(c[i]), vreinterpretq_s64_s32(c[i + 4])));
+        r[i + 4] = vreinterpretq_s16_s64(vtrn2q_s64(vreinterpretq_s64_s32(c[i]), vreinterpretq_s64_s32(c[i + 4])));
+    }
+}
+
+static inline __attribute__((always_inline)) void dct_pass_neon(int16x8_t* x, int pass) {
+    const int16x8_t t0 = vaddq_s16(x[0], x[7]), t7 = vsubq_s16(x[0], x[7]);
+    const int16x8_t t1 = vaddq_s16(x[1], x[6]), t6 = vsubq_s16(x[1], x[6]);
+    const int16x8_t t2 = vaddq_s16(x[2], x[5]), t5 = vsubq_s16(x[2], x[5]);
+    const int16x8_t t3 = vaddq_s16(x[3], x[4]), t4 = vsubq_s16(x[3], x[4]);
+    const int16x8_t t10 = vaddq_s16(t0, t3), t13 = vsubq_s16(t0, t3);
+    const int16x8_t t11 = vaddq_s16(t1, t2), t12 = vsubq_s16(t1, t2);
+    if (pass == 1) {
+        x[0] = vshlq_n_s16(vaddq_s16(t10, t11), 2);
+        x[4] = vshlq_n_s16(vsubq_s16(t10, t11), 2);
+    } else {
+        x[0] = vrshrq_n_s16(vaddq_s16(t10, t11), 2);
+        x[4] = vrshrq_n_s16(vsubq_s16(t10, t11), 2);
+    }
+#define PASS_OUT(w) (pass == 1 ? NARROW(w, 11) : NARROW(w, 15))
+    x[2] = PASS_OUT(pair_n(t12, K0541, t13, K0541 + K0765));
+    x[6] = PASS_OUT(pair_n(t12, K0541 - K1847, t13, K0541));
+    const int16x8_t z3 = vaddq_s16(t4, t6), z4 = vaddq_s16(t5, t7);
+    const wide_t w3 = pair_n(z3, K1175 - K1961, z4, K1175), w4 = pair_n(z3, K1175, z4, K1175 - K0390);
+    x[7] = PASS_OUT(wide_add(pair_n(t4, K0298 - K0899, t7, -K0899), w3));
+    x[1] = PASS_OUT(wide_add(pair_n(t4, -K0899, t7, K1501 - K0899), w4));
+    x[5] = PASS_OUT(wide_add(pair_n(t5, K2053 - K2562, t6, -K2562), w4));
+    x[3] = PASS_OUT(wide_add(pair_n(t5, -K2562, t6, K3072 - K2562), w3));
+#undef PASS_OUT
+}
+
+/* The high 16 bits of each product, as pmulhuw gives. */
+static inline uint16x8_t mulhi_u16(uint16x8_t a, uint16x8_t b) {
+    return vuzp2q_u16(vreinterpretq_u16_u32(vmull_u16(vget_low_u16(a), vget_low_u16(b))), vreinterpretq_u16_u32(vmull_high_u16(a, b)));
+}
+
+/* One block, quantized as the AVX2 code does it, and its zigzag mask. The rows' zero lanes keep
+ * their bits of 1 to 128 and pairwise adds gather them, a row to a byte. */
+static cx_u64 fdct_neon(const cx_u8* src, cx_usize stride, const cx_u16* q, cx_i16* out) {
+    int16x8_t x[8];
+    for (int r = 0; r < 8; r++) x[r] = vreinterpretq_s16_u16(vsubq_u16(vmovl_u8(vld1_u8(src + r * stride)), vdupq_n_u16(128)));
+    transpose_neon(x);
+    dct_pass_neon(x, 1);
+    transpose_neon(x);
+    dct_pass_neon(x, 2);
+    uint8x8_t zero[8];
+    for (int r = 0; r < 8; r++) {
+        const int16x8_t t = x[r];
+        const int16x8_t m = vshrq_n_s16(t, 15);
+        const uint16x8_t num = vaddq_u16(vreinterpretq_u16_s16(vabsq_s16(t)), vld1q_u16(q + 128 + 8 * r));
+        const uint16x8_t v = mulhi_u16(mulhi_u16(num, vld1q_u16(q + 8 * r)), vld1q_u16(q + 64 + 8 * r));
+        const int16x8_t s = vsubq_s16(veorq_s16(vreinterpretq_s16_u16(v), m), m);
+        vst1q_s16(out + 8 * r, s);
+        zero[r] = vmovn_u16(vceqq_s16(s, vdupq_n_s16(0)));
+    }
+    const uint8x16_t bits = vreinterpretq_u8_u64(vdupq_n_u64(0x8040201008040201ull));
+    uint8x16_t p[4];
+    for (int i = 0; i < 4; i++) p[i] = vandq_u8(vcombine_u8(zero[2 * i], zero[2 * i + 1]), bits);
+    uint8x16_t g = vpaddq_u8(vpaddq_u8(p[0], p[1]), vpaddq_u8(p[2], p[3]));
+    return zigzag_mask(~vgetq_lane_u64(vreinterpretq_u64_u8(vpaddq_u8(g, g)), 0));
+}
+#endif
+
 /* The blocks at a and, if `two`, at b, both rows `stride` bytes apart and divided by q. */
 static inline __attribute__((always_inline)) void fdct(const cx_u8* a, const cx_u8* b, cx_usize stride, const cx_u16* q, cx_i16* oa, cx_i16* ob, cx_u64* masks, int two) {
 #if defined(__AVX2__)
@@ -259,6 +367,9 @@ static inline __attribute__((always_inline)) void fdct(const cx_u8* a, const cx_
     }
     masks[0] = zigzag_mask(~za);
     if (two) masks[1] = zigzag_mask(~zb);
+#elif defined(CX_NEON)
+    masks[0] = fdct_neon(a, stride, q, oa);
+    if (two) masks[1] = fdct_neon(b, stride, q, ob);
 #else
     masks[0] = fdct_scalar(a, stride, q, oa);
     if (two) masks[1] = fdct_scalar(b, stride, q, ob);
@@ -303,6 +414,27 @@ static inline __attribute__((always_inline)) V bytes32(V a, V b, V c, V d) {
     const V v = _mm256_packus_epi16(_mm256_packus_epi32(a, b), _mm256_packus_epi32(c, d));
     return _mm256_permutevar8x32_epi32(v, _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7));
 }
+#elif defined(CX_NEON)
+/* Eight pixels' Y, Cb or Cr: `start` plus each of R, G and B times its factor, added where `add`'s
+ * bit for it is set and taken off where not. The sums stay in 32 bits unsigned, as none is ever
+ * below 0 once the first factor is in: libjpeg's offsets see to that. */
+static inline __attribute__((always_inline)) uint8x8_t ycc_one(uint16x8_t first, cx_u16 k1, uint16x8_t second, cx_u16 k2, int add2,
+                                                             uint16x8_t third, cx_u16 k3, int add3, cx_u32 start) {
+    uint32x4_t lo = vmlal_n_u16(vdupq_n_u32(start), vget_low_u16(first), k1);
+    uint32x4_t hi = vmlal_high_n_u16(vdupq_n_u32(start), first, k1);
+    lo = add2 ? vmlal_n_u16(lo, vget_low_u16(second), k2) : vmlsl_n_u16(lo, vget_low_u16(second), k2);
+    hi = add2 ? vmlal_high_n_u16(hi, second, k2) : vmlsl_high_n_u16(hi, second, k2);
+    lo = add3 ? vmlal_n_u16(lo, vget_low_u16(third), k3) : vmlsl_n_u16(lo, vget_low_u16(third), k3);
+    hi = add3 ? vmlal_high_n_u16(hi, third, k3) : vmlsl_high_n_u16(hi, third, k3);
+    return vmovn_u16(vcombine_u16(vshrn_n_u32(lo, 16), vshrn_n_u32(hi, 16)));
+}
+
+static inline __attribute__((always_inline)) void ycc8_neon(uint8x8_t r8, uint8x8_t g8, uint8x8_t b8, cx_u8* y, cx_u8* cb, cx_u8* cr) {
+    const uint16x8_t r = vmovl_u8(r8), g = vmovl_u8(g8), b = vmovl_u8(b8);
+    vst1_u8(y, ycc_one(r, 19595, g, 38470, 1, b, 7471, 1, 32768));
+    vst1_u8(cb, ycc_one(b, 32768, r, 11059, 0, g, 21709, 0, 8421375));
+    vst1_u8(cr, ycc_one(r, 32768, g, 27439, 0, b, 5329, 0, 8421375));
+}
 #endif
 
 void cx_jpg_ycc(const cx_u8* rgb, cx_usize n, cx_u8* y, cx_u8* cb, cx_u8* cr) {
@@ -322,6 +454,13 @@ void cx_jpg_ycc(const cx_u8* rgb, cx_usize n, cx_u8* y, cx_u8* cb, cx_u8* cr) {
         _mm_storel_epi64((__m128i*)(y + x), _mm256_castsi256_si128(bytes32(Y, Y, Y, Y)));
         _mm_storel_epi64((__m128i*)(cb + x), _mm256_castsi256_si128(bytes32(B, B, B, B)));
         _mm_storel_epi64((__m128i*)(cr + x), _mm256_castsi256_si128(bytes32(R, R, R, R)));
+    }
+#elif defined(CX_NEON)
+    /* ld3 parts the pixels' R, G and B, 16 of each. */
+    for (; x + 16 <= n; x += 16) {
+        const uint8x16x3_t p = vld3q_u8(rgb + 3 * x);
+        ycc8_neon(vget_low_u8(p.val[0]), vget_low_u8(p.val[1]), vget_low_u8(p.val[2]), y + x, cb + x, cr + x);
+        ycc8_neon(vget_high_u8(p.val[0]), vget_high_u8(p.val[1]), vget_high_u8(p.val[2]), y + x + 8, cb + x + 8, cr + x + 8);
     }
 #endif
     for (; x < n; x++) {
@@ -670,6 +809,20 @@ static inline __attribute__((always_inline)) void down(const cx_u8* r0, const cx
         if (r1) s = _mm256_add_epi16(s, _mm256_maddubs_epi16(_mm256_loadu_si256((const V*)(r1 + 2 * x)), ones));
         s = r1 ? _mm256_srli_epi16(_mm256_add_epi16(s, bias), 2) : _mm256_srli_epi16(_mm256_add_epi16(s, bias), 1);
         _mm_storeu_si128((__m128i*)(out + x), _mm_packus_epi16(_mm256_castsi256_si128(s), _mm256_extracti128_si256(s, 1)));
+    }
+#elif defined(CX_NEON)
+    /* Pairs added into 16-bit lanes, with the same alternating rounding. */
+    const uint16x8_t bias = vreinterpretq_u16_u32(vdupq_n_u32(r1 ? 0x00020001u : 0x00010000u));
+    for (; x + 16 <= n; x += 16) {
+        uint16x8_t s0 = vpaddlq_u8(vld1q_u8(r0 + 2 * x)), s1 = vpaddlq_u8(vld1q_u8(r0 + 2 * x + 16));
+        if (r1) {
+            s0 = vpadalq_u8(s0, vld1q_u8(r1 + 2 * x));
+            s1 = vpadalq_u8(s1, vld1q_u8(r1 + 2 * x + 16));
+        }
+        s0 = vaddq_u16(s0, bias);
+        s1 = vaddq_u16(s1, bias);
+        const uint8x16_t o = r1 ? vcombine_u8(vshrn_n_u16(s0, 2), vshrn_n_u16(s1, 2)) : vcombine_u8(vshrn_n_u16(s0, 1), vshrn_n_u16(s1, 1));
+        vst1q_u8(out + x, o);
     }
 #endif
     for (; x < n; x++) {
