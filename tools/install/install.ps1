@@ -219,7 +219,21 @@ if (-not $version) {
 }
 if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+') { Stop-Install "the release's version.txt doesn't hold a version" }
 $tag = if ($version -match '-nightly\.') { 'nightly' } else { "v$version" }
-$file = "calx-$version-windows-x64.zip"
+# The native build on an Arm processor (CLX-276), which the registry names even to a PowerShell
+# that Windows runs by translating it, or else the x64 one, which Windows on Arm runs that way:
+# where the release has no Arm64 build, as releases before it don't.
+$cpu = 'x64'
+$native = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name PROCESSOR_ARCHITECTURE -ErrorAction SilentlyContinue).PROCESSOR_ARCHITECTURE
+if ($native -eq 'ARM64') {
+    try {
+        Get-Bytes "$releases/download/$tag/calx-$version-windows-arm64.zip.sha256" | Out-Null
+        $cpu = 'arm64'
+    } catch {
+        if ("$_" -notmatch 'HTTP 404') { Stop-Install "$_" }
+        Write-Host "This release has no build for Arm64 Windows, so this installs the x64 one, which Windows runs by translating it."
+    }
+}
+$file = "calx-$version-windows-$cpu.zip"
 $url = "$releases/download/$tag/$file"
 
 $temp = Join-Path ([IO.Path]::GetTempPath()) ("calx-install-" + [Guid]::NewGuid().ToString('N'))

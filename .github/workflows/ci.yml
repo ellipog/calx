@@ -28,11 +28,10 @@ jobs:
           - os: ubuntu-26.04
             calx: build/compiler/linux/calx
           # Linux on Arm (D612, CLX-275), whose memory ordering is weaker than x86's, so the
-          # runtime's threads are tested where a missing acquire or release would show. A new
-          # platform is `experimental` until it passes, so its failures don't fail the run.
+          # runtime's threads are tested where a missing acquire or release would show.
           - os: ubuntu-24.04-arm
             calx: build/compiler/linux/calx
-            experimental: true
+          # A new platform is `experimental` until it passes, so its failures don't fail the run.
           # Windows on Arm (CLX-276), with the image's LLVM and Visual Studio's ARM64 tools.
           - os: windows-11-arm
             calx: build/compiler/windows/calx.exe
@@ -149,6 +148,45 @@ jobs:
       - name: Tests
         shell: bash
         run: '"$CALX_BIN" run --release tests/run.calx -- --modes debug,release'
+      # While Windows on Arm's stack traces are brought up (CLX-276): what a panic's trace writes
+      # there, and what dbghelp gives a C program for each frame of its own stack.
+      - name: Stack traces on Windows on Arm
+        if: always() && runner.os == 'Windows' && runner.arch == 'ARM64'
+        shell: bash
+        run: |
+          mkdir -p build/probe
+          "$CALX_BIN" build tests/panics/trace.calx -o build/probe/trace.exe && ls -la build/probe
+          ./build/probe/trace.exe; echo "status $?"
+          cat > build/probe/probe.c <<'EOF'
+          #include <windows.h>
+          #include <dbghelp.h>
+          #include <stdio.h>
+          __declspec(noinline) void inner(void) {
+              void* f[32];
+              USHORT n = RtlCaptureStackBackTrace(0, 32, f, NULL);
+              printf("frames %u\n", n);
+              HANDLE p = GetCurrentProcess();
+              SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_DEFERRED_LOADS);
+              if (!SymInitializeW(p, NULL, TRUE)) printf("SymInitializeW failed: %lu\n", GetLastError());
+              for (USHORT i = 0; i < n; i++) {
+                  char buf[sizeof(SYMBOL_INFO) + 256] = {0};
+                  SYMBOL_INFO* s = (SYMBOL_INFO*)buf;
+                  s->SizeOfStruct = sizeof(SYMBOL_INFO);
+                  s->MaxNameLen = 255;
+                  DWORD64 off, at = (DWORD64)f[i] - 1;
+                  IMAGEHLP_LINE64 l = {sizeof l};
+                  DWORD col;
+                  BOOL a = SymFromAddr(p, at, &off, s);
+                  DWORD ea = a ? 0 : GetLastError();
+                  BOOL b = SymGetLineFromAddr64(p, at, &col, &l);
+                  DWORD eb = b ? 0 : GetLastError();
+                  printf("%2u %p %s (%lu) %s:%lu (%lu)\n", i, f[i], a ? s->Name : "?", ea, b ? l.FileName : "?", b ? l.LineNumber : 0, eb);
+              }
+          }
+          int main(void) { inner(); return 0; }
+          EOF
+          clang -gline-tables-only -gcodeview build/probe/probe.c -o build/probe/probe.exe -fuse-ld=lld -g -ldbghelp && ./build/probe/probe.exe
+          clang -O2 -gline-tables-only -gcodeview build/probe/probe.c -o build/probe/probe2.exe -fuse-ld=lld -g -ldbghelp && ./build/probe/probe2.exe
       # A handoff between threads that's missing its ordering fails only now and then, so on Arm
       # the parallel and thread tests run 20 more times (CLX-274).
       - name: Threads, again and again
@@ -202,9 +240,14 @@ jobs:
           - os: ubuntu-22.04
             platform: linux
             cpu: x64
-          # Linux on Arm (CLX-275), experimental, as in the test job, until it passes.
+          # Linux on Arm (CLX-275) and Windows on Arm (CLX-276), experimental, as in the test job,
+          # until they pass.
           - os: ubuntu-22.04-arm
             platform: linux
+            cpu: arm64
+            experimental: true
+          - os: windows-11-arm
+            platform: windows
             cpu: arm64
             experimental: true
     runs-on: ${{ matrix.os }}
@@ -350,13 +393,20 @@ jobs:
             if ($hash -ne $sha256) { throw "$file's SHA-256 is $hash" }
           }
           $ProgressPreference = 'SilentlyContinue'
+          # The processor's builds of both (CLX-276).
           $mingw = "llvm-mingw-20261104-ucrt-x86_64"
-          Get-Pinned "https://github.com/mstorsjo/llvm-mingw/releases/download/20261104/$mingw.zip" "$env:RUNNER_TEMP\$mingw.zip" `
-            "552191B5754C49A5A20723276A6FC56541EA1922C4C50B7B669022333FC1B40F"
-          7z x -y "-o$env:RUNNER_TEMP" "$env:RUNNER_TEMP\$mingw.zip" > $null
+          $mingw_sum = "552191B5754C49A5A20723276A6FC56541EA1922C4C50B7B669022333FC1B40F"
           $llvm = "clang+llvm-23.1.5-x86_64-pc-windows-msvc"
-          Get-Pinned "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.5/$llvm.tar.zst" "$env:RUNNER_TEMP\$llvm.tar.zst" `
-            "B2BE33385DDC86E83511417A060DE927AE8B09D1F3017CC3CDCE5C73CD5029D7"
+          $llvm_sum = "B2BE33385DDC86E83511417A060DE927AE8B09D1F3017CC3CDCE5C73CD5029D7"
+          if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq "Arm64") {
+            $mingw = "llvm-mingw-20261104-ucrt-aarch64"
+            $mingw_sum = "7D7F8387A8706639B0B47A629D6E23F8B3EF9ACCE67E9832B8CD4C5BB2816EAB"
+            $llvm = "clang+llvm-23.1.5-aarch64-pc-windows-msvc"
+            $llvm_sum = "CB523582D9FE00862C5584CE5F7715F963037C11BBA95181FA98425F48E06863"
+          }
+          Get-Pinned "https://github.com/mstorsjo/llvm-mingw/releases/download/20261104/$mingw.zip" "$env:RUNNER_TEMP\$mingw.zip" $mingw_sum
+          7z x -y "-o$env:RUNNER_TEMP" "$env:RUNNER_TEMP\$mingw.zip" > $null
+          Get-Pinned "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.5/$llvm.tar.zst" "$env:RUNNER_TEMP\$llvm.tar.zst" $llvm_sum
           # Only what the toolchain takes from it: the whole release is 4 GB unpacked. Its zstd
           # window is 1 GiB, which only zstd itself decodes when told to.
           zstd -d -q --long=31 "$env:RUNNER_TEMP\$llvm.tar.zst" -o "$env:RUNNER_TEMP\$llvm.tar"
