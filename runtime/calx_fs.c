@@ -1460,8 +1460,12 @@ cx_i32 cx_fs_temp_dir(void) {
         free(t);
         return 0;
     }
+    /* With its links followed, as the current folder is named once it's there: macOS's TMPDIR is
+     * under /var, a link to /private/var. */
+    char* real = realpath(t, NULL);
     fs_len = 0;
-    buf_add(t, strlen(t));
+    buf_add(real ? real : t, strlen(real ? real : t));
+    free(real);
     free(t);
     return 1;
 }

@@ -1216,8 +1216,9 @@ static void read_some(stream* s) {
  * resident set now and at its peak from /proc/<pid>/status, in bytes, each 0 where /proc can't
  * say. */
 #ifdef __APPLE__
-/* On macOS, from proc_pid_rusage: its CPU time, counted in the machine's ticks, its resident set,
- * and as its peak the most its footprint has been, which is what Activity Monitor shows. */
+/* On macOS, from proc_pid_rusage: its CPU time, counted in the machine's ticks, and its footprint
+ * now and at its most, Activity Monitor's "Memory": the pages that are its own, without the shared
+ * ones its resident set counts, which could put the peak below the present. */
 static void usage_os(proc* p, cx_u64* out) {
     out[0] = out[1] = out[2] = 0;
     struct rusage_info_v4 ri;
@@ -1226,8 +1227,8 @@ static void usage_os(proc* p, cx_u64* out) {
     if (mach_timebase_info(&tb) == 0 && tb.denom) {
         out[0] = (cx_u64)((unsigned __int128)(ri.ri_user_time + ri.ri_system_time) * tb.numer / tb.denom);
     }
-    out[1] = ri.ri_resident_size;
-    out[2] = ri.ri_lifetime_max_phys_footprint;
+    out[1] = ri.ri_phys_footprint;
+    out[2] = ri.ri_lifetime_max_phys_footprint > out[1] ? ri.ri_lifetime_max_phys_footprint : out[1];
 }
 #else
 static void usage_os(proc* p, cx_u64* out) {

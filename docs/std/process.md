@@ -148,8 +148,8 @@ A benchmark that starts a server measures what the server used: its CPU time and
 | `Usage` | Is |
 | --- | --- |
 | `cpu_ns: u64` | The nanoseconds of CPU time all its threads used, in the kernel and out. Windows adds to it at each tick of its clock, about every 15.6 ms |
-| `memory: u64` | The bytes of its memory in RAM now: its working set on Windows, its resident set on Linux, `top`'s `RES`. 0 once it has ended |
-| `peak_memory: u64` | The most bytes it held in RAM at once: its peak working set on Windows, `VmHWM` on Linux while it runs, and `ru_maxrss` once it has ended |
+| `memory: u64` | The bytes of its memory in RAM now: its working set on Windows, its resident set on Linux, `top`'s `RES`, and its footprint on macOS, Activity Monitor's "Memory". 0 once it has ended |
+| `peak_memory: u64` | The most bytes it held in RAM at once: its peak working set on Windows, `VmHWM` on Linux and its lifetime peak footprint on macOS while it runs, and `ru_maxrss` once it has ended |
 
 ```calx
 import std.env.{args}
@@ -172,6 +172,7 @@ fn main() {
 
 - On Windows the numbers are `GetProcessTimes` and `GetProcessMemoryInfo`'s, from the handle to the process, which still says what it used after it ends. Python needs `ctypes` for them.
 - On Linux, while it runs, they're `/proc/<pid>/stat` and `/proc/<pid>/status`. Once it ends, they're `wait4`'s, as Python's `os.wait4` gives them, so they also count the programs it started and waited for.
+- On macOS, while it runs, they're `proc_pid_rusage`'s, and once it ends `wait4`'s, as on Linux.
 - Once it has ended, `child.usage()` gives what `status.usage()` will, so a sampler that's late still gets the totals.
 - [This process's](#this-process) own are `memory()` and `cpu_time()`.
 
@@ -247,7 +248,7 @@ fn main() {
 
 | Function | Gives |
 | --- | --- |
-| `unsafe memory() -> u64` | The bytes of this process's memory in RAM now: its working set on Windows, its resident set on Linux, `top`'s `RES` |
+| `unsafe memory() -> u64` | The bytes of this process's memory in RAM now: its working set on Windows, its resident set on Linux and macOS, `top`'s `RES` |
 | `unsafe memory_limit() -> u64` | The bytes of RAM it may use: the machine's, or less where a job object's limit on Windows, or a cgroup's on Linux, says |
 | `unsafe cpu_time() -> u64` | The nanoseconds of CPU time all its threads have used since it started, in the kernel and out |
 | `unsafe processors() -> u32` | The processors it may run on, as `parallel for` counts them |

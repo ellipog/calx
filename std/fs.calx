@@ -748,7 +748,9 @@ pub fn separator() -> String {
 
 /// A new, empty directory of its own in the system's temporary folder, such as
 /// `/tmp/calx-a1B2c3` or `C:\Users\me\AppData\Local\Temp\calx-1f2c-1-5b3e9a`. It's the
-/// program's to remove, with `remove_dir_all`.
+/// program's to remove, with `remove_dir_all`. On Linux and macOS its path has its links followed,
+/// as `current_dir` gives it once it's the current folder: macOS's is under `/private/var`, not
+/// the `/var` that links there.
 pub fn temp_dir() -> String ! FsError {
     if unsafe { cx_fs_temp_dir() } == 0 {
         fail last_error()

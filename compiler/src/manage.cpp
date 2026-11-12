@@ -182,12 +182,28 @@ bool remove_after_exit(const fs::path& home) {
 }
 #else
 // Takes the lines the install script added out of each shell startup file: `export PATH="BIN:$PATH"`,
-// with the `# Calx` line above it and the blank line above that. The files it changed.
+// with the `# Calx` line above it and the blank line above that. The files it changed. BIN is
+// compared with its links followed, as this calx names its own folder so: macOS's /var is a link
+// to /private/var.
 std::vector<std::string> remove_from_path(const fs::path& bin) {
     std::vector<std::string> changed;
     const char* home = std::getenv("HOME");
     if (!home || !*home) return changed;
-    std::string line = "export PATH=\"" + bin.string() + ":$PATH\"";
+    std::error_code ec;
+    fs::path real_bin = fs::weakly_canonical(bin, ec);
+    if (ec) real_bin = bin;
+    const std::string head = "export PATH=\"", tail = ":$PATH\"";
+    auto is_ours = [&](const std::string& l) {
+        if (l.size() <= head.size() + tail.size() || l.compare(0, head.size(), head) != 0 ||
+            l.compare(l.size() - tail.size(), tail.size(), tail) != 0) {
+            return false;
+        }
+        fs::path p = l.substr(head.size(), l.size() - head.size() - tail.size());
+        if (p == bin) return true;
+        std::error_code pec;
+        fs::path real = fs::weakly_canonical(p, pec);
+        return !pec && real == real_bin;
+    };
     for (const char* name : {".profile", ".bashrc", ".zshrc"}) {
         fs::path rc = fs::path(home) / name;
         std::string text;
@@ -203,7 +219,7 @@ std::vector<std::string> remove_from_path(const fs::path& bin) {
         bool removed = false;
         std::vector<std::string> out;
         for (const std::string& l : lines) {
-            if (l != line) {
+            if (!is_ours(l)) {
                 out.push_back(l);
                 continue;
             }
