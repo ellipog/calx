@@ -25,6 +25,9 @@ struct Toolchain {
     // On macOS, dsymutil, which gathers a program's DWARF from its objects into a file beside it
     // for stack traces and debuggers, as the PDB is on Windows (CLX-278); "" where there's none.
     std::string dsymutil;
+    // On macOS, the SDK: libSystem's headers and stubs, from Apple's Command Line Tools or Xcode,
+    // passed as -isysroot, which LLVM's own clang needs and Apple's finds itself; "" if there's none.
+    std::string sdk;
     std::string identity; // what changes when clang does: its path, size and modification time
     std::string home;     // the Calx installation: runtime/ and std/ are under it
     std::string cache;    // the object cache
@@ -42,6 +45,10 @@ std::string find_home(std::string& error);
 // toolchain/bin, or `clang` on PATH) and the cache (CALX_CACHE, or the platform's cache folder). On
 // failure returns false and puts the reason in `error`.
 bool find_toolchain(Toolchain& tc, std::string& error);
+
+// The macOS SDK's folder: SDKROOT, or the one the Command Line Tools or Xcode installed, found
+// without starting xcrun; "" if there's none.
+std::string find_sdk();
 
 // The program `name` (with `.exe` on Windows) in the first folder on PATH that has it, or "".
 std::string which(const std::string& name);

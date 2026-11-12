@@ -436,6 +436,27 @@ fs::path long_path(const std::string& path) {
 
 std::string which(const std::string& name) { return find_on_path(name); }
 
+// The macOS SDK, found without starting xcrun, which opens a window offering the Command Line Tools
+// where they're missing: SDKROOT, then in the developer folder `xcode-select` chose, then where the
+// Command Line Tools and Xcode put it. "" if none is there.
+std::string find_sdk() {
+    std::string root = env("SDKROOT");
+    if (!root.empty()) return root;
+    std::error_code ec;
+    std::vector<fs::path> tries;
+    fs::path chosen = fs::read_symlink("/var/db/xcode_select_link", ec);
+    if (!ec && !chosen.empty()) {
+        tries.push_back(chosen / "SDKs" / "MacOSX.sdk");                                              // the Command Line Tools
+        tries.push_back(chosen / "Platforms" / "MacOSX.platform" / "Developer" / "SDKs" / "MacOSX.sdk");  // Xcode
+    }
+    tries.push_back("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk");
+    tries.push_back("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk");
+    for (const fs::path& p : tries) {
+        if (fs::is_directory(p, ec)) return p.string();
+    }
+    return "";
+}
+
 bool find_toolchain(Toolchain& tc, std::string& error) {
     tc.home = find_home(error);
     if (tc.home.empty()) return false;
@@ -480,6 +501,7 @@ bool find_toolchain(Toolchain& tc, std::string& error) {
             if (tc.dsymutil.empty() && plain_file(dir / name)) tc.dsymutil = (dir / name).string();
         }
         if (tc.dsymutil.empty()) tc.dsymutil = find_on_path("dsymutil");
+        tc.sdk = find_sdk();
     }
 #endif
     tc.lld = !tc.lld_path.empty();
@@ -1615,8 +1637,15 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // into other memory. Windows' code does this already, through __chkstk.
     flags.push_back("-fstack-clash-protection");
 #ifdef __APPLE__
-    // DWARF 5, which the runtime's trace reader takes, where clang for macOS may write 4.
-    flags.push_back("-gdwarf-5");
+    // DWARF 5, which the runtime's trace reader takes, where clang for macOS may write 4; set as
+    // the default, since -gdwarf-5 would also make the debug info full. The SDK, which LLVM's own
+    // clang needs told, and the first macOS for Apple Silicon, 11, so a program runs on every one.
+    flags.push_back("-fdebug-default-version=5");
+    flags.push_back("-mmacosx-version-min=11.0");
+    if (!tc.sdk.empty()) {
+        flags.push_back("-isysroot");
+        flags.push_back(tc.sdk);
+    }
 #endif
 #else
     // With mingw-w64's headers and libraries beside it, clang builds for them, whatever its own
@@ -1852,8 +1881,13 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     }
 #elif defined(__APPLE__)
     // ld64 drops what nothing reaches with -dead_strip, as ld.lld does with --gc-sections, and the
-    // C library holds the math library (CLX-279).
+    // C library holds the math library (CLX-279). libSystem's stubs come from the SDK.
     link_flags.push_back("-Wl,-dead_strip");
+    link_flags.push_back("-mmacosx-version-min=11.0");
+    if (!tc.sdk.empty()) {
+        link_flags.push_back("-isysroot");
+        link_flags.push_back(tc.sdk);
+    }
 #else
     link_flags.push_back("-lm");
     link_flags.push_back("-Wl,--gc-sections");

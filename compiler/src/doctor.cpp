@@ -165,6 +165,9 @@ std::string install_clang() {
 #ifdef _WIN32
     return "Install LLVM with `winget install LLVM.LLVM`, then open a new terminal, or set CALX_CC to\n"
            "the full path of clang.exe.";
+#elif defined(__APPLE__)
+    return "Install Apple's Command Line Tools, which have clang and the macOS SDK:\n"
+           "`xcode-select --install`. Or set CALX_CC to a clang.";
 #else
     return "Install clang and lld: on Ubuntu or Debian, `sudo apt install clang lld`. If that clang is\n"
            "older than 18, apt.llvm.org has newer ones. Or set CALX_CC to a clang.";
@@ -185,6 +188,12 @@ std::string diagnose(const std::string& out, bool mingw) {
         return "clang can't find the Windows SDK or the C runtime it links programs with. Install Visual\n"
                "Studio's Build Tools with the \"Desktop development with C++\" workload, from\n"
                "https://visualstudio.microsoft.com/downloads/, then open a new terminal.";
+    }
+#elif defined(__APPLE__)
+    (void)mingw;
+    if (contains(out, "file not found") || contains(out, "-lSystem") || contains(out, "SDK")) {
+        return "clang can't find the macOS SDK's headers or libSystem. Install Apple's Command Line Tools:\n"
+               "`xcode-select --install`, or set SDKROOT to an SDK.";
     }
 #else
     (void)mingw;
@@ -318,6 +327,22 @@ int run_doctor() {
                  "not beside clang: builds link slower, and release builds can't inline across modules");
             fix("lld comes with LLVM; install it beside clang.");
         }
+#ifdef __APPLE__
+        // The SDK, which LLVM's own clang is told of, and dsymutil, which gives traces their lines.
+        if (have_clang && found && !tc.sdk.empty()) {
+            ok("the macOS SDK at " + tc.sdk, "SDK", tc.sdk);
+        } else if (have_clang) {
+            warn("no macOS SDK found: programs need its headers and libSystem", "SDK",
+                 "not found: programs need its headers and libSystem");
+            fix("`xcode-select --install` installs Apple's Command Line Tools, which have it. Or set SDKROOT.");
+        }
+        if (have_clang && found && !tc.dsymutil.empty()) {
+            ok("dsymutil, which gives stack traces their lines", "dsymutil", "gives stack traces their lines");
+        } else if (have_clang) {
+            warn("no dsymutil: stack traces won't name lines", "dsymutil", "not found: stack traces won't name lines");
+            fix("dsymutil comes with LLVM and with Apple's Command Line Tools: `xcode-select --install`.");
+        }
+#endif
     }
 
     // A program, built and run in each mode, which is what everything else is for.
