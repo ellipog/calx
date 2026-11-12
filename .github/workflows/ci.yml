@@ -1,6 +1,7 @@
 # Builds the compiler and runs the test suite, including every example in the reference docs
-# (D41), in debug and release builds on both platforms Calx targets. A push that only changes
-# the website (site/) skips it; a change to docs/ still runs it, since the docs' examples are tests.
+# (D41), in debug and release builds on Windows and Linux on x64, and Linux on Arm. A push that
+# only changes the website (site/) skips it; a change to docs/ still runs it, since the docs'
+# examples are tests.
 name: ci
 
 on:
@@ -26,7 +27,14 @@ jobs:
           # from 2026-10-19, so the tests run on one system, the newer.
           - os: ubuntu-26.04
             calx: build/compiler/linux/calx
+          # Linux on Arm (D612, CLX-275), whose memory ordering is weaker than x86's, so the
+          # runtime's threads are tested where a missing acquire or release would show. A new
+          # platform is `experimental` until it passes, so its failures don't fail the run.
+          - os: ubuntu-24.04-arm
+            calx: build/compiler/linux/calx
+            experimental: true
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental == true }}
     env:
       CXX: clang++
       CALX_BIN: ${{ matrix.calx }}
@@ -56,7 +64,9 @@ jobs:
           else
             tc="$RUNNER_TEMP/calx-toolchain"
             mkdir -p "$tc"
-            gh release download nightly --repo "$GITHUB_REPOSITORY" --pattern 'calx-toolchain-*-linux-x64.tar.xz*' --dir "$tc"
+            arch=x64
+            if [ "$(uname -m)" = aarch64 ]; then arch=arm64; fi
+            gh release download nightly --repo "$GITHUB_REPOSITORY" --pattern "calx-toolchain-*-linux-$arch.tar.xz*" --dir "$tc"
             (cd "$tc" && sha256sum -c ./*.sha256)
             tar -xJf "$tc"/*.tar.xz -C "$tc" --wildcards '*bin/ld.lld'
             cp "$(find "$tc" -path '*bin/ld.lld' -type f | head -1)" "$bin/ld.lld"
@@ -123,6 +133,12 @@ jobs:
       - name: Tests
         shell: bash
         run: '"$CALX_BIN" run --release tests/run.calx -- --modes debug,release'
+      # A handoff between threads that's missing its ordering fails only now and then, so on Arm
+      # the parallel and thread tests run 20 more times (CLX-274).
+      - name: Threads, again and again
+        if: runner.arch == 'ARM64'
+        shell: bash
+        run: for i in $(seq 1 20); do "$CALX_BIN" run --release tests/run.calx -- --modes release tests/parallel tests/thread || exit 1; done
       - name: Check the release tools and the art script
         shell: bash
         run: for f in tools/update/update.calx tools/release/package.calx tools/release/toolchain.calx assets/logo/banner.calx; do "$CALX_BIN" check "$f"; done
@@ -141,10 +157,10 @@ jobs:
       # The VS Code extension, packaged as a .vsix, kept as an artifact, so it can be installed
       # without a checkout. The vscode job tests it.
       - name: Package the VS Code extension
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && runner.arch == 'X64'
         run: '"$CALX_BIN" run tools/vscode/package.calx'
       - uses: actions/upload-artifact@v7
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && runner.arch == 'X64'
         with:
           name: calx-vscode
           path: build/vscode/*.vsix
