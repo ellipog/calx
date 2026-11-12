@@ -109,4 +109,4 @@ On our benchmark, an i9-13900K with a little other work running, each program on
 
 Rust's `wrap` keeps the text's newlines, where Python's and Calx's make them spaces first, so it gives more lines for the whole prose, 136,668 to 78,292.
 
-`indent` finds the bytes that could start a line break 16 at a time with SSE2, and looks only at those: a control character, or the first byte of U+0085, U+2028 and U+2029. That took it from 2.6 ms to 2.0 ms, and it matched Python's `indent` on 6,000 more random texts with every kind of line break.
+`indent` finds the bytes that could start a line break 16 at a time with SSE2 or NEON, and looks only at those: a control character, or the first byte of U+0085, U+2028 and U+2029. That took it from 2.6 ms to 2.0 ms, and it matched Python's `indent` on 6,000 more random texts with every kind of line break.

@@ -1274,6 +1274,20 @@ CX_INLINE cx_u32 cx_group_match(const cx_u8* g, cx_u8 b) {
 CX_INLINE cx_u32 cx_group_free(const cx_u8* g) {
     return (cx_u32)__builtin_ia32_pmovmskb128(*(const cx_group_v*)g);
 }
+#elif defined(__aarch64__)
+/* NEON has no pmovmskb, but 16 bools, a bit each, cast to 16 bits compile to its compare, a mask
+ * of each byte's bit and three pairwise adds, which is what they'd be by hand. The plain loops
+ * below get that for a match, but the top bit's took 45 instructions (CLX-281). */
+typedef cx_u8 cx_group_v __attribute__((vector_size(16), aligned(1)));
+typedef signed char cx_group_s __attribute__((vector_size(16), aligned(1)));
+typedef _Bool cx_group_b __attribute__((ext_vector_type(16)));
+CX_INLINE cx_u32 cx_group_match(const cx_u8* g, cx_u8 b) {
+    return (cx_u32)__builtin_bit_cast(cx_u16, __builtin_convertvector(*(const cx_group_v*)g == b, cx_group_b));
+}
+/* EMPTY or DELETED: the control bytes with the top bit set. */
+CX_INLINE cx_u32 cx_group_free(const cx_u8* g) {
+    return (cx_u32)__builtin_bit_cast(cx_u16, __builtin_convertvector(*(const cx_group_s*)g < 0, cx_group_b));
+}
 #else
 CX_INLINE cx_u32 cx_group_match(const cx_u8* g, cx_u8 b) {
     cx_u32 m = 0;

@@ -66,7 +66,7 @@ Then the pairs that compose, in a hash table. Each rune's record is found throug
 
 It passes Unicode 16's NormalizationTest.txt: all 19,965 of its lines in all four forms, and every other rune unchanged in each. It also matches Python 3.14's `normalize` and `is_normalized` in all four forms on 160,000 random strings, which were heavy in marks, Hangul, compatibility forms and runes from every plane, and on 6,000 more made of the runes around the edges of the blocks the quick check skips.
 
-`normalize` first runs the quick check, which skips runs of runes that can't change, 32 bytes at a time with AVX2, as release builds have, and 16 with SSE2:
+`normalize` first runs the quick check, which skips runs of runes that can't change, 32 bytes at a time with AVX2, as release builds have, and 16 with SSE2 or NEON:
 
 - ASCII, which is in every form;
 - in NFC, everything below U+0300, which in UTF-8 is every byte below 0xCC;
