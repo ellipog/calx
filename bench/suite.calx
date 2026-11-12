@@ -70,6 +70,8 @@ struct Args {
     record: bool
     /// Keep the folder with the builds and inputs, and say where it is.
     keep: bool
+    /// Print the tables docs/language-benchmarks.md gives, from bench/results, and run nothing.
+    tables: bool
 }
 
 extern "C" {
@@ -1148,6 +1150,150 @@ fn uncommitted(root: String) -> List<String> {
     return files
 }
 
+// --tables: the tables docs/language-benchmarks.md gives, from the records, so the page is written
+// from what was measured.
+
+// A language's median wall time and peak memory in a record, if it has them.
+fn timing(p: Json?) -> (f64, f64)? {
+    if let j = p {
+        if (j.get("status") ?? Json.Null) == Json.Str("ok") {
+            if let t = (j.get("median_ms") ?? Json.Null).as_f64() {
+                return some((t, (j.get("peak_mb") ?? Json.Null).as_f64() ?? 0.0))
+            }
+        }
+    }
+    return none
+}
+
+// A table row: each cell's time and memory, or a dash, the fastest in bold. Without `memory`,
+// only the times.
+fn md_row(label: String, cells: List<(f64, f64)?>, memory: bool) -> String {
+    var fastest = 1e300
+    for c in cells {
+        if let v = c {
+            fastest = fastest.min(v.0)
+        }
+    }
+    var row = "| {label} |"
+    for c in cells {
+        if let v = c {
+            let t = if v.0 == fastest { "**{ms(v.0)}**" } else { ms(v.0) }
+            row.push_str(if memory { " {t}, {mb(v.1)} |" } else { " {t} |" })
+        } else {
+            row.push_str(" — |")
+        }
+    }
+    return row
+}
+
+fn md_head(first: str, langs: List<String>) {
+    var head = "| {first} |"
+    var line = String("| --- |")
+    for l in langs {
+        head.push_str(" {lang_name(l.copy())} |")
+        line.push_str(" --- |")
+    }
+    println(head)
+    println(line)
+}
+
+fn print_tables(root: String) {
+    var all: List<String> = []
+    var built: List<String> = []
+    for l in LANGS {
+        all.push(String(l))
+        if l != "python" {
+            built.push(String(l))
+        }
+    }
+    for os in ["windows", "linux"] {
+        let ok(read) = fs.read_text("{root}/bench/results/suite-{os}.json") else {
+            continue
+        }
+        let text = read else {
+            continue
+        }
+        let ok(doc) = parse(text) else {
+            continue
+        }
+        let results = doc.get("results") ?? Json.Null
+        println("<!-- {os}, recorded at {(doc.get("commit") ?? Json.Null).as_str() ?? String()} -->")
+        println("")
+        for group in ["compute", "realistic"] {
+            println("{os}, {group}:")
+            println("")
+            md_head("Benchmark", all.copy())
+            for name in results.keys() {
+                let r = results.get(name.copy()) ?? Json.Null
+                if (r.get("group") ?? Json.Null) != Json.Str(String(group)) {
+                    continue
+                }
+                let cells = all.map(|l| timing(r.get(l.copy())))
+                println(md_row((r.get("title") ?? Json.Null).as_str() ?? name.copy(), cells, true))
+            }
+            println("")
+        }
+        for name in results.keys() {
+            let r = results.get(name.copy()) ?? Json.Null
+            if (r.get("group") ?? Json.Null) != Json.Str("parallel") {
+                continue
+            }
+            println("{os}, {(r.get("title") ?? Json.Null).as_str() ?? name.copy()}:")
+            println("")
+            md_head("Threads", built.copy())
+            let counts = r.get("threads") ?? Json.Null
+            for t in counts.keys() {
+                let at = counts.get(t.copy()) ?? Json.Null
+                println(md_row(t.copy(), built.map(|l| timing(at.get(l.copy()))), false))
+            }
+            let same = r.get("same_output_at_every_count") ?? Json.Null
+            var row = String("| Same output at every count |")
+            for l in built {
+                let s = (same.get(l.copy()) ?? Json.Null).as_bool()
+                row.push_str(if s == some(true) { " yes |" } else if s == some(false) { " no |" } else { " — |" })
+            }
+            println(row)
+            println("")
+        }
+        let dx = results.get("dx") ?? Json.Null
+        if dx.is_null() {
+            continue
+        }
+        println("{os}, builds:")
+        println("")
+        md_head("Build", built.copy())
+        let builds = dx.get("builds") ?? Json.Null
+        for key in builds.keys() {
+            let b = builds.get(key.copy()) ?? Json.Null
+            println(md_row((b.get("title") ?? Json.Null).as_str() ?? key.copy(), built.map(|l| timing(b.get(l.copy()))), false))
+        }
+        println("")
+        println("{os}, release programs' sizes:")
+        println("")
+        md_head("Program", built.copy())
+        let sizes = dx.get("sizes_bytes") ?? Json.Null
+        for size in sizes.keys() {
+            let s = sizes.get(size.copy()) ?? Json.Null
+            var row = "| {if size == "hello" { String("hello") } else { "{dx.get("modules") ?? Json.Null} modules" }} |"
+            for l in built {
+                if let n = (s.get(l.copy()) ?? Json.Null).as_f64() {
+                    row.push_str(" {n / 1024.0:,.0} KB |")
+                } else {
+                    row.push_str(" — |")
+                }
+            }
+            println(row)
+        }
+        println("")
+        println("{os}, starting hello:")
+        println("")
+        md_head("Program", all.copy())
+        let startup = dx.get("startup") ?? Json.Null
+        println(md_row(String("hello"), all.map(|l| timing(startup.get(l.copy()))), true))
+        println("")
+    }
+}
+
 // The results `path` holds, if it's there and reads as a record.
 fn kept(path: String) -> Json {
     let ok(read) = fs.read_text(path) else {
@@ -1165,6 +1311,10 @@ fn kept(path: String) -> Json {
 fn main() {
     let a = Args.parse()
     let root = repo_root()
+    if a.tables {
+        print_tables(root)
+        return
+    }
     let calx = compiler(root.copy())
     let python = find_python()
     var all_langs: List<String> = []
