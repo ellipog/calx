@@ -1147,6 +1147,10 @@ static int queued(const stream* s) { return s->open && s->b.start < s->b.len; }
  * that put some bytes in the pipe before the child closed it gives back how many, with the signal
  * raised all the same, so a short count is looked at too. */
 static ssize_t write_quiet(int fd, const void* d, size_t n) {
+#ifdef __APPLE__
+    /* The pipe has F_SETNOSIGPIPE, so a write gives EPIPE, and macOS has no sigtimedwait. */
+    return write(fd, d, n);
+#else
     sigset_t pipe_set, old, pending;
     sigemptyset(&pipe_set);
     sigaddset(&pipe_set, SIGPIPE);
@@ -1163,6 +1167,7 @@ static ssize_t write_quiet(int fd, const void* d, size_t n) {
     pthread_sigmask(SIG_SETMASK, &old, NULL);
     errno = e;
     return r;
+#endif
 }
 
 static void write_some(stream* s) {
@@ -1582,6 +1587,9 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
                 }
             }
             fcntl(ours[i], F_SETFL, fcntl(ours[i], F_GETFL) | O_NONBLOCK);
+#ifdef __APPLE__
+            if (i == 0) fcntl(ours[i], F_SETNOSIGPIPE, 1);  /* see write_quiet */
+#endif
             posix_spawn_file_actions_adddup2(&fa, theirs[i], i);
             break;
         }

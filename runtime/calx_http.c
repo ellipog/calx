@@ -1,6 +1,7 @@
 /* HTTP and HTTPS requests behind std.http (D118), on the system's own client so that certificates
- * are checked as the system checks them: WinHTTP on Windows, and libcurl on Linux, loaded with
- * dlopen when the first request starts, so a program that makes none doesn't need it installed.
+ * are checked as the system checks them: WinHTTP on Windows, and libcurl on Linux and macOS,
+ * loaded with dlopen when the first request starts, so a program that makes none doesn't need it
+ * installed. Every macOS has it; on Linux it's a package.
  * Linked only into programs that call them.
  *
  * Each request runs on a thread of its own, the way vanilla asks Mojang's session server on an
@@ -475,7 +476,12 @@ static int curl_loaded;
 static cx_u32 curl_state;
 
 static void curl_load(void) {
+#ifdef __APPLE__
+    /* Every macOS has it, in the shared cache, which dlopen finds by this path. */
+    const char* names[] = {"/usr/lib/libcurl.4.dylib", "libcurl.4.dylib", "libcurl.dylib"};
+#else
     const char* names[] = {"libcurl.so.4", "libcurl-gnutls.so.4", "libcurl.so"};
+#endif
     void* lib = NULL;
     for (int i = 0; i < 3 && !lib; i++) lib = dlopen(names[i], RTLD_NOW | RTLD_LOCAL);
     if (!lib) return;
