@@ -3961,7 +3961,11 @@ $dropall    m->len = 0;
                 // Decoded as the loop goes. Text is always UTF-8, so nothing is checked. A rune past
                 // U+FFFF is two UTF-16 units, so `chars` keeps the second for the next pass.
                 std::string next;
-                if (s->text_iter == BMethod::runes) {
+                if (s->text_iter == BMethod::to_bytes) {
+                    // `for b in s.to_bytes()`: the bytes where they are, with no list made (CLX-307).
+                    line("for (cx_usize " + i + " = 0; " + i + " < " + arr + "->len;) {");
+                    next = "((const cx_u8*)" + arr + "->ptr)[" + i + "++]";
+                } else if (s->text_iter == BMethod::runes) {
                     line("for (cx_usize " + i + " = 0; " + i + " < " + arr + "->len;) {");
                     next = "cx_utf8_next(" + arr + "->ptr, &" + i + ")";
                 } else {

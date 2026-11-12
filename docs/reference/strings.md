@@ -246,6 +246,7 @@ fn main() {
 
 - The loop decodes the text as it goes, with nothing allocated, since text is always UTF-8.
 - `runes()` and `chars()` are only what a `for` loop goes over, and a string itself isn't, so the loop says which it means.
+- `for b in s.to_bytes()` goes over the bytes, each a `u8`, where they are: the loop makes no list and copies nothing, where `to_bytes()` anywhere else is a copy.
 - The string can't change while the loop goes over it, as with a list.
 
 ## Java's view of a string

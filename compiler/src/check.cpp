@@ -4832,6 +4832,17 @@ private:
                 s->value = it->callee->lhs;
                 over = s->value;
                 borrowed = place_root(s->value);
+            } else if (it->kind == ExprKind::call && it->call == CallKind::builtin_method && it->bmethod == BMethod::to_bytes &&
+                       it->callee->lhs->type &&
+                       (it->callee->lhs->type->kind == TypeKind::string || it->callee->lhs->type->kind == TypeKind::str) &&
+                       !is_bad(t)) {
+                // `for b in s.to_bytes()`: the loop reads the text's bytes where they are, with no
+                // list made and nothing copied, so it goes over `s` (CLX-307).
+                s->text_iter = BMethod::to_bytes;
+                elem = T.u8;
+                s->value = it->callee->lhs;
+                over = s->value;
+                borrowed = place_root(s->value);
             } else if (it->kind == ExprKind::call && it->call == CallKind::builtin_method &&
                        (it->bmethod == BMethod::split || it->bmethod == BMethod::lines || it->bmethod == BMethod::split_whitespace) &&
                        !is_bad(t)) {
@@ -5162,6 +5173,7 @@ private:
             case BMethod::chars: return "UTF-16 units";
             case BMethod::split: return "parts";
             case BMethod::lines: return "lines";
+            case BMethod::to_bytes: return "bytes";
             default: return "words";
         }
     }

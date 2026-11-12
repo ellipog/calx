@@ -1,0 +1,41 @@
+// `for b in s.to_bytes()` reads the text's bytes where they are, with no list made (CLX-307): the
+// same bytes as the list, for a `String`, a `str`, a part, empty text and text that isn't ASCII,
+// and a loop that leaves early or never looks at the byte.
+fn digits(s: String) -> bool {
+    if s.is_empty() {
+        return false
+    }
+    for b in s.to_bytes() {
+        if b < b'0' or b > b'9' {
+            return false
+        }
+    }
+    return true
+}
+
+fn sum(s: String) -> u32 {
+    var total: u32 = 0
+    for b in s.to_bytes() {
+        total += u32(b)
+    }
+    return total
+}
+
+fn main() {
+    let text = String("héllo, 123")
+    var listed: u32 = 0
+    let bytes = text.to_bytes()
+    for b in bytes {
+        listed += u32(b)
+    }
+    println("{sum(text)} {listed} {bytes.len()}")    // out: 1021 1021 11
+    println("{digits(String("2026"))} {digits(String("20x6"))} {digits(String())}")    // out: true false false
+    var count = 0
+    for _ in "abc".to_bytes() {
+        count += 1
+    }
+    for b in text[8..].to_bytes() {
+        print("{b} ")
+    }
+    println("{count}")    // out: 49 50 51 3
+}
