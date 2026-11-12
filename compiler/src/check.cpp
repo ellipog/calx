@@ -1356,7 +1356,7 @@ private:
             }
             if (m->kind == ItemKind::const_) {
                 if (!m->type) {
-                    error(m->name_span, "give the constant a type: " + q("const " + std::string(text(m->name)) + ": i32"));
+                    error(m->name_span, untyped_const(m));
                     m->declared = T.error;
                     continue;
                 }
@@ -3760,6 +3760,46 @@ private:
         return true;
     }
 
+    // The type to suggest for a constant written without one, from how its value is written: a
+    // string's `str`, a number's suffix or its default, an array's length and its first
+    // element's type. Empty where the value doesn't say (CLX-306).
+    static std::string const_type_hint(const Expr* v) {
+        if (!v) return "";
+        switch (v->kind) {
+            case ExprKind::string_lit: return v->literal.name ? "" : "str";
+            case ExprKind::int_lit: return v->literal.suffix.empty() ? "i32" : std::string(v->literal.suffix);
+            case ExprKind::float_lit: return v->literal.suffix.empty() ? "f64" : std::string(v->literal.suffix);
+            case ExprKind::bool_lit: return "bool";
+            case ExprKind::char_lit: return "rune";
+            case ExprKind::unary: return v->op == Op::log_not ? "bool" : const_type_hint(v->lhs);
+            case ExprKind::binary: {
+                if (v->op >= Op::eq) return "bool";
+                std::string l = const_type_hint(v->lhs);
+                if (v->op == Op::shl || v->op == Op::shr || v->op == Op::ushr || v->op == Op::coalesce) return l;
+                // A suffix on either side says the type; failing that, a float on either side.
+                std::string r = const_type_hint(v->rhs);
+                if (l.empty() || l == "i32" || (l == "f64" && r != "i32")) return r.empty() ? l : r;
+                return l;
+            }
+            case ExprKind::array_lit: {
+                if (v->repeat || v->elems.empty()) return "";
+                std::string e = const_type_hint(v->elems[0]);
+                return e.empty() ? "" : "[" + e + "; " + std::to_string(v->elems.size()) + "]";
+            }
+            default: return "";
+        }
+    }
+
+    // What to say of a constant written without a type.
+    std::string untyped_const(const Item* c) {
+        std::string hint = const_type_hint(c->value);
+        std::string with = c->value ? " = ..." : "";
+        if (hint.empty()) {
+            return "give the constant a type, its value's: " + q("const " + std::string(text(c->name)) + ": Type" + with);
+        }
+        return "give the constant a type: " + q("const " + std::string(text(c->name)) + ": " + hint + with);
+    }
+
     void check_const(Item* c) {
         if (c->declared) return;
         InModule in(*this, c);
@@ -3769,7 +3809,7 @@ private:
             return;
         }
         if (!c->type && !c->result_type) {
-            error(c->name_span, "give the constant a type: `const " + std::string(text(c->name)) + ": i32 = ...`");
+            error(c->name_span, untyped_const(c));
             c->declared = T.error;
             return;
         }

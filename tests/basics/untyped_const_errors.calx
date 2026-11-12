@@ -1,0 +1,15 @@
+// A constant written without a type is told the type its value is written in, not always `i32`
+// (CLX-306).
+
+const API = "https://example.com"    // error: give the constant a type: `const API: str = ...`
+const LIMIT = 10    // error: give the constant a type: `const LIMIT: i32 = ...`
+const MASK = 0xFFu8    // error: give the constant a type: `const MASK: u8 = ...`
+const RATE = 1.5    // error: give the constant a type: `const RATE: f64 = ...`
+const BIG = 4 * 1024i64    // error: give the constant a type: `const BIG: i64 = ...`
+const ON = not false    // error: give the constant a type: `const ON: bool = ...`
+const NAMES = ["a", "b", "c"]    // error: give the constant a type: `const NAMES: [str; 3] = ...`
+const OTHER = LIMIT    // error: give the constant a type, its value's: `const OTHER: Type = ...`
+
+fn main() {
+    println("{API} {LIMIT} {MASK} {RATE} {BIG} {ON} {NAMES[0]} {OTHER}")
+}
