@@ -56,6 +56,10 @@
 //
 // A test that runs longer than two minutes (RUN_SECONDS) fails, and its program is stopped.
 //
+// Each program's temporary folder, TMP and TEMP on Windows and TMPDIR elsewhere, is one of its own
+// in its test's folder. A test that leaves anything there fails, as a folder `fs.temp_dir()`
+// gives is the program's to remove.
+//
 // It runs in three rounds, each command of a round at once up to `--jobs`: the libraries tests
 // build, then every test's program or check, then the comparisons.
 
@@ -250,6 +254,7 @@ fn find_tests(root: String, selected: List<String>, p: mut Patterns) -> List<Tes
 struct Folder {
     dir: String
     files: List<(String, String)>
+    temp: bool    // whether it holds a `tmp` folder for its program's temporary files
 }
 
 // A test file or a docs page, and its text.
@@ -349,7 +354,7 @@ fn main() {
         let count = if t.errors.is_empty() { modes.len() } else { 1 }
         for mi in 0..count {
             let dir = "{tmp}/{jobs.len()}"
-            var folder = Folder { dir: dir.copy(), files: [] }
+            var folder = Folder { dir: dir.copy(), files: [], temp: t.errors.is_empty() }
             var source = String()
             if not t.files.is_empty() {
                 for f in t.files {
@@ -415,8 +420,16 @@ fn main() {
                     input.push_str(line)
                     input.push('\n')
                 }
+                // The system's temporary folder, for the program, is one of its own in its test's
+                // folder, so what it leaves there is seen, and removed with the test's folder.
+                let run = calx_cmd(calx.copy(), root.copy(), words).env("CALX", calx.copy()).input_text(input).timeout(RUN_SECONDS * 1000)
                 job.main_cmd = cmds.len()
-                cmds.push(calx_cmd(calx.copy(), root.copy(), words).env("CALX", calx.copy()).input_text(input).timeout(RUN_SECONDS * 1000))
+                if windows {
+                    let temp = "{dir}/tmp".replace("/", "\\")
+                    cmds.push(run.env("TMP", temp.copy()).env("TEMP", temp))
+                } else {
+                    cmds.push(run.env("TMPDIR", "{dir}/tmp"))
+                }
             }
             jobs.push(job)
         }
@@ -447,7 +460,7 @@ fn main() {
     }
     // Written at once, as making files is slow on Windows, where each new one is scanned.
     parallel for f in folders {
-        fs.make_dir_all(f.dir.copy())!
+        fs.make_dir_all(if f.temp { "{f.dir}/tmp" } else { f.dir.copy() })!
         for w in f.files {
             if let parent = path.parent_dir(w.0.copy()) {
                 fs.make_dir_all(parent)!
@@ -487,6 +500,13 @@ fn main() {
                 check_errors(tests[job.test], job, outs[job.main_cmd], outs[job.json_cmd], mut p, mut problems)
             } else {
                 check_run(tests[job.test], job, outs[job.main_cmd], mut p, mut problems)
+                // A folder `fs.temp_dir()` gave is the program's to remove (CLX-317).
+                match fs.list("{job.dir}/tmp") {
+                    ok(left) => if not left.is_empty() {
+                        problems.push("left {left.join(", ")} in the temporary folder; remove what `fs.temp_dir()` gives, with `fs.remove_dir_all`, once it's done")
+                    },
+                    err(e) => problems.push("its temporary folder, {job.dir}/tmp, can't be listed: {e}"),
+                }
             }
         }
         k += 1

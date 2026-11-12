@@ -9,7 +9,8 @@ import std.process.{Command}
 fn main() {
     let calx = variable("CALX") ?? String("calx")
     let s = separator()
-    let dir = "{temp_dir()!}{s}link-long"
+    let temp = temp_dir()!
+    let dir = "{temp}{s}link-long"
     // The cache's path comes to 130 characters, so each object's is over 170, 41,000 for all of
     // them, and the files calx writes there stay under the 260 Windows' paths are limited to.
     var cache = "{dir}{s}cache"
@@ -41,5 +42,5 @@ fn main() {
     }
     // 0 + 1 + ... + 239
     println(Command.new("{dir}{s}main.exe").read()!.trim())    // out: 28680
-    remove_dir_all(dir)!
+    remove_dir_all(temp)!
 }

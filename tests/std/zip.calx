@@ -96,15 +96,14 @@ fn main() {
     println("{m.len()} {m.name(69999)}")    // out: 70000 m/69999
 
     // Extracting writes the files, with their modes where the system has them.
-    let dir = "{temp_dir()!}/calx-zip-test"
-    if let err(_) = remove_dir_all(dir) {
-    }
+    let temp = temp_dir()!
+    let dir = "{temp}/calx-zip-test"
     z.extract(dir)!
     let tool = read_text("{dir}/bin/tool")!!
     println("{tool == "#!/bin/sh\necho hi\n"}")    // out: true
     let mode = metadata("{dir}/bin/tool")!.mode
     println("{if separator() == "\\" { mode == 0o666 } else { mode == 0o755 }}")    // out: true
-    remove_dir_all(dir)!
+    remove_dir_all(temp)!
 
     // A path that would land outside the folder stops it before anything is written.
     for name in ["../escape.txt", "/etc/passwd", "a/../../b", "C:/x", "..\\x"] {

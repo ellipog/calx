@@ -81,11 +81,8 @@ fn exchange(server: mut Server, client: Net, raw: String, dir: String) -> String
 }
 
 fn main() {
-    let dir = "{temp_dir()!}/calx_http_server_test"
-    match remove_dir_all(dir.copy()) {
-        ok => {},
-        err(_) => {},
-    }
+    let temp = temp_dir()!
+    let dir = "{temp}/calx_http_server_test"
     make_dir_all("{dir}/sub")!
     write_text("{dir}/hello.txt", "hello")!
     write_text("{dir}/sub/index.html", "<p>sub</p>\n")!
@@ -156,5 +153,5 @@ fn main() {
     println("{content_type("a.HTML")} {content_type("b.png")} {content_type("c.tar.gz")} {content_type("noext")} {content_type(".hidden")}")
     // out: text/html; charset=utf-8 image/png application/gzip application/octet-stream application/octet-stream
     println("{reason(200)}|{reason(418)}|{reason(431)}")    // out: OK||Request Header Fields Too Large
-    remove_dir_all(dir.copy())!
+    remove_dir_all(temp)!
 }

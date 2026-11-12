@@ -89,14 +89,13 @@ fn main() {
     // out: 129 File 4 420 1793491200 link=
 
     // Extracting writes the files, and a link as a link, or as a copy where the system won't.
-    let dir = "{temp_dir()!}/calx-tar-test"
-    if let err(_) = remove_dir_all(dir) {
-    }
+    let temp = temp_dir()!
+    let dir = "{temp}/calx-tar-test"
     t.extract(dir)!
     let tool = read_text("{dir}/app/bin/tool")!!
     let current = read_text("{dir}/app/current")!!
     println("{tool} {current}")    // out: run me run me
-    remove_dir_all(dir)!
+    remove_dir_all(temp)!
 
     // A path or a link that would land outside the folder stops it before anything is written.
     for name in ["../escape.txt", "/etc/passwd", "a/../../b", "C:/x"] {

@@ -41,6 +41,8 @@ Tests are `.calx` files under [`../tests`](../tests), plus every `calx` code blo
 | `// error: message` | Compiling fails with an error on this line whose message contains `message`. The file must produce exactly these errors |
 | `// panic: message` | The program panics on this line, with exit status 101 and this message |
 
+Each program's temporary folder, TMP and TEMP on Windows and TMPDIR elsewhere, is one of its own in its test's folder, and a test that leaves anything there fails: a folder `fs.temp_dir()` gives is the program's to remove, with `fs.remove_dir_all`. The full list of comments, and the rest of what the runner checks, is at the top of [`tests/run.calx`](../tests/run.calx).
+
 ## Debugging the output
 
 `calx emit-c file.calx` prints the C. It has `#line` directives, so a debugger steps through the Calx source. `--no-line` leaves them out, for reading the C itself.

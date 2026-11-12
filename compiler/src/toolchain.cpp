@@ -770,9 +770,16 @@ public:
             locks_.push_back(m);
         }
 #else
+        // In /tmp where there's one, whatever TMPDIR says, as the limit is the machine's and a test
+        // runner can give each test a TMPDIR of its own. The folder must be this user's, so another
+        // can't hold its locks.
         std::error_code ec;
-        fs::path dir = fs::temp_directory_path(ec) / ("calx-compile-slots-" + std::to_string(getuid()));
+        fs::path base = fs::is_directory("/tmp", ec) ? fs::path("/tmp") : fs::temp_directory_path(ec);
+        fs::path dir = base / ("calx-compile-slots-" + std::to_string(getuid()));
         if (!ec) fs::create_directories(dir, ec);
+        struct stat st;
+        if (!ec && (lstat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid()))
+            ec = std::make_error_code(std::errc::permission_denied);
         for (unsigned k = 0; k < n && !ec; k++) {
             int fd = open((dir / std::to_string(k)).c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
             if (fd < 0) {

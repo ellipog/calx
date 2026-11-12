@@ -152,7 +152,7 @@ fn main() {
 A file decompressed into another, a mebibyte at a time, holding neither:
 
 ```calx
-import std.fs.{append, open_read, read, remove_file, temp_dir, write}
+import std.fs.{append, open_read, read, remove_dir_all, temp_dir, write}
 import std.xz.{Decompressor, compress}
 
 fn main() {
@@ -175,8 +175,7 @@ fn main() {
     append("{dir}/calx_xz_doc.txt", d.finish()!)!
     file.close()!
     println("{read("{dir}/calx_xz_doc.txt")! == text}")    // out: true
-    remove_file("{dir}/calx_xz_doc.txt")!
-    remove_file("{dir}/calx_xz_doc.txt.xz")!
+    remove_dir_all(dir)!
 }
 ```
 

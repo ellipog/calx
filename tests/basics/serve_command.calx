@@ -26,7 +26,8 @@ fn refused(args: List<String>) -> String {
 }
 
 fn main() {
-    let dir = "{temp_dir()!}/served"
+    let temp = temp_dir()!
+    let dir = "{temp}/served"
     make_dir_all("{dir}/sub")!
     write_text("{dir}/hi.txt", "hi there\n")!
     let child = Command.new(calx()).args(["serve", dir.copy(), "--port", "0"]).stdout(Stdio.Pipe).stderr(Stdio.Pipe).spawn()!
@@ -54,7 +55,7 @@ fn main() {
     // out: true "GET /hi.txt HTTP/1.1" 200 -
     // out: true "GET / HTTP/1.1" 200 -
     // out: true "GET /nothing HTTP/1.1" 404 -
-    remove_dir_all(dir)!
+    remove_dir_all(temp)!
 
     println(refused(["--port"]))    // out: calx serve: --port needs a value after it [exited with status 2]
     println(refused(["--port", "70000"]))    // out: calx serve: the port is a number from 0 to 65535, not `70000` [exited with status 2]

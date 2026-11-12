@@ -3,7 +3,7 @@
 // sets logging up as basicConfig() does; then levels, loggers and their children, Python's `%`
 // formats with widths and flags, a log file appended to and started again, and the formats and
 // files config refuses.
-import std.fs.{read_text, remove_file, temp_dir}
+import std.fs.{read_text, remove_dir_all, remove_file, temp_dir}
 import std.log.{Level, config, critical, debug, enabled, error, info, log, logger, set_level, warning}
 
 fn main() {
@@ -34,7 +34,8 @@ fn main() {
     critical("names")    // stderr: MainProcess names
 
     // A log file, appended to, or started again with `append: false`.
-    let path = "{temp_dir()!}/test.log"
+    let dir = temp_dir()!
+    let path = "{dir}/test.log"
     config(level: Level.Info, file: path, append: false)!
     info("one")
     logger("app").warning("two")
@@ -75,17 +76,17 @@ fn main() {
 
     // Where each record was logged from: the functions are `@track_caller`, so they're given it.
     config(format: "%(filename)s %(module)s %(funcName)s:%(lineno)d %(message)s")!
-    warning("here")    // stderr: log.calx log main:78 here
+    warning("here")    // stderr: log.calx log main:79 here
     logged_from_here()
-    // stderr: log.calx log logged_from_here:92 there
-    // stderr: log.calx log <closure>:93 in a closure 4
+    // stderr: log.calx log logged_from_here:93 there
+    // stderr: log.calx log <closure>:94 in a closure 4
     // The path as the program was built from it, which here is the test runner's.
     config(format: "%(pathname)s", file: path, append: false)!
     warning("")
     config()!
     let named = read_text(path)! ?? String()
     println("{named.trim_end().ends_with("log.calx")}")    // out: true
-    remove_file(path)!
+    remove_dir_all(dir)!
 }
 
 fn logged_from_here() {

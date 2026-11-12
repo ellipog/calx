@@ -72,7 +72,8 @@ fn status_and_length(bytes: List<u8>, from: usize, to: usize) -> (String, usize)
 }
 
 fn main() {
-    let dir = "{temp_dir()!}/calx_http_serve_test"
+    let temp = temp_dir()!
+    let dir = "{temp}/calx_http_serve_test"
     make_dir_all(dir)!
     var big = List<u8>()
     big.reserve(9437184)
@@ -127,5 +128,5 @@ fn main() {
         }
     }
     println("{answered}")    // out: 6
-    remove_dir_all(dir)!
+    remove_dir_all(temp)!
 }
