@@ -1,0 +1,25 @@
+// std.http's Form: a multipart/form-data body, as browsers and Python's requests write one
+// (CLX-303). Each line break in the body is shown as | here.
+
+import std.http.{Form}
+
+fn main() {
+    let form = Form.with_boundary("XyZ").field("metadata", "[1,2]").field("say \"hi\"\r\n", "é").file("file", "mod.jar", [80u8, 75]).file("notes", "a\"b.txt", "hi".to_bytes(), content_type: "text/plain")
+    println(form.content_type())    // out: multipart/form-data; boundary=XyZ
+    println((String.from_utf8(form.body()) ?? "bad").replace("\r\n", "|"))    // out: --XyZ|Content-Disposition: form-data; name="metadata"||[1,2]|--XyZ|Content-Disposition: form-data; name="say %22hi%22%0D%0A"||é|--XyZ|Content-Disposition: form-data; name="file"; filename="mod.jar"|Content-Type: application/octet-stream||PK|--XyZ|Content-Disposition: form-data; name="notes"; filename="a%22b.txt"|Content-Type: text/plain||hi|--XyZ--|
+
+    // An empty form is its closing boundary alone.
+    println((String.from_utf8(Form.with_boundary("a b").body()) ?? "bad").replace("\r\n", "|"))    // out: --a b--|
+
+    // A new form's boundary is 32 random hex digits, another each time.
+    let a = Form.new().boundary()
+    let b = Form.new().boundary()
+    var hex = true
+    for i in 0..a.len() {
+        let c = a.byte_at(i)
+        hex = hex and ((c >= 48 and c <= 57) or (c >= 97 and c <= 102))
+    }
+    println("{a.len()} {hex} {a != b}")    // out: 32 true true
+
+    _ = Form.with_boundary("semi;colon")    // panic: a multipart boundary is 1 to 70 letters, digits and '()+_,-./:=? or spaces, not ending in a space, not semi;colon
+}

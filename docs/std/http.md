@@ -92,6 +92,38 @@ fn main() {
 
 `get` and `post` panic if the timeout is 0, or if a header is one that `std.http` writes itself (`Host`, `Content-Length`, `Transfer-Encoding` or `Connection`). They also panic if a header's name has a byte HTTP doesn't allow in names, or its value has a line break or a zero byte. Those would let a value a player chose start a header of its own.
 
+## Forms and file uploads
+
+`Form` is a `multipart/form-data` body, as an HTML form with a file input sends one, and as Python's requests sends `data=` with `files=` (RFC 7578). `post_form` sends it with its `Content-Type`, as an upload API that wants a JSON field and a file expects:
+
+```calx
+import std.http.{Form}
+
+fn main() {
+    let jar: List<u8> = [80, 75, 3, 4]
+    let form = Form.with_boundary("XyZ").field("metadata", "[1]").file("file", "mod.jar", jar)
+    println(form.content_type())    // out: multipart/form-data; boundary=XyZ
+    println("{form.body().len()} bytes")    // out: 192 bytes
+    // var r = post_form(url, [Header { name: "X-Api-Token", value: token }], form, 60000, 1 << 20)
+}
+```
+
+| Item | Gives |
+| --- | --- |
+| `Form.new() -> Form` | An empty form whose boundary is 32 hex digits from the system's random generator, as urllib3 makes it |
+| `Form.with_boundary(boundary: String) -> Form` | An empty form with this boundary, for a body that comes out the same each time. Panics unless it's 1 to 70 of RFC 2046's characters, letters, digits and `'()+_,-./:=?` and spaces, not ending in a space |
+| `form.field(name: String, value: String) -> Form` | The form with a text field added, with no `Content-Type` of its own |
+| `form.file(name: String, filename: String, bytes: List<u8>, content_type: String = "application/octet-stream") -> Form` | The form with a file added, its bytes as they are |
+| `form.content_type() -> String` | `multipart/form-data; boundary=` and the boundary |
+| `form.body() -> List<u8>` | Every part, then the closing boundary |
+| `form.boundary() -> String` | The boundary |
+| `post_form(url: String, headers: List<Header>, form: Form, timeout_ms: u32, limit: usize) -> Request` | Starts a POST of the form's body with its `Content-Type`, as `post` does. Panics if `headers` has a `Content-Type` of its own |
+
+- A part is written as it's added, so a file's bytes are copied once into the body, and once more by `post_form`'s request.
+- A name or filename is quoted with `"`, carriage return and line feed written `%22`, `%0D` and `%0A`, as browsers and urllib3 write them, so neither can end its line early. Other text, UTF-8 too, goes as it is.
+
+## Errors
+
 Why a request got no response, as `Error`:
 
 | Error | When | `{e}` |

@@ -2,7 +2,7 @@
 // while each request runs on its own thread, the way a Calcite server's loop goes on while a
 // login waits for Mojang.
 
-import std.http.{Header, Progress, Request, fetch, get, post}
+import std.http.{Form, Header, Progress, Request, fetch, get, post, post_form}
 import std.net.{Event, Net}
 
 // The value of a header in a request the server got, or "none".
@@ -150,6 +150,12 @@ fn main() {
     serve(net, mut bufs, bare)
     let empty = bare.wait()!
     println(String.from_utf8(empty.body.copy()) ?? "bad")    // out: post 0 bytes  type=none
+
+    // A form, with its Content-Type, and its line breaks shown as |.
+    var sent = post_form("{base}/post", [], Form.with_boundary("b").field("x", "1"), 5000, 1000)
+    serve(net, mut bufs, sent)
+    let formed = sent.wait()!
+    println((String.from_utf8(formed.body.copy()) ?? "bad").replace("\r\n", "|"))    // out: post 59 bytes --b|Content-Disposition: form-data; name="x"||1|--b--| type=multipart/form-data; boundary=b
 
     // A redirect is followed.
     var moved = get("{base}/gone", [], 5000, 1000)

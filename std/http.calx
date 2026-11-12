@@ -19,6 +19,7 @@ extern "C" {
     fn cx_http_free(h: u64)
     fn cx_http_received(h: u64) -> u64
     fn cx_http_expected(h: u64) -> u64
+    fn cx_crypto_random(p: *u8, n: usize)
 }
 
 /// A header line of a request or a response.
@@ -259,6 +260,134 @@ pub fn get(url: String, headers: List<Header>, timeout_ms: u32, limit: usize) ->
 @track_caller
 pub fn post(url: String, headers: List<Header>, body: List<u8>, timeout_ms: u32, limit: usize) -> Request {
     return start(true, url, headers, body, timeout_ms, limit)
+}
+
+/// A `multipart/form-data` body (RFC 7578): text fields and files, as an HTML form with a file
+/// input sends them, and as Python's requests sends `data=` with `files=` (CLX-303). Each part is
+/// written as it's added, so a file's bytes are copied once:
+///
+/// ```
+/// let form = Form.new().field("metadata", meta).file("file", "mod.jar", jar)
+/// var r = post_form(url, [Header { name: "X-Api-Token", value: token }], form, 60000, 1 << 20)
+/// ```
+pub struct Form {
+    mark: String,
+    parts: List<u8>,
+}
+
+// A field's or a file's name in a Content-Disposition line, quoted, with `"`, CR and LF written
+// %22, %0D and %0A, as browsers write them (the HTML standard's multipart encoding) and as urllib3
+// does. Other bytes, UTF-8 too, go as they are.
+fn quoted(name: String) -> String {
+    return "\"{name.replace("\"", "%22").replace("\r", "%0D").replace("\n", "%0A")}\""
+}
+
+impl Form {
+    /// An empty form whose boundary is 32 hex digits from the system's random generator, as urllib3
+    /// makes it, so it's as good as certain not to be in anything the form holds.
+    pub fn new() -> Form {
+        var raw: List<u8> = [0; 16]
+        unsafe {
+            cx_crypto_random(raw.as_mut_ptr(), 16)
+        }
+        let digits = "0123456789abcdef"
+        var b = String()
+        for x in raw {
+            let hi = usize(u32(x) >> 4)
+            let lo = usize(u32(x) & 15)
+            b.push_str(digits[hi..hi + 1])
+            b.push_str(digits[lo..lo + 1])
+        }
+        return Form { mark: b, parts: List<u8>() }
+    }
+
+    /// An empty form with this boundary, for a body that must come out the same each time, as in a
+    /// test. Panics unless it's 1 to 70 of the characters RFC 2046 allows in one, letters, digits
+    /// and `'()+_,-./:=?` and spaces, not ending in a space.
+    @track_caller
+    pub fn with_boundary(boundary: String) -> Form {
+        let marks = "'()+_,-./:=? "
+        var good = boundary.len() >= 1 and boundary.len() <= 70 and not boundary.ends_with(" ")
+        for i in 0..boundary.len() {
+            let b = boundary.byte_at(i)
+            let alnum = (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122)
+            if not alnum and (b >= 128 or not marks.contains(boundary[i..i + 1])) {
+                good = false
+            }
+        }
+        if not good {
+            panic("a multipart boundary is 1 to 70 letters, digits and '()+_,-./:=? or spaces, not ending in a space, not {boundary}")
+        }
+        return Form { mark: boundary.copy(), parts: List<u8>() }
+    }
+
+    // A part's opening: the boundary line, its headers and the blank line after them.
+    fn open(mut self, disposition: String, content_type: String) {
+        let head = if content_type.is_empty() {
+            "--{self.mark}\r\nContent-Disposition: form-data; {disposition}\r\n\r\n"
+        } else {
+            "--{self.mark}\r\nContent-Disposition: form-data; {disposition}\r\nContent-Type: {content_type}\r\n\r\n"
+        }
+        self.parts.extend(head.to_bytes())
+    }
+
+    /// Adds a text field, as an HTML form's `<input name=...>` sends it: no Content-Type of its
+    /// own, so the server reads it as text.
+    pub fn field(own self, name: String, value: String) -> Form {
+        var f = self
+        f.open("name={quoted(name)}", String())
+        f.parts.extend(value.to_bytes())
+        f.parts.extend("\r\n".to_bytes())
+        return f
+    }
+
+    /// Adds a file, its bytes as they are, under `filename`, with `content_type`, which is
+    /// `application/octet-stream`, any bytes, unless it's given. Panics if the content type has a
+    /// line break.
+    @track_caller
+    pub fn file(own self, name: String, filename: String, bytes: List<u8>, content_type: String = "application/octet-stream") -> Form {
+        if content_type.contains("\r") or content_type.contains("\n") {
+            panic("a file's content type has a line break: {content_type}")
+        }
+        var f = self
+        f.open("name={quoted(name)}; filename={quoted(filename)}", content_type)
+        f.parts.extend(bytes)
+        f.parts.extend("\r\n".to_bytes())
+        return f
+    }
+
+    /// The boundary between its parts.
+    pub fn boundary(self) -> String {
+        return self.mark.copy()
+    }
+
+    /// The Content-Type header's value for the body: `multipart/form-data; boundary=` and the
+    /// boundary.
+    pub fn content_type(self) -> String {
+        return "multipart/form-data; boundary={self.mark}"
+    }
+
+    /// The whole body: every part, then the closing boundary.
+    pub fn body(self) -> List<u8> {
+        var out = self.parts.copy()
+        out.extend("--{self.mark}--\r\n".to_bytes())
+        return out
+    }
+}
+
+/// Starts a POST of the form to `url`, with its Content-Type, as `post` does. Panics if the
+/// header lines have a Content-Type of their own, or as `get` does.
+@track_caller
+pub fn post_form(url: String, headers: List<Header>, form: Form, timeout_ms: u32, limit: usize) -> Request {
+    var all = List<Header>()
+    for h in headers {
+        if h.name.to_lower_root() == "content-type" {
+            panic("post_form sets the Content-Type header itself, to the form's")
+        }
+        all.push(Header { name: h.name.copy(), value: h.value.copy() })
+    }
+    all.push(Header { name: "Content-Type", value: form.content_type() })
+    return start(true, url, all, form.body(), timeout_ms, limit)
 }
 
 /// GETs `url` and waits for what the server answers, as a script wants it, as Python's

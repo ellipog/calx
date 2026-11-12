@@ -83,7 +83,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 11. [std.hash](std/hash.md): MD5, SHA-1, SHA-256, SHA-384, SHA-512 and HMAC with any of them, as Java's `MessageDigest` and `Mac` and Python's `hashlib` give them, with SHA-1 and SHA-256 on the processor's SHA instructions
 12. [std.crypto](std/crypto.md): random bytes from the system, AES-CFB8 and RSA
 13. [std.zlib](std/zlib.md): zlib, gzip and raw deflate, as Java's `Deflater`, `Inflater` and GZIP streams write and read them
-14. [std.http](std/http.md): HTTP and HTTPS requests on the system's own client, each on a thread of its own, and `fetch`, which waits for one, for scripts
+14. [std.http](std/http.md): HTTP and HTTPS requests on the system's own client, each on a thread of its own, `fetch`, which waits for one, for scripts, and `multipart/form-data` forms for uploads
 15. [std.lz4](std/lz4.md): LZ4 block streams, as lz4-java's `LZ4BlockOutputStream` and `LZ4BlockInputStream` write and read them
 16. [std.thread](std/thread.md): threads for services, which only `unsafe` code starts, the typed queues they talk through, and sleeping
 17. [std.meta](std/meta.md): declarations as data, and the code an attribute gives back

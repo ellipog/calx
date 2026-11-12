@@ -212,6 +212,7 @@ fn main() ! Error {
 | `jsonschema.validate(i, s)`, `Draft7Validator(s).iter_errors(i)`, `best_match(errors)` | `validate(i, s)`, `Validator.new(s, Draft.Draft7)` then `v.iter_errors(i)`, and `best_match(errors)` from [`std.json.schema`](../std/json-schema.md), with the same errors, messages, paths and order |
 | `uuid.uuid4()` | `Uuid.random()` from [`std.uuid`](../std/uuid.md) |
 | `requests.get(url).text` | `fetch(url)` from [`std.http`](../std/http.md), then `String.from_utf8(resp.body)`, ready for `parse` |
+| `requests.post(url, data={...}, files={...})` | `post_form(url, headers, Form.new().field(n, v).file(n, filename, bytes), timeout_ms, limit)` from [`std.http`](../std/http.md), a `multipart/form-data` body with its boundary and quoting done |
 | `http.server.HTTPServer`, `BaseHTTPRequestHandler`, `do_GET` | `Server.listen(port)`, then `next()` for each request and `respond(req, res)` from [`std.http.server`](../std/http-server.md) |
 | `hashlib.sha256(b).hexdigest()` | `hex(sha256(b))`, with [`std.hash`](../std/hash.md) and [`std.bytes`](../std/bytes.md) |
 | `base64.b64encode(b)` | `base64(b)` from [`std.bytes`](../std/bytes.md) |
