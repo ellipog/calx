@@ -79,7 +79,7 @@ fn main() {
 | `Error` | When |
 | --- | --- |
 | `Closed(code, reason)` | The server closed the connection: `1000` normally, `1001` when it's going away, or a code of its own from 3000 to 4999, with its reason. `Closed(1006, "")` is a connection that ended without a close, as when the server or the network went down |
-| `Protocol` | The server broke the protocol: its answer to the handshake isn't a WebSocket's, or a frame isn't one RFC 6455 allows, such as a masked frame or a control frame in pieces, or text isn't UTF-8. The connection closes, with 1002, or 1007 for text that isn't UTF-8 |
+| `Protocol` | The server broke the protocol: its answer to the handshake isn't a WebSocket's, or a frame isn't one RFC 6455 allows, such as a masked frame or a control frame in pieces, or text isn't UTF-8. The connection closes, with 1002, or 1007 for text that isn't UTF-8. On Windows WinHTTP checks frames itself, and it ends the connection after one that breaks the protocol without a close |
 | `TooLong` | A message is longer than `limit`. The connection closes with 1009 |
 | `Refused(status)` | The server answered the handshake with an HTTP status rather than switching, as `404` for a path that has no WebSocket, or `403` for an origin it turns away |
 | `BadUrl`, `Resolve`, `Connect`, `Tls`, `Timeout`, `Unavailable`, `Os` | It didn't open, as with [`std.http`](http.md#errors). `Timeout` is also a server that didn't answer `close` in time |

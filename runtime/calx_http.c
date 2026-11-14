@@ -778,7 +778,9 @@ void cx_http_free(cx_u64 h) {
  * goes into a queue for it, and a byte down a pipe wakes it.
  *
  * On Windows, WinHTTP's WebSocket API does the protocol. The thread receives, and the program's
- * sends go straight out under a lock, once the connection is open, or are kept until then. */
+ * sends go straight out under a lock, once the connection is open, or are kept until then.
+ * WinHTTP checks the frames that come itself, and one that breaks the protocol, such as a masked
+ * one or text that isn't UTF-8, ends the connection with no close sent, not with 1002 or 1007. */
 
 /* Beyond std.http's: the server answered the handshake with another status, and the connection
  * is closed, with the code and reason of the close. */
@@ -1588,6 +1590,12 @@ static void ws_run(wsock* w) {
         DWORD got = 0;
         int type = 0;
         DWORD r = wsapi.receive(ws, message.p + message.len, 65536, &got, &type);
+        if (r == ERROR_WINHTTP_INVALID_SERVER_RESPONSE) {
+            /* WinHTTP checks frames itself: a masked one, or text that isn't UTF-8, fails the
+             * receive and ends the connection, with no close it lets us send. */
+            ws_fail(w, E_PROTOCOL, 0);
+            break;
+        }
         if (r != 0) {
             /* The handle closed under it by `close`, or the connection lost. */
             ws_end(w, E_CLOSED, CLOSE_ABNORMAL, NULL, 0);
