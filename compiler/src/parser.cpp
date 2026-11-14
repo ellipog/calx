@@ -437,6 +437,17 @@ private:
         while (!at(Tok::gt)) {
             GenericParam g;
             g.span = peek().span;
+            if (accept(Tok::kw_const)) {
+                // `const N: usize`, an array's length (CLX-323).
+                g.is_const = true;
+                g.name = ident("as a length parameter's name");
+                expect(Tok::colon, "after a length parameter's name, as in `const N: usize`");
+                g.const_type = type();
+                g.span = Span::join(g.span, prev_span());
+                out.push_back(g);
+                if (!accept(Tok::comma)) break;
+                continue;
+            }
             g.name = ident("as a generic parameter");
             if (accept(Tok::colon)) {
                 std::vector<TypeExpr*> bounds;

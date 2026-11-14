@@ -55,6 +55,49 @@ fn main() {
 - A generic method is given its types the same way, after its name: `p.with<f64>(2.5)`, or `Pair.twice<i16>(4, 5)` for one without `self`. Only a generic method takes them; `p.get<i32>()` and `xs.len<i32>()` are errors.
 - `T` might own memory, so its values move rather than copy, and parameters that keep one are `own` ([below](#values-of-type-t)).
 
+## Lengths
+
+A function can take an [array](types.md#arrays) of any length with a length parameter, `const N: usize`, which stands for the length in `[T; N]`. Each length a program uses gets its own copy, as each type does, so `N` is a constant in each one (CLX-323).
+
+```calx
+const PIECES: [str; 4] = ["<a", "b>", "</", "&amp;"]
+const NAMES: [str; 2] = ["div", "p"]
+
+fn listed<const N: usize>(xs: [str; N]) -> List<String> {
+    var out = List<String>()
+    for x in xs {
+        out.push(String(x))
+    }
+    return out
+}
+
+fn pick<T: Copy, const N: usize>(xs: [T; N], i: usize) -> T {
+    return xs[i % N]
+}
+
+fn doubled<const N: usize>(xs: [i32; N]) -> [i32; N] {
+    var out = [0; N]
+    for i in 0..N {
+        out[i] = xs[i] * 2
+    }
+    return out
+}
+
+fn main() {
+    println("{listed(PIECES)} {listed(NAMES).len()}")    // out: [<a, b>, </, &amp;] 2
+    println("{pick(NAMES, 3)} {pick<i64>([7, 8, 9], 4)}") // out: p 8
+    let d = doubled([1, 2, 3])
+    println("{d} {d.map(|x| x + 1)}")                    // out: [2, 4, 6] [3, 5, 7]
+}
+```
+
+- `N` is a `usize` where it's a value, as in `0..N` and `i % N`, and `[x; N]` is an array of that length. `xs.len()` is `N` too.
+- The length comes from an array the call is given, or the one the result goes in, as `let z: [i32; 8] = zeros()`. `f<...>` gives only the types, so `pick<i64>` gives `T` and leaves `N` to the array.
+- Arrays given for the same `N` must have the same length: `same([1, 2], [1, 2, 3])` is an error.
+- `[T; N]` holds at least one element, as every array does.
+- Only a function has length parameters, a method of a type's own included. A struct, an enum, an impl or an interface's function can't have one yet.
+- An index that's a constant, such as `xs[3]`, is checked when the copy for a shorter array runs, rather than when it's compiled, since code such as `if N > 3 { ... }` only runs for some lengths.
+
 ## Generic structs and enums
 
 ```calx
@@ -326,6 +369,6 @@ An error in a generic definition is reported once, where it's written, and its u
 
 ## In C
 
-Each set of types makes one copy of the function or type, named after them. After the module's prefix, `choose<i64>` is `choose__i64` and `Pair<i32, str>` is `Pair_i32_str`. Only the copies a program uses are made, and those names are what profilers and debuggers show.
+Each set of types makes one copy of the function or type, named after them. After the module's prefix, `choose<i64>` is `choose__i64`, `Pair<i32, str>` is `Pair_i32_str`, and `doubled` for three elements is `doubled__n3`. Only the copies a program uses are made, and those names are what profilers and debuggers show.
 
 There's no boxing and no table of functions, so a generic call costs what a direct call costs, and clang can inline it. The front end checks each definition once and each copy's body once more, which keeps generic code quick to build (D64).

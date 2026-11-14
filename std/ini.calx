@@ -4,7 +4,7 @@
 /// value, all as a `configparser.ConfigParser()` has them with its defaults.
 module std.ini
 
-import std.text.ucd.{DIGIT, DIGIT_LEN}
+import std.text.ucd.{DIGIT, range_start}
 
 /// Why text can't be read as INI, or a value can't be given, set or written.
 pub struct IniError {
@@ -865,19 +865,10 @@ fn digit_value(c: u32) -> i64 {
     if c < 0x80 {
         return if c >= 48 and c <= 57 { i64(c) - 48 } else { -1 }
     }
-    var lo: usize = 0
-    var hi = DIGIT_LEN / 2
-    while lo < hi {
-        let mid = (lo + hi) / 2
-        if c > DIGIT[2 * mid + 1] {
-            lo = mid + 1
-        } else if c < DIGIT[2 * mid] {
-            hi = mid
-        } else {
-            return i64((c - DIGIT[2 * mid]) % 10)
-        }
+    return match range_start(DIGIT, c) {
+        some(start) => i64((c - start) % 10),
+        none => -1,
     }
-    return -1
 }
 
 // The length of the white space rune at byte `i` of `t`, before `end`, as Python's `str.isspace`

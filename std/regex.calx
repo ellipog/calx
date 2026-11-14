@@ -8,7 +8,7 @@ module std.regex
 
 import std.regex.sre
 import std.regex.sre.{Part}
-import std.text.ucd.{WORD, WORD_LEN, DIGIT, SPACE, FOLD_FROM, FOLD_FROM_LEN, FOLD_NEXT}
+import std.text.ucd.{WORD, DIGIT, SPACE, FOLD_FROM, FOLD_FROM_LEN, FOLD_NEXT, in_ranges}
 
 // In the runtime: where bytes are found fast, for the searches' skips. More than `len` for none.
 extern "C" {
@@ -164,19 +164,7 @@ fn is_word_rune(r: u32) -> bool {
     if r < 0x80 {
         return is_word_ascii(r)
     }
-    var lo: usize = 0
-    var hi = WORD_LEN / 2
-    while lo < hi {
-        let mid = (lo + hi) / 2
-        if r < WORD[mid * 2] {
-            hi = mid
-        } else if r > WORD[mid * 2 + 1] {
-            lo = mid + 1
-        } else {
-            return true
-        }
-    }
-    return false
+    return in_ranges(WORD, r)
 }
 
 // The next rune in `r`'s case-folding orbit, or `r` if it folds with nothing.

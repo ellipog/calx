@@ -6,7 +6,7 @@ module std.regex.sre
 
 import std.text.python.{repr_str}
 import std.unicode.names.{lookup_rune}
-import std.text.ucd.{ALNUM, ALNUM_LEN, DIGIT, DIGIT_LEN, PY_LOWER_FROM, PY_LOWER_FROM_LEN, PY_LOWER_TO, PY_SPACE, PY_SPACE_LEN, PY_UPPER_FROM, PY_UPPER_FROM_LEN, PY_UPPER_TO}
+import std.text.ucd.{ALNUM, DIGIT, PY_LOWER_FROM, PY_LOWER_FROM_LEN, PY_LOWER_TO, PY_SPACE, PY_UPPER_FROM, PY_UPPER_FROM_LEN, PY_UPPER_TO, in_ranges}
 
 // This follows CPython's re: Lib/re/_parser.py, Lib/re/_compiler.py and Lib/re/_casefix.py, and
 // Modules/_sre/sre_lib.h, under this notice:
@@ -174,51 +174,15 @@ enum SetItem {
 // --- Unicode, as Python has it ------------------------------------------------------------------
 
 fn in_alnum(r: u32) -> bool {
-    var lo: usize = 0
-    var hi = ALNUM_LEN / 2
-    while lo < hi {
-        let mid = (lo + hi) / 2
-        if r > ALNUM[2 * mid + 1] {
-            lo = mid + 1
-        } else if r < ALNUM[2 * mid] {
-            hi = mid
-        } else {
-            return true
-        }
-    }
-    return false
+    return in_ranges(ALNUM, r)
 }
 
 fn in_digit(r: u32) -> bool {
-    var lo: usize = 0
-    var hi = DIGIT_LEN / 2
-    while lo < hi {
-        let mid = (lo + hi) / 2
-        if r > DIGIT[2 * mid + 1] {
-            lo = mid + 1
-        } else if r < DIGIT[2 * mid] {
-            hi = mid
-        } else {
-            return true
-        }
-    }
-    return false
+    return in_ranges(DIGIT, r)
 }
 
 fn in_space(r: u32) -> bool {
-    var lo: usize = 0
-    var hi = PY_SPACE_LEN / 2
-    while lo < hi {
-        let mid = (lo + hi) / 2
-        if r > PY_SPACE[2 * mid + 1] {
-            lo = mid + 1
-        } else if r < PY_SPACE[2 * mid] {
-            hi = mid
-        } else {
-            return true
-        }
-    }
-    return false
+    return in_ranges(PY_SPACE, r)
 }
 
 // The rune Python's `re` lowers `r` to, as _PyUnicode_ToLowercase gives it.

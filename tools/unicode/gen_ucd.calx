@@ -81,6 +81,36 @@ fn notice() -> String {
     return "{text}\n"
 }
 
+// The search the tables of ranges are read with, one for every table's length (CLX-323).
+fn search() -> String {
+    let text = #"
+    /// Whether `r` is in one of the ranges in `table`, which holds each range's first rune and then
+    /// its last, in order, as `WORD` and the other tables of ranges do.
+    pub fn in_ranges<const N: usize>(table: [u32; N], r: u32) -> bool {
+        return range_start(table, r) != none
+    }
+
+    /// The first rune of the range in `table` that holds `r`, or `none` if none does. Each range in
+    /// `DIGIT` starts at a 0 and holds whole runs of ten, so a digit's value is `(r - start) % 10`.
+    pub fn range_start<const N: usize>(table: [u32; N], r: u32) -> u32? {
+        var lo: usize = 0
+        var hi = N / 2
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if r > table[2 * mid + 1] {
+                lo = mid + 1
+            } else if r < table[2 * mid] {
+                hi = mid
+            } else {
+                return some(table[2 * mid])
+            }
+        }
+        return none
+    }
+    "#
+    return "{text}\n"
+}
+
 fn stop(why: String) {
     eprintln("gen_ucd: {why}")
     process.exit(1)
@@ -448,10 +478,11 @@ fn main() {
         String("/// match, and simple case folding; for std.textwrap, Python's `str.isalnum`; and for `Regex.python`"),
         String("/// and std.json.schema, the case mappings, `str.isspace` and `str.isprintable` of Python's `re` and `repr`;"),
         String("/// for std.text.python's `lower`, Cased and Case_Ignorable; and for std.nbt, the runes Java's"),
-        String("/// `isAlphabetic` or `isDigit` is true for."),
+        String("/// `isAlphabetic` or `isDigit` is true for. `in_ranges` and `range_start` search the tables of ranges."),
         "/// Written by tools/unicode/gen_ucd.calx from Unicode {VERSION}; don't edit by hand.",
         String("module std.text.ucd"),
         String(),
+        search(),
         notice(),
         table(dir, "WORD", "`\\w`'s runes, as ranges: each first rune, then the last.", flat(word)),
         table(dir, "DIGIT", "`\\d`'s runes, the decimal digits, as ranges.", flat(digit)),
