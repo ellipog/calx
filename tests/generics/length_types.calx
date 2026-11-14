@@ -1,0 +1,208 @@
+// Length parameters on structs, enums, impls and interfaces' functions, and lengths given with
+// the types, `zeros<i32, 3>(0)` (CLX-324). `Grid<8>` is the struct for arrays of eight, one copy
+// per length, as for a function.
+const SIDE: usize = 3
+
+pub interface Describe {
+    fn describe(self) -> String
+}
+
+pub interface Total {
+    fn total(self) -> i64
+}
+
+pub interface Sink {
+    fn take<const N: usize>(mut self, xs: [i32; N])
+
+    fn count(self) -> i64
+}
+
+struct Grid<const W: usize> {
+    cells: [i32; W],
+}
+
+impl<const W: usize> Grid<W> {
+    fn width(self) -> usize {
+        return W + self.cells.len() - self.cells.len()
+    }
+
+    fn sum(self) -> i32 {
+        var t = 0
+        for c in self.cells {
+            t += c
+        }
+        return t
+    }
+}
+
+struct Ring<T, const N: usize> {
+    items: [T; N],
+    at: usize,
+}
+
+impl<T: Copy + Display, const N: usize> Ring<T, N> {
+    fn filled(x: T) -> Ring<T, N> {
+        return Ring { items: [x; N], at: 0 }
+    }
+
+    fn push(mut self, x: T) {
+        self.items[self.at % N] = x
+        self.at += 1
+    }
+}
+
+struct Board<const W: usize, const H: usize> {
+    cells: [[u8; W]; H],
+    name: String = "board",
+}
+
+impl<const W: usize, const H: usize> Board<W, H> {
+    fn new() -> Self {
+        return Board { cells: [[0; W]; H] }
+    }
+
+    fn set(mut self, x: usize, y: usize, v: u8) {
+        self.cells[y][x] = v
+    }
+
+    fn flipped(self) -> Board<H, W> {
+        var out = Board<H, W>.new()
+        for y in 0..H {
+            for x in 0..W {
+                out.cells[x][y] = self.cells[y][x]
+            }
+        }
+        return out
+    }
+}
+
+impl<const W: usize, const H: usize> Describe for Board<W, H> {
+    fn describe(self) -> String {
+        return "{self.name} {W}x{H} {self.cells}"
+    }
+}
+
+enum Shape<const N: usize> {
+    Poly([f64; N]),
+    Dot,
+}
+
+struct Pair<const N: usize> {
+    a: [i32; N],
+    b: [i32; N],
+}
+
+// An impl for arrays of any length.
+impl<const N: usize> Total for [i32; N] {
+    fn total(self) -> i64 {
+        var t = 0i64
+        for x in self {
+            t += i64(x)
+        }
+        return t
+    }
+}
+
+struct Adder {
+    total: i64,
+}
+
+impl Sink for Adder {
+    fn take<const N: usize>(mut self, xs: [i32; N]) {
+        for x in xs {
+            self.total += i64(x)
+        }
+        self.total += i64.wrap(N) * 1000
+    }
+
+    fn count(self) -> i64 {
+        return self.total
+    }
+}
+
+// An impl can call its length another name.
+struct Counter {
+    n: i64,
+}
+
+impl Sink for Counter {
+    fn take<const M: usize>(mut self, xs: [i32; M]) {
+        self.n += i64.wrap(M) + i64.wrap(xs.len() - M)
+    }
+
+    fn count(self) -> i64 {
+        return self.n
+    }
+}
+
+fn total_of<const W: usize>(g: Grid<W>) -> i32 {
+    return g.sum() + i32.wrap(W)
+}
+
+fn show<D: Describe>(d: D) -> String {
+    return d.describe()
+}
+
+fn sum_all<X: Total>(x: X) -> i64 {
+    return x.total()
+}
+
+fn feed<S: Sink>(s: mut S) -> i64 {
+    s.take([1, 2])
+    s.take([1, 2, 3])
+    return s.count()
+}
+
+fn repeated<T: Copy, const N: usize>(x: T) -> [T; N] {
+    return [x; N]
+}
+
+fn first<const N: usize>(xs: [i32; N]) -> i32 {
+    return xs[0]
+}
+
+fn main() {
+    let g = Grid { cells: [1, 2, 3] }
+    let h: Grid<2> = Grid { cells: [5, 6] }
+    println("{g.width()} {g.sum()} {h.width()} {total_of(h)}")  // out: 3 6 2 13
+
+    var r: Ring<i32, 3> = Ring.filled(0)
+    for x in 1..5 {
+        r.push(x)
+    }
+    let words = Ring<str, SIDE>.filled("x")
+    println("{r.items} {words.items}")                         // out: [4, 2, 3] [x, x, x]
+
+    var b = Board<3, 2>.new()
+    b.set(2, 1, 7)
+    println("{b.describe()}")                                  // out: board 3x2 [[0, 0, 0], [0, 0, 7]]
+    println("{show(b.flipped())}")                             // out: board 2x3 [[0, 0], [0, 0], [0, 7]]
+    let sq: Board<SIDE, SIDE> = Board.new()
+    let d: dyn Describe = Board<1, 1>.new()
+    println("{sq.cells.len()} {d.describe()}")                 // out: 3 board 1x1 [[0]]
+
+    let s: Shape<2> = Shape.Poly([1.0, 2.0])
+    match s {
+        Shape.Poly(p) => println("{p}"),                       // out: [1.0, 2.0]
+        Shape.Dot => println("dot"),
+    }
+
+    let p = Pair { a: [1, 2], b: [1, 2] }
+    let q: Pair<2> = Pair { a: [1, 2], b: [3, 4] }
+    var l = List<Pair<2>>()
+    l.push(p)
+    l.push(q)
+    println("{p == q} {p.a == p.b} {l.len()} {l[1].b}")        // out: false true 2 [3, 4]
+
+    let t: dyn Total = [1, 2]
+    println("{[1, 2, 3].total()} {sum_all([7, 8, 9, 10])} {t.total()}")  // out: 6 34 3
+
+    var a = Adder { total: 0 }
+    a.take([1, 2, 3])
+    var c = Counter { n: 0 }
+    println("{a.count()} {feed(mut a)} {feed(mut c)}")         // out: 3006 8015 5
+
+    let one: [str; 1] = repeated<str>("a")
+    println("{repeated<i32, 3>(0)} {repeated<f64, SIDE>(1.5)} {one}")  // out: [0, 0, 0] [1.5, 1.5, 1.5] [a]
+    println("{first<2>([4, 5])}")                              // out: 4
+}

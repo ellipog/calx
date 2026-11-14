@@ -1,12 +1,5 @@
-// What a length parameter, `const N: usize`, can't be or do (CLX-323).
-struct Grid<const W: usize> {    // error: only a function can have a length parameter, `const W: usize`
-    cells: [i32; W],
-}
-
-pub interface Shape {
-    fn area<const N: usize>(self, xs: [i32; N]) -> i32    // error: an interface's function can't have a length parameter yet
-}
-
+// What a length parameter, `const N: usize`, can't be or do (CLX-323). Those of structs, impls
+// and interfaces' functions, and lengths given in `<...>`, are in length_type_errors (CLX-324).
 fn wrong<const N: u32>(xs: [i32; N]) -> i32 {    // error: a length parameter is an array's length, so it's a `usize`, not a `u32`
     return xs[0]
 }
@@ -40,11 +33,10 @@ fn only_lengths<const N: usize>(xs: [i32; N]) -> i32 {
 }
 
 fn main() {
-    let g = Grid { cells: [1] }
-    _ = g
     let z = zeros()    // error: can't tell what `N` is in this call to `zeros`; it's the length of an array
     println("{same([1, 2], [1, 2, 3])}")    // error: expected `[i32; 2]`, found `[i32; 3]`
     println("{z} {wrong([1])} {as_type([1])} {literal([1])}")
     println("{unused(1)}")    // error: can't tell what `N` is in this call to `unused`
-    println("{only_lengths<i32>([1])}")    // error: `only_lengths` has only length parameters, which come from its arrays
+    println("{only_lengths<i32>([1])}")    // error: `N` is a length, a `usize`, so it takes a number or a constant, as in `<8>`, not the type `i32`
+    println("{only_lengths<2>([1])}")    // error: expected `[i32; 2]`, found `[i32; 1]`
 }
