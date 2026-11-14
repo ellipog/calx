@@ -1,0 +1,44 @@
+// What a length given in `<...>` can't be, and an interface's length parameters (CLX-324).
+struct Grid<const W: usize> {
+    cells: [i32; W],
+}
+
+struct Boxed<T> {
+    v: T,
+}
+
+pub interface Sized<const N: usize> {    // error: an interface can't have a length parameter, `const N: usize`; a function, a struct, an enum or an impl can
+    fn size(self) -> usize
+}
+
+pub interface Sink {
+    fn take<const N: usize>(self, xs: [i32; N]) -> usize
+}
+
+struct A {
+    n: usize,
+}
+
+impl Sink for A {
+    fn take<N: Display>(self, xs: [i32; 2]) -> usize {    // error: `take`'s `N` is a length, `const N: usize`, in `Sink`, so it is in its impl too
+        println("{self.n}")
+        return xs.len()
+    }
+}
+
+fn repeated<T: Copy, const N: usize>(x: T) -> [T; N] {
+    return [x; N]
+}
+
+fn main() {
+    let n = 3usize
+    let a: Grid<0> = Grid { cells: [1] }       // error: `W` is an array's length, and an array holds at least one element
+    let b: Grid<i32> = Grid { cells: [1] }     // error: `W` is a length, a `usize`, so it takes a number or a constant, as in `<8>`, not the type `i32`
+    let c: Boxed<4> = Boxed { v: 1 }           // error: `T` is a type, so it takes a type, not the length `4`
+    let d: Grid<n> = Grid { cells: [1] }       // error: `W` is a length, which must be a constant
+    let e: Grid<2, 3> = Grid { cells: [1, 2] } // error: `Grid` takes 1 length, but 2 were given
+    let f: Grid<2> = Grid { cells: [1, 2, 3] } // error: expected `[i32; 2]`, found `[i32; 3]`
+    let g: [i32; 3] = repeated<i32, 3, 4>(1)   // error: `repeated` takes 2 generic arguments, its types and lengths, or 1 type, whose lengths come from its arrays, but 3 were given
+    let h: [i32; 3] = repeated<3, i32>(1)      // error: `T` is a type, so it takes a type, not the length `3`
+    println("{a.cells} {b.cells} {c.v} {d.cells} {e.cells} {f.cells} {g} {h}")
+}

@@ -880,6 +880,10 @@ private:
         const SourceFile& f = ctx_.sources.file(e->span.file);
         return f.text.substr(e->span.begin, e->span.end - e->span.begin);
     }
+    std::string span_source(Span s) const {
+        const SourceFile& f = ctx_.sources.file(s.file);
+        return f.text.substr(s.begin, s.end - s.begin);
+    }
 
     void not_yet(Span s, const char* what) { error(s, std::string(what) + " aren't implemented yet"); }
 
@@ -1136,10 +1140,6 @@ private:
                     for (Item* m : it->members) {
                         if (m->kind != ItemKind::fn || m->generics.empty()) continue;
                         for (const GenericParam& g : m->generics) {
-                            if (g.is_const) {
-                                error(g.span, "an interface's function can't have a length parameter yet, `const " +
-                                                  std::string(text(g.name)) + ": usize`; a function of a type's own can");
-                            }
                             for (const GenericParam& outer : it->generics) {
                                 if (g.name == outer.name) {
                                     error(g.span, q(text(g.name)) + " is already a parameter of the interface; Calx doesn't allow shadowing");
@@ -1415,6 +1415,15 @@ private:
         for (std::size_t k = 0; k < own; k++) {
             Type* w = want->type_params[want->type_params.size() - own + k];
             Type* x = m->type_params[m->type_params.size() - own + k];
+            // A length parameter's is one too, and a type's a type (CLX-324).
+            if (w->length_param != x->length_param) {
+                error(param_spans_[x], q(text(m->name)) + "'s " + q(x->name) + " is " +
+                                           (w->length_param ? "a length, `const " + std::string(x->name) + ": usize`,"
+                                                            : "a type,") +
+                                           " in " + q(iface_text(iface)) + ", so it is in its impl too");
+                param_used_[x] = true;  // so it isn't "never used" on top of this
+                return;
+            }
             s[w] = x;
             theirs.push_back(w);
             mine.push_back(x);
@@ -1504,7 +1513,8 @@ private:
             return nullptr;
         }
         if (iface && !nominal && !is_numeric(t) && t->kind != TypeKind::bool_ && t->kind != TypeKind::char_ &&
-            t->kind != TypeKind::rune && t->kind != TypeKind::str && t->kind != TypeKind::list) {
+            t->kind != TypeKind::rune && t->kind != TypeKind::str && t->kind != TypeKind::list &&
+            t->kind != TypeKind::array) {
             not_yet(impl->self_type->span, "interfaces for this kind of type");
             return nullptr;
         }
@@ -1782,13 +1792,18 @@ private:
     Slice<Type*> make_params(Item* it) {
         std::vector<Type*> out;
         for (GenericParam& g : it->generics) {
-            // A length parameter stands for an array's length in a function's own instances
-            // (CLX-323). A type's, an impl's or an interface's would need instances of types
-            // over lengths too.
-            if (g.is_const && it->kind != ItemKind::fn) {
-                error(g.span, "only a function can have a length parameter, `const " + std::string(text(g.name)) + ": usize`");
+            // A length parameter stands for an array's length in a function's, a type's or an
+            // impl's instances (CLX-323, CLX-324). An interface's is left out: it would make
+            // `dyn I<8>`, an instance of an interface over a length, for no use yet.
+            bool refused = g.is_const && it->kind != ItemKind::fn && it->kind != ItemKind::struct_ &&
+                           it->kind != ItemKind::enum_ && it->kind != ItemKind::impl;
+            if (refused) {
+                error(g.span, std::string(it->kind == ItemKind::interface ? "an interface" : "this") +
+                                  " can't have a length parameter, `const " + std::string(text(g.name)) +
+                                  ": usize`; a function, a struct, an enum or an impl can");
             }
             Type* p = g.is_const ? T.make_length_param(text(g.name)) : T.make_param(text(g.name));
+            if (refused) param_used_[p] = true;  // so it isn't "never used" on top of this
             param_names_[p] = g.name;
             param_spans_[p] = g.span;
             param_owner_[p] = it;
@@ -1823,6 +1838,12 @@ private:
     }
 
     bool is_identity(const Type* t) const { return t->generic && t->item == t->generic; }
+
+    // Whether a type's name as a pattern writes it, `Shape` in `Shape.Poly(p)`, names `t`: the
+    // type, or a generic type's name, for any of its instances (CLX-325).
+    bool names_type(const Type* named, const Type* t) const {
+        return named == t || (t->generic && named->generic == t->generic && is_identity(named));
+    }
 
     // Every generic parameter's name and bounds, once every interface is declared.
     void resolve_params() {
@@ -2398,23 +2419,111 @@ private:
     }
 
     // `Pair<i32, str>` as written: the instance, after checking the arguments.
+    // A generic argument written for the parameter `p`: a type, or for a length parameter, a
+    // length (CLX-324), which is a number, a constant, or a length parameter of the code it's in:
+    // `Grid<8>`, `Grid<SIZE>`, `Grid<W>`.
+    Type* resolve_arg(TypeExpr* a, Type* p) {
+        if (!p->length_param) {
+            if (a->kind == TypeExprKind::length) {
+                error(a->span, q(p->name) + " is a type, so it takes a type, not the length " + q(span_source(a->span)));
+                return T.error;
+            }
+            return resolve_type(a);
+        }
+        Expr* e = a->length;
+        if (a->kind == TypeExprKind::named && a->args.empty()) {
+            if (a->path.parts.size() == 1) {
+                Type* n = env_type(a->path.parts[0]);
+                if (n && (n->length_param || n->kind == TypeKind::length)) return n;
+                Item* it = n ? nullptr : find_item(a->path.parts[0]);
+                if (n || T.primitive(text(a->path.parts[0])) || (it && (is_type_item(it) || it->kind == ItemKind::interface))) {
+                    error(a->span, q(p->name) + " is a length, a `usize`, so it takes a number or a constant, as in " +
+                                       q("<8>") + ", not the type " + q(span_source(a->span)));
+                    return T.error;
+                }
+            }
+            e = ctx_.arena.make<Expr>();
+            e->kind = ExprKind::name;
+            e->path = a->path;
+            e->span = a->span;
+        } else if (a->kind != TypeExprKind::length) {
+            error(a->span, q(p->name) + " is a length, a `usize`, so it takes a number or a constant, as in " + q("<8>") +
+                               ", not a type");
+            return T.error;
+        }
+        Type* t = check(e, T.usize);
+        if (is_bad(t)) return T.error;
+        if (!e->has_bits) {
+            error(a->span, q(p->name) + " is a length, which must be a constant");
+            return T.error;
+        }
+        if (e->const_bits == 0) {
+            error(a->span, q(p->name) + " is an array's length, and an array holds at least one element");
+            return T.error;
+        }
+        return T.length_of(e->const_bits);
+    }
+
+    // `f<...>`: binds the function's own parameters to the arguments written, in `s`. They're all
+    // of them in order, types and lengths, as in `zeros<i32, 8>()` (CLX-324), or only the types,
+    // whose lengths then come from the arrays (CLX-323).
+    enum class Written : std::uint8_t { ok, wrong_count, bad };
+    Written bind_written(const Item* f, std::string_view name, Slice<TypeExpr*> written, Subst& s) {
+        const Slice<Type*>& vars = f->type_params;
+        std::size_t own = f->generics.size();
+        std::vector<Type*> all(vars.end() - own, vars.end());
+        std::vector<Type*> typed;
+        for (Type* p : all) {
+            if (!p->length_param) typed.push_back(p);
+        }
+        const std::vector<Type*>* given = written.size() == all.size() ? &all : written.size() == typed.size() ? &typed : nullptr;
+        if (!own) {
+            error(written[0]->span, q(name) + " isn't generic");
+            return Written::wrong_count;
+        }
+        if (!given) {
+            auto count = [](std::size_t k, const char* one, const char* many) {
+                return std::to_string(k) + " " + (k == 1 ? one : many);
+            };
+            std::string takes = typed.size() == all.size() ? count(all.size(), "type", "types")
+                                : typed.empty()            ? count(all.size(), "length", "lengths")
+                                : count(all.size(), "generic argument", "generic arguments") + ", its types and lengths, or " +
+                                          count(typed.size(), "type", "types") + ", whose lengths come from its arrays";
+            error(written[0]->span, q(name) + " takes " + takes + ", but " + std::to_string(written.size()) +
+                                        (written.size() == 1 ? " was given" : " were given"));
+            return Written::wrong_count;
+        }
+        for (std::size_t k = 0; k < given->size(); k++) {
+            Type* a = resolve_arg(written[k], (*given)[k]);
+            if (is_bad(a)) return Written::bad;
+            s[(*given)[k]] = a;
+        }
+        return Written::ok;
+    }
+
     Type* generic_type(Item* g, Slice<TypeExpr*> written, Span span) {
         std::size_t n = g->type_params.size();
         if (written.size() != n) {
+            // Its types, its lengths (CLX-324), or both, its generic arguments.
+            std::size_t lengths = 0;
+            for (Type* p : g->type_params) lengths += p->length_param;
+            const char* one = !lengths ? "type" : lengths == n ? "length" : "generic argument";
+            std::string many = std::string(one) + "s";
             if (written.empty()) {
-                error(span, q(text(g->name)) + " is generic; give its " + (n == 1 ? "type" : "types") + ", as in " +
+                error(span, q(text(g->name)) + " is generic; give its " + (n == 1 ? one : many) + ", as in " +
                                 q(std::string(text(g->name)) + "<...>"));
             } else {
-                error(span, q(text(g->name)) + " takes " + std::to_string(n) + (n == 1 ? " type" : " types") + ", but " +
+                error(span, q(text(g->name)) + " takes " + std::to_string(n) + " " + (n == 1 ? one : many) + ", but " +
                                 std::to_string(written.size()) + (written.size() == 1 ? " was given" : " were given"));
             }
-            for (TypeExpr* a : written) resolve_type(a);
+            for (TypeExpr* a : written) if (a->kind != TypeExprKind::length) resolve_type(a);
             return T.error;
         }
         std::vector<Type*> args;
         bool bad = false;
-        for (TypeExpr* a : written) {
-            Type* x = resolve_type(a);
+        for (std::size_t i = 0; i < n; i++) {
+            TypeExpr* a = written[i];
+            Type* x = resolve_arg(a, g->type_params[i]);
             if (x->kind == TypeKind::unit || x->kind == TypeKind::never) {
                 error(a->span, name_of(x) + " can't be a generic argument");
                 x = T.error;
@@ -2551,6 +2660,10 @@ private:
         // Every list is one head, so `impl<T: X> X for List<T>` is found for a `List<Player>`.
         static const char list_head = 0;
         if (t->kind == TypeKind::list) return &list_head;
+        // And every array, so `impl<const N: usize> X for [i32; N]` is found for an `[i32; 3]`
+        // (CLX-324).
+        static const char array_head = 0;
+        if (t->kind == TypeKind::array) return &array_head;
         return t;
     }
 
@@ -3375,6 +3488,11 @@ private:
                 }
                 return T.array_of(elem, t->length->const_bits);
             }
+            case TypeExprKind::length:
+                // A length, `8`, written where a type goes (CLX-324).
+                error(t->span, q(span_source(t->span)) + " is a length, not a type; a length goes only to a length "
+                                                         "parameter, `const N: usize`");
+                return T.error;
             case TypeExprKind::self:
                 if (current_impl_type_) return current_impl_type_;
                 error(t->span, "`Self` only means something inside an impl block");
@@ -6314,25 +6432,8 @@ private:
             if (!e->type_args.empty()) error(e->type_args[0]->span, q(n) + " isn't generic");
             return t;
         }
-        std::size_t own = f->generics.size();
-        if (!e->type_args.empty()) {
-            // `f<...>` gives the types; the lengths come from the variable's type (CLX-323).
-            std::vector<Type*> typed;
-            for (std::size_t k = vars.size() - own; k < vars.size(); k++) {
-                if (!vars[k]->length_param) typed.push_back(vars[k]);
-            }
-            if (e->type_args.size() != typed.size()) {
-                error(e->type_args[0]->span, q(n) + " takes " + std::to_string(typed.size()) + (typed.size() == 1 ? " type" : " types") +
-                                                 ", but " + std::to_string(e->type_args.size()) +
-                                                 (e->type_args.size() == 1 ? " was given" : " were given"));
-                return T.error;
-            }
-            for (std::size_t k = 0; k < typed.size(); k++) {
-                Type* a = resolve_type(e->type_args[k]);
-                if (is_bad(a)) return T.error;
-                s[typed[k]] = a;
-            }
-        }
+        // `f<...>` gives the types, and the lengths too or else the variable's type does.
+        if (!e->type_args.empty() && bind_written(f, n, e->type_args, s) != Written::ok) return T.error;
         if (expected && expected->kind == TypeKind::fn_) {
             Subst trial = s;
             if (unify(t, expected, trial, vars)) s = std::move(trial);
@@ -7963,7 +8064,7 @@ private:
         if (path.parts.size() == 2) {
             Resolved r = resolve_name(path.parts[0]);
             if (r.kind == NameKind::none && module_item_error(span, path.parts[0])) return UINT32_MAX;
-            if (r.kind != NameKind::type || r.type != t) {
+            if (r.kind != NameKind::type || !names_type(r.type, t)) {
                 error(span, q(text(path.parts[0])) + " isn't " + name_of(t) + ", the type being matched");
                 return UINT32_MAX;
             }
@@ -8027,7 +8128,7 @@ private:
         } else if (t->kind == TypeKind::struct_) {
             Resolved r;
             if (p->path.parts.size() == 1) r = resolve_name(p->path.parts[0]);
-            if (r.kind != NameKind::type || r.type != t) {
+            if (r.kind != NameKind::type || !names_type(r.type, t)) {
                 error(p->span, q(path_text(p->path)) + " isn't " + name_of(t) + ", the type being matched");
                 bind_names(p);
                 return false;
@@ -9275,28 +9376,9 @@ private:
         // order they're written, and where the result goes.
         const Slice<Type*>& vars = f->type_params;
         bool generic = !vars.empty();
-        if (!type_args.empty()) {
-            // `f<...>` gives the types; the lengths come from the arrays (CLX-323).
-            std::size_t own = f->generics.size();
-            std::vector<Type*> typed;
-            for (std::size_t k = vars.size() - own; k < vars.size(); k++) {
-                if (!vars[k]->length_param) typed.push_back(vars[k]);
-            }
-            if (typed.empty()) {
-                error(type_args[0]->span, q(text(f->name)) + (own ? " has only length parameters, which come from its arrays"
-                                                                  : " isn't generic"));
-            } else if (type_args.size() != typed.size()) {
-                error(type_args[0]->span, q(text(f->name)) + " takes " + std::to_string(typed.size()) +
-                                              (typed.size() == 1 ? " type" : " types") + ", but " + std::to_string(type_args.size()) +
-                                              (type_args.size() == 1 ? " was given" : " were given"));
-            } else {
-                for (std::size_t k = 0; k < typed.size(); k++) {
-                    Type* a = resolve_type(type_args[k]);
-                    if (is_bad(a)) return T.error;
-                    s[typed[k]] = a;
-                }
-            }
-        }
+        // `f<...>` gives the types, and the lengths too or else the arrays do. After too many or
+        // too few, the call is still checked, for what else is wrong with it.
+        if (!type_args.empty() && bind_written(f, text(f->name), type_args, s) == Written::bad) return T.error;
         if (generic && receiver && !f->params.empty() && f->params[0].local) {
             unify(f->params[0].local->type, receiver->type, s, vars);
         }
@@ -11718,7 +11800,8 @@ private:
             }
             return false;
         };
-        if (t->kind == TypeKind::list) return list_method(n) ? "a method" : nullptr;
+        // An array has a list's methods, or those of them that keep its length (CLX-324).
+        if (t->kind == TypeKind::list || t->kind == TypeKind::array) return list_method(n) ? "a method" : nullptr;
         if (t->kind == TypeKind::str) {
             if (in({"as_ptr", "byte_at", "chars", "contains", "ends_with", "find", "find_last", "interned", "is_empty", "len",
                     "lines", "pad_end", "pad_start", "repeat", "replace", "runes", "split", "split_once", "split_whitespace",

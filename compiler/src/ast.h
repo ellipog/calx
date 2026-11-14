@@ -36,6 +36,7 @@ enum class TypeExprKind : std::uint8_t {
     pointer,   // `*T` and `*const T`, for `unsafe` code
     dyn,       // `dyn Shape`
     self,      // `Self`
+    length,    // `8` in `Grid<8>` or `zeros<i32, 8>()`, a length parameter's argument (CLX-324)
 };
 
 struct TypeExpr {
@@ -46,7 +47,7 @@ struct TypeExpr {
     Slice<ParamMode> modes;       // fn: each parameter's mode
     TypeExpr* inner = nullptr;    // optional, array, pointer: the element; fn: the result; dyn: the interface
     TypeExpr* error = nullptr;    // fn: the error type after `!`
-    Expr* length = nullptr;       // array
+    Expr* length = nullptr;       // array, length
     bool is_const = false;        // pointer
     bool is_unsafe = false;       // fn: `unsafe fn`, which only `unsafe` code can call
     bool callable = false;        // fn: `Fn(A) -> R`, a bound any closure or function it fits has (CLX-98)

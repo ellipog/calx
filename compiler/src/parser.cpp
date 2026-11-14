@@ -314,11 +314,21 @@ private:
         expect(Tok::lt, "");
         std::vector<TypeExpr*> args;
         while (!at(Tok::gt) && !at(Tok::shr) && !at(Tok::ushr)) {
-            args.push_back(type());
+            args.push_back(type_arg());
             if (!accept(Tok::comma)) break;
         }
         expect_close_angle();
         return args;
+    }
+
+    // One of `<...>`'s arguments: a type, or a length, `Grid<8>` (CLX-324). A length is a number,
+    // or a name the checker finds: a length parameter or a constant.
+    TypeExpr* type_arg() {
+        if (!at(Tok::int_lit)) return type();
+        TypeExpr* t = new_type(TypeExprKind::length, peek().span);
+        t->length = primary(false);
+        t->span = Span::join(t->span, prev_span());
+        return t;
     }
 
     // `>` that closes generic arguments: splits `>>`, `>>>`, `>=` and the like.
@@ -868,7 +878,7 @@ private:
                     next();
                     std::vector<TypeExpr*> args;
                     while (!at(Tok::gt) && !at(Tok::shr) && !at(Tok::ushr)) {
-                        args.push_back(type());
+                        args.push_back(type_arg());
                         if (!accept(Tok::comma)) break;
                     }
                     expect_close_angle();

@@ -92,11 +92,65 @@ fn main() {
 ```
 
 - `N` is a `usize` where it's a value, as in `0..N` and `i % N`, and `[x; N]` is an array of that length. `xs.len()` is `N` too.
-- The length comes from an array the call is given, or the one the result goes in, as `let z: [i32; 8] = zeros()`. `f<...>` gives only the types, so `pick<i64>` gives `T` and leaves `N` to the array.
+- The length comes from an array the call is given, or the one the result goes in, as `let z: [i32; 8] = zeros()`. `f<...>` gives either every parameter, types and lengths in order, as `zeros<i32, 8>()`, or only the types, so `pick<i64>` gives `T` and leaves `N` to the array (CLX-324).
+- A length in `<...>` is a number, a constant such as `SIZE`, or a length parameter of the code it's in.
 - Arrays given for the same `N` must have the same length: `same([1, 2], [1, 2, 3])` is an error.
 - `[T; N]` holds at least one element, as every array does.
-- Only a function has length parameters, a method of a type's own included. A struct, an enum, an impl or an interface's function can't have one yet.
 - An index that's a constant, such as `xs[3]`, is checked when the copy for a shorter array runs, rather than when it's compiled, since code such as `if N > 3 { ... }` only runs for some lengths.
+
+### Types over lengths
+
+A struct, an enum or an impl takes length parameters too, and an interface's function can (CLX-324). `Grid<8>` is the struct for eight, with a copy for each length, as for each type:
+
+```calx
+const SIDE: usize = 3
+
+interface Total {
+    fn total(self) -> i64
+}
+
+struct Board<const W: usize, const H: usize> {
+    cells: [[u8; W]; H]
+}
+
+impl<const W: usize, const H: usize> Board<W, H> {
+    fn new() -> Self {
+        return Board { cells: [[0; W]; H] }
+    }
+    fn flipped(self) -> Board<H, W> {
+        var out = Board<H, W>.new()
+        for y in 0..H {
+            for x in 0..W {
+                out.cells[x][y] = self.cells[y][x]
+            }
+        }
+        return out
+    }
+}
+
+impl<const N: usize> Total for [i32; N] {
+    fn total(self) -> i64 {
+        var t: i64 = 0
+        for x in self {
+            t += i64(x)
+        }
+        return t
+    }
+}
+
+fn main() {
+    var b = Board<3, 2>.new()
+    b.cells[1][2] = 7
+    println("{b.flipped().cells}")                // out: [[0, 0], [0, 0], [0, 7]]
+    let sq: Board<SIDE, SIDE> = Board.new()
+    println("{sq.cells.len()}")                   // out: 3
+    println("{[1, 2, 3].total()} {[4, 5].total()}") // out: 6 9
+}
+```
+
+- A literal works its lengths out from its arrays, as `Grid { cells: [1, 2, 3] }` is a `Grid<3>`.
+- `impl<const N: usize> Total for [i32; N]` gives every array of `i32`s a `Total`. An array implements an interface as a list does, in the interface's module, and the impl can't name a function as one of a list's methods.
+- An interface's function can have one, `fn take<const N: usize>(mut self, xs: [i32; N])`, and each impl's has a length parameter in its place. An interface itself can't.
 
 ## Generic structs and enums
 
@@ -369,6 +423,6 @@ An error in a generic definition is reported once, where it's written, and its u
 
 ## In C
 
-Each set of types makes one copy of the function or type, named after them. After the module's prefix, `choose<i64>` is `choose__i64`, `Pair<i32, str>` is `Pair_i32_str`, and `doubled` for three elements is `doubled__n3`. Only the copies a program uses are made, and those names are what profilers and debuggers show.
+Each set of types makes one copy of the function or type, named after them. After the module's prefix, `choose<i64>` is `choose__i64`, `Pair<i32, str>` is `Pair_i32_str`, `doubled` for three elements is `doubled__n3`, and `Grid<8>` is `Grid_n8`. Only the copies a program uses are made, and those names are what profilers and debuggers show.
 
 There's no boxing and no table of functions, so a generic call costs what a direct call costs, and clang can inline it. The front end checks each definition once and each copy's body once more, which keeps generic code quick to build (D64).

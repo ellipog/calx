@@ -512,7 +512,8 @@ private:
         }
         int kind = 0;
         switch (t->kind) {
-            case TypeExprKind::named: kind = 0; break;
+            // A length, `8` in `Grid<8>`, is named by its text (CLX-324).
+            case TypeExprKind::named: case TypeExprKind::length: kind = 0; break;
             case TypeExprKind::optional: kind = 1; break;
             case TypeExprKind::array: kind = 2; break;
             case TypeExprKind::tuple: kind = 3; break;
@@ -529,6 +530,8 @@ private:
             put(out, span_text(t->inner->span));
         } else if (t->kind == TypeExprKind::self) {
             put(out, "Self");
+        } else if (t->kind == TypeExprKind::length) {
+            put(out, span_text(t->span));
         } else {
             put(out, "");
         }

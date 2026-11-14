@@ -1,0 +1,30 @@
+// A pattern names a generic type's instance by the type's name: `Shape.Poly(p)` for a
+// `Shape<i32>`, and `Pair { a, b }` for a `Pair<str>` (CLX-325).
+enum Shape<T> {
+    Poly(T),
+    Dot,
+}
+
+struct Pair<T> {
+    a: T,
+    b: T,
+}
+
+fn name<T: Display>(s: Shape<T>) -> String {
+    return match s {
+        Shape.Poly(p) => "poly {p}",
+        Shape.Dot => "dot",
+    }
+}
+
+fn main() {
+    let s: Shape<i32> = Shape.Poly(1)
+    match s {
+        Shape.Poly(p) => println("{p}"),    // out: 1
+        Shape.Dot => println("dot"),
+    }
+    let d: Shape<str> = Shape.Dot
+    println("{name(d)} {name(Shape.Poly(2.5))}")    // out: dot poly 2.5
+    let Pair { a, b } = Pair { a: "x", b: "y" }
+    println("{a}{b}")    // out: xy
+}
