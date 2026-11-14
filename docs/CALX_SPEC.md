@@ -97,6 +97,8 @@ Built: see [Generics](reference/generics.md) and [Interfaces](reference/interfac
 - Generic functions and constants' defaults in interfaces ([declaring one](reference/interfaces.md#declaring-one)).
 - [`Index` and `SetIndex`](reference/interfaces.md#indexing), for `a[k]` on a type of one's own.
 
+[Length parameters](reference/generics.md#lengths), `fn f<const N: usize>(xs: [T; N])`, give a function arrays of any length, one copy per length, as Rust's const generics do for lengths (CLX-323). Still to build: length parameters on structs, enums, impls and interfaces' functions.
+
 ### Derived properties
 
 The compiler works these out for each type, without being asked:

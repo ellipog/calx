@@ -301,6 +301,9 @@ struct Expr {
                                  // which none of them mentions, with no string between
     bool str_view = false;       // a `str` passed for a `String` that's only looked at: it goes as
                                  // a `String` viewing the same bytes (CLX-141)
+    bool sized_index = false;    // index, slice: in a generic function, of an array whose length is a
+                                 // length parameter, so an instance checks a constant index when it
+                                 // runs, as code that runs only for some lengths can hold one (CLX-323)
     // A value that becomes a `dyn I` where it's used: the `dyn` type, and for each of the methods
     // in its table, the function its own type has (CLX-72). It keeps its own type, as `type`.
     Type* to_dyn = nullptr;
@@ -491,6 +494,10 @@ struct GenericParam {
     Name name;
     Slice<TypeExpr*> bounds;  // `T: Shape + Hash`
     Span span;
+    // `const N: usize`, a length parameter, which stands for an array's length (CLX-323), and
+    // the type written after it.
+    bool is_const = false;
+    TypeExpr* const_type = nullptr;
 };
 
 enum class ItemKind : std::uint8_t {

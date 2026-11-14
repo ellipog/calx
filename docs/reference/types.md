@@ -51,6 +51,7 @@ fn main() {
 - `a[i]` reads element `i`, where `i` is a `usize`. An index out of bounds panics. A constant index out of bounds is a compile error.
 - `for x in a` goes over the elements in order ([control flow](control-flow.md#for)).
 - An array holds at least one element. For none, use an empty list.
+- A function takes an array of any length with a length parameter: `fn sum<const N: usize>(xs: [i32; N])` ([generics](generics.md#lengths)).
 
 An array has the methods of a [list](lists.md) that keep its length:
 

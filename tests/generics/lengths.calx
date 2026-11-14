@@ -1,0 +1,129 @@
+// Length parameters, `const N: usize`: a function over arrays of any length, one copy per length
+// (CLX-323). `N` comes from the arrays given, or the one the result goes in, and is a `usize`
+// constant in each copy.
+const PIECES: [str; 4] = ["a", "bb", "ccc", "dddd"]
+const NAMES: [str; 2] = ["x", "y"]
+
+struct Sum {
+    base: i32,
+}
+
+impl Sum {
+    fn add<const N: usize>(self, xs: [i32; N]) -> i32 {
+        var t = self.base
+        for x in xs {
+            t += x
+        }
+        return t
+    }
+
+    fn of<const N: usize>(_xs: [i32; N]) -> Sum {
+        return Sum { base: i32.wrap(N) }
+    }
+}
+
+fn listed<const N: usize>(xs: [str; N]) -> List<String> {
+    var out = List<String>()
+    for x in xs {
+        out.push(String(x))
+    }
+    return out
+}
+
+fn shown<T: Copy + Display, const N: usize>(xs: [T; N]) -> String {
+    var s = String()
+    for i in 0..N {
+        s.push_str("{xs[i]};")
+    }
+    return "{s} {N} {xs.len()}"
+}
+
+fn doubled<const N: usize>(xs: [i32; N]) -> [i32; N] {
+    var out = [0; N]
+    for i in 0..xs.len() {
+        out[i] = xs[i] * 2
+    }
+    return out
+}
+
+fn first<const N: usize>(xs: [i32; N]) -> i32 {
+    return xs[0]
+}
+
+// A generic function calls another with its own `N`.
+fn outer<const N: usize>(xs: [i32; N]) -> i32 {
+    return first(xs) + i32.wrap(N)
+}
+
+fn zeros<const N: usize>() -> [i32; N] {
+    return [0; N]
+}
+
+fn grid<const R: usize, const C: usize>(g: [[i32; C]; R]) -> String {
+    var s = String()
+    for row in g {
+        s.push_str("{row.len()}/")
+    }
+    return "{R}x{C} {s} {R * C - 1}"
+}
+
+fn same<const N: usize>(a: [i32; N], b: [i32; N]) -> bool {
+    return a == b
+}
+
+fn rows<const N: usize>(xs: List<[u8; N]>) -> usize {
+    return xs.len() * N
+}
+
+fn pick<T: Copy, const N: usize>(xs: [T; N], i: usize) -> T {
+    return xs[i % N]
+}
+
+// Code that runs only for longer arrays can hold an index past a shorter one's end.
+fn fourth<const N: usize>(xs: [i32; N]) -> i32 {
+    if N > 3 {
+        return xs[3]
+    }
+    return -1
+}
+
+// One search over tables of different lengths, as std.text.python's are.
+fn in_ranges<const N: usize>(table: [u32; N], r: u32) -> bool {
+    var lo = 0usize
+    var hi = N / 2
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if r < table[mid * 2] {
+            hi = mid
+        } else if r > table[mid * 2 + 1] {
+            lo = mid + 1
+        } else {
+            return true
+        }
+    }
+    return false
+}
+
+fn main() {
+    println("{listed(PIECES)} {listed(NAMES)}")                // out: [a, bb, ccc, dddd] [x, y]
+    println("{shown([1, 2, 3])} {shown([1.5, 2.5])}")          // out: 1;2;3; 3 3 1.5;2.5; 2 2
+    let d = doubled([1, 2, 3, 4])
+    println("{d} {d.len()} {first(d)} {d.map(|x| x + 1)}")     // out: [2, 4, 6, 8] 4 2 [3, 5, 7, 9]
+    let s = Sum { base: 10 }
+    println("{s.add([1, 2])} {s.add([1, 2, 3, 4])} {Sum.of(["a", "b"].map(|_x| 0)).base}")  // out: 13 20 2
+    println("{outer([5, 6, 7])}")                              // out: 8
+    let z: [i32; 3] = zeros()
+    println("{z}")                                             // out: [0, 0, 0]
+    println("{grid([[1, 2, 3], [4, 5, 6]])}")                  // out: 2x3 3/3/ 5
+    println("{same([1, 2], [1, 2])} {same([1, 2], [2, 1])}")   // out: true false
+    var l = List<[u8; 4]>()
+    l.push([1, 2, 3, 4])
+    l.push([5, 6, 7, 8])
+    println("{rows(l)}")                                       // out: 8
+    println("{pick<str>(["a", "b", "c"], 4)} {pick([1.5, 2.5], 3)}")  // out: b 2.5
+    let f: fn([i32; 2]) -> i32 = first
+    println("{f([9, 8])} {fourth([1, 2])} {fourth([1, 2, 3, 4, 5])}")  // out: 9 -1 4
+    let small = [10u32, 20, 30, 40]
+    let big = [1u32, 1, 5, 9, 100, 200]
+    println("{in_ranges(small, 15)} {in_ranges(small, 25)} {in_ranges(big, 150)} {in_ranges(big, 99)}")  // out: true false true false
+}

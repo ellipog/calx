@@ -1,0 +1,50 @@
+// What a length parameter, `const N: usize`, can't be or do (CLX-323).
+struct Grid<const W: usize> {    // error: only a function can have a length parameter, `const W: usize`
+    cells: [i32; W],
+}
+
+pub interface Shape {
+    fn area<const N: usize>(self, xs: [i32; N]) -> i32    // error: an interface's function can't have a length parameter yet
+}
+
+fn wrong<const N: u32>(xs: [i32; N]) -> i32 {    // error: a length parameter is an array's length, so it's a `usize`, not a `u32`
+    return xs[0]
+}
+
+fn as_type<const N: usize>(xs: [i32; N]) -> i32 {
+    let x: N = 1    // error: `N` is a length, a `usize`, not a type; it's an array's length, as in `[T; N]`
+    return xs[0] + x
+}
+
+fn unused<const N: usize>(x: i32) -> i32 {    // error: generic parameter `N` is never used
+    return x
+}
+
+fn zeros<const N: usize>() -> [i32; N] {
+    return [0; N]
+}
+
+fn same<const N: usize>(a: [i32; N], b: [i32; N]) -> bool {
+    return a == b
+}
+
+fn literal<const N: usize>(xs: [i32; N]) -> [i32; N] {
+    if xs[0] == 0 {
+        return [1, 2]    // error: expected `[i32; N]`, found `[i32; 2]`
+    }
+    return xs
+}
+
+fn only_lengths<const N: usize>(xs: [i32; N]) -> i32 {
+    return xs[0]
+}
+
+fn main() {
+    let g = Grid { cells: [1] }
+    _ = g
+    let z = zeros()    // error: can't tell what `N` is in this call to `zeros`; it's the length of an array
+    println("{same([1, 2], [1, 2, 3])}")    // error: expected `[i32; 2]`, found `[i32; 3]`
+    println("{z} {wrong([1])} {as_type([1])} {literal([1])}")
+    println("{unused(1)}")    // error: can't tell what `N` is in this call to `unused`
+    println("{only_lengths<i32>([1])}")    // error: `only_lengths` has only length parameters, which come from its arrays
+}

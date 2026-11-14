@@ -1,0 +1,10 @@
+// A constant index past the end of an array whose length is a length parameter is checked when
+// the copy for that length runs, not when it's compiled (CLX-323).
+fn fourth<const N: usize>(xs: [i32; N]) -> i32 {
+    return xs[3]    // panic: index 3 is out of bounds for length 2
+}
+
+fn main() {
+    println("{fourth([1, 2, 3, 4, 5])}")    // out: 4
+    println("{fourth([1, 2])}")
+}

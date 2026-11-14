@@ -490,6 +490,7 @@ private:
             case TypeKind::unit:
             case TypeKind::never:
             case TypeKind::param:  // only in generic definitions, which aren't emitted
+            case TypeKind::length:  // only an instance's argument, never a value's type
             case TypeKind::error: return "void";
             case TypeKind::bool_: return "cx_bool";
             case TypeKind::int_: return t->is_usize ? "cx_usize" : "cx_" + std::string(t->name);
@@ -4884,7 +4885,8 @@ $dropall    m->len = 0;
         while (e->kind == ExprKind::field || e->kind == ExprKind::index || e->kind == ExprKind::unwrap) {
             if (e->kind == ExprKind::unwrap) return true;
             if (e->kind == ExprKind::index && !e->box_value &&
-                (!e->rhs->has_bits || e->lhs->type->kind == TypeKind::list || e->lhs->type->kind == TypeKind::deque ||
+                (!e->rhs->has_bits || e->rhs->const_bits >= e->lhs->type->length ||
+                 e->lhs->type->kind == TypeKind::list || e->lhs->type->kind == TypeKind::deque ||
                  e->lhs->type->kind == TypeKind::map || e->lhs->type->kind == TypeKind::slot_map)) {
                 return true;
             }
@@ -5458,9 +5460,11 @@ $dropall    m->len = 0;
             base = "(" + expr(e->lhs) + ")";
         }
         std::string index;
-        if (e->rhs->has_bits) {
+        if (e->rhs->has_bits && e->rhs->const_bits < at->length) {
             index = std::to_string(e->rhs->const_bits);  // checked when compiling
         } else {
+            // A constant past the end is only in a generic function's instance, in code that may
+            // not run for its length, so it's checked when it runs (CLX-323).
             index = "cx_index(" + expr(e->rhs) + ", " + std::to_string(at->length) + "u, " + location(e->rhs->span) + ")";
         }
         if (!decls.empty()) return "({ " + decls + base + ".v[" + index + "]; })";

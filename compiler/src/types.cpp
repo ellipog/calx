@@ -81,6 +81,39 @@ Type* Types::array_of(Type* elem, std::uint64_t length) {
     return t;
 }
 
+Type* Types::array_sized(Type* elem, Type* size) {
+    if (size->kind == TypeKind::length) return array_of(elem, size->length);
+    auto key = std::make_pair(elem, size);
+    auto it = sized_map_.find(key);
+    if (it != sized_map_.end()) return it->second;
+    std::string name = "[" + std::string(elem->name) + "; " + std::string(size->name) + "]";
+    Type* t = make(TypeKind::array, arena_.copy(name));
+    t->elem = elem;
+    t->size = size;
+    t->open = true;
+    t->has_pointer = elem->has_pointer;
+    t->scoped = elem->scoped;
+    sized_map_.emplace(key, t);
+    compounds_.push_back(t);
+    return t;
+}
+
+Type* Types::length_of(std::uint64_t n) {
+    auto it = length_map_.find(n);
+    if (it != length_map_.end()) return it->second;
+    Type* t = make(TypeKind::length, arena_.copy(std::to_string(n)));
+    t->length = n;
+    length_map_.emplace(n, t);
+    return t;
+}
+
+Type* Types::make_length_param(std::string_view name) {
+    Type* t = make(TypeKind::param, name);
+    t->open = true;
+    t->length_param = true;
+    return t;
+}
+
 Type* Types::make_enum(Item* item, std::string_view name) {
     Type* t = make(TypeKind::enum_, name);
     t->item = item;

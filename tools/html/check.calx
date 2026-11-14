@@ -43,46 +43,31 @@ const VALUES: [str; 22] = ["/x.svg", "icon", "a b", "", "&amp;", "&amp", "&ampx"
 
 const GAPS: [str; 8] = [" ", "  ", "\t", "\n", "\r\n", "\u{c}", " / ", "/"]
 
-fn piece(r: mut Random) -> str {
-    return PIECES[r.index(PIECES.len())]
-}
-
-fn name(r: mut Random) -> str {
-    return NAMES[r.index(NAMES.len())]
-}
-
-fn attr(r: mut Random) -> str {
-    return ATTRS[r.index(ATTRS.len())]
-}
-
-fn value(r: mut Random) -> str {
-    return VALUES[r.index(VALUES.len())]
-}
-
-fn gap(r: mut Random) -> str {
-    return GAPS[r.index(GAPS.len())]
+// One of `xs`, at random.
+fn one<const N: usize>(r: mut Random, xs: [str; N]) -> str {
+    return xs[r.index(N)]
 }
 
 // A start tag, mostly well formed, with a few attributes.
 fn start_tag(r: mut Random) -> String {
     var s = String("<")
-    s.push_str(name(mut r))
+    s.push_str(one(mut r, NAMES))
     let n = r.index(4)
     for _ in 0..n {
-        s.push_str(gap(mut r))
-        s.push_str(attr(mut r))
+        s.push_str(one(mut r, GAPS))
+        s.push_str(one(mut r, ATTRS))
         let how = r.index(8)
         if how == 0 {
             continue
         }
         if r.index(4) == 0 {
-            s.push_str(gap(mut r))
+            s.push_str(one(mut r, GAPS))
         }
         s.push('=')
         if r.index(4) == 0 {
-            s.push_str(gap(mut r))
+            s.push_str(one(mut r, GAPS))
         }
-        let v = value(mut r)
+        let v = one(mut r, VALUES)
         if how <= 3 {
             s.push('"')
             s.push_str(v)
@@ -96,7 +81,7 @@ fn start_tag(r: mut Random) -> String {
         }
     }
     if r.index(3) == 0 {
-        s.push_str(gap(mut r))
+        s.push_str(one(mut r, GAPS))
     }
     s.push_str(if r.index(4) == 0 { "/>" } else { ">" })
     return s
@@ -108,20 +93,20 @@ fn case(r: mut Random) -> String {
     for _ in 0..parts {
         let what = r.index(10)
         if what < 4 {
-            s.push_str(piece(mut r))
+            s.push_str(one(mut r, PIECES))
         } else if what < 7 {
             s.push_str(start_tag(mut r))
         } else if what == 7 {
             s.push_str("</")
-            s.push_str(name(mut r))
+            s.push_str(one(mut r, NAMES))
             if r.coin() {
-                s.push_str(gap(mut r))
+                s.push_str(one(mut r, GAPS))
             }
             s.push('>')
         } else if what == 8 {
-            s.push_str(value(mut r))
+            s.push_str(one(mut r, VALUES))
         } else {
-            s.push_str(attr(mut r))
+            s.push_str(one(mut r, ATTRS))
         }
     }
     // Cut off a few anywhere, so every kind of markup is left unfinished at the end.

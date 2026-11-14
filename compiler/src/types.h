@@ -60,6 +60,9 @@ enum class TypeKind : std::uint8_t {
     // `Handle<T>`: a slot's index and generation in a `SlotMap<T>`. It's two numbers, so it's
     // copied, compared, hashed and sent as one.
     handle,
+    // An array's length as a generic argument (CLX-323): what a length parameter, `const N:
+    // usize`, stands for in an instance, as `length`. It's never a value's type.
+    length,
 };
 
 // Which hash table a map or a set is: Calx's own, Java's `HashMap` (D105), fastutil's open hash
@@ -128,6 +131,11 @@ struct Type {
     // stands for the type an impl gives once `assoc_base` is a real type.
     Type* assoc_base = nullptr;
     Item* assoc = nullptr;
+    // param: a length parameter, `const N: usize`, which stands for an array's length, a
+    // `length` type in an instance, and is a `usize` where it's a value (CLX-323).
+    bool length_param = false;
+    // array: the length parameter its length is, `N` in `[T; N]`, which makes it open, or null.
+    Type* size = nullptr;
     std::uint32_t id = 0;    // a number unique to the type, for naming it in C
     std::string_view name;   // what messages call it
 };
@@ -155,6 +163,13 @@ public:
     Type* make_struct(Item* item, std::string_view name);
     Type* make_enum(Item* item, std::string_view name);
     Type* array_of(Type* elem, std::uint64_t length);
+    // `[T; N]`, whose length is the length parameter `size`, or what it stands for: a `length`
+    // type makes the array of that length (CLX-323).
+    Type* array_sized(Type* elem, Type* size);
+    // The `length` type for `n`, a length parameter's argument.
+    Type* length_of(std::uint64_t n);
+    // A length parameter, `const N: usize`.
+    Type* make_length_param(std::string_view name);
     Type* optional_of(Type* elem);
     Type* list_of(Type* elem);
     Type* deque_of(Type* elem);
@@ -190,6 +205,8 @@ private:
     std::uint32_t next_id_ = 1;
     std::vector<std::pair<std::string_view, Type*>> primitives_;
     std::map<std::pair<Type*, std::uint64_t>, Type*> array_map_;
+    std::map<std::pair<Type*, Type*>, Type*> sized_map_;
+    std::map<std::uint64_t, Type*> length_map_;
     std::map<Type*, Type*> optional_map_;
     std::map<Type*, Type*> list_map_;
     std::map<Type*, Type*> deque_map_;
