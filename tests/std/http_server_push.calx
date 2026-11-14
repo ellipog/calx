@@ -1,0 +1,459 @@
+// std.http.server's WebSockets and event streams (CLX-322): a client written here on std.net
+// sends what a browser would, and frames no browser should, and std.http.websocket's client
+// talks to it too. The handshake's key is RFC 6455's own example, whose answer the RFC gives.
+import std.http.{Header}
+import std.http.server.{EventStream, Response, Server, ServerEvent, ServerSocket}
+import std.http.websocket.{open}
+import std.net.{Conn, Event, Net}
+
+// The program's side: what it does with each event, and what it saw, in `log`.
+struct App {
+    server: Server
+    log: List<String>
+    sockets: List<ServerSocket>
+    streams: List<EventStream>
+}
+
+fn handle(app: mut App, e: own ServerEvent) {
+    match e {
+        Request(req) => {
+            if req.path == "/ws" {
+                match app.server.upgrade(req, ["chat", "json"], ["https://allowed.example"]) {
+                    ok(s) => {
+                        app.log.push("upgraded {app.server.protocol(s) ?? String("-")}")
+                        app.sockets.push(s)
+                    },
+                    err(why) => app.log.push("refused: {why}"),
+                }
+            } else if req.path == "/events" {
+                let s = app.server.stream(req, [Header { name: "X-Test", value: "1" }])
+                _ = app.server.send_event(s, "hello\nworld", event: "greet", id: "1")
+                app.streams.push(s)
+                app.log.push("stream")
+            } else {
+                app.server.respond(req, Response.text("plain"))
+            }
+        },
+        Message(s, m) => {
+            match m {
+                Text(t) => {
+                    app.log.push("text {t}")
+                    if t == "close" {
+                        app.server.close_socket(s, 4000, "done")
+                    } else if t.starts_with("echo ") {
+                        _ = app.server.send_text(s, t[5..])
+                    }
+                },
+                Binary(b) => {
+                    app.log.push("binary {b.len()}")
+                    _ = app.server.send_binary(s, b)
+                },
+            }
+        },
+        Closed(_, code, why) => app.log.push(if why.is_empty() { "closed {code}" } else { "closed {code} {why}" }),
+        Ended(_) => app.log.push("ended"),
+    }
+}
+
+// What the program saw since the last time, and the log emptied.
+fn said(app: mut App) -> String {
+    let s = app.log.join(", ")
+    app.log.clear()
+    return s
+}
+
+// A connection of the client's, and what came on it.
+struct Peer {
+    conn: Conn
+    got: List<u8>
+    closed: bool
+}
+
+fn connect(net: Net, port: u16, raw: String) -> Peer {
+    let c = net.connect("127.0.0.1", port)!
+    net.write(c, raw.to_bytes())
+    return Peer { conn: c, got: List<u8>(), closed: false }
+}
+
+fn handshake(port: u16, extra: String) -> String {
+    return "GET /ws HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{extra}\r\n"
+}
+
+// A frame from the client: its first byte, which holds FIN and the opcode, and its payload,
+// masked unless `mask` is false.
+fn frame(first: u8, payload: List<u8>, mask: bool = true) -> List<u8> {
+    var out = List<u8>()
+    out.push(first)
+    let n = payload.len()
+    let m: u8 = if mask { 0x80 } else { 0 }
+    if n < 126 {
+        out.push(m | u8.wrap(n))
+    } else if n < 65536 {
+        out.push(m | 126)
+        out.push(u8.wrap(n >> 8))
+        out.push(u8.wrap(n))
+    } else {
+        out.push(m | 127)
+        for k in 0u64..8 {
+            out.push(u8.wrap(u64(n) >> (56 - 8 * k)))
+        }
+    }
+    if not mask {
+        out.extend(payload)
+        return out
+    }
+    let key = [0x37u8, 0xFA, 0x21, 0x3D]
+    for k in key {
+        out.push(k)
+    }
+    for i in 0..n {
+        out.push(payload[i] ^ key[i & 3])
+    }
+    return out
+}
+
+fn text(first: u8, s: str) -> List<u8> {
+    return frame(first, String(s).to_bytes())
+}
+
+fn joined(a: own List<u8>, b: List<u8>) -> List<u8> {
+    var out = a
+    out.extend(b)
+    return out
+}
+
+// Where the answer's head ends in what came, or none if it hasn't all come.
+fn head_end(got: List<u8>) -> usize? {
+    var i: usize = 0
+    while i + 3 < got.len() {
+        if got[i] == 13 and got[i + 1] == 10 and got[i + 2] == 13 and got[i + 3] == 10 {
+            return some(i + 4)
+        }
+        i += 1
+    }
+    return none
+}
+
+// The answer's head, its lines joined with `|`, without the Date line.
+fn head(p: Peer) -> String {
+    let end = head_end(p.got) ?? 0
+    let all = String.from_utf8(p.got[0..end]) ?? String("<not UTF-8>")
+    var out = List<String>()
+    for line in all.split("\r\n") {
+        if not line.starts_with("Date: ") and not line.is_empty() {
+            out.push(line.copy())
+        }
+    }
+    return out.join("|")
+}
+
+// The frames the server sent after the head, in words.
+fn frames(p: Peer) -> List<String> {
+    var out = List<String>()
+    var at = head_end(p.got) ?? p.got.len()
+    while at + 2 <= p.got.len() {
+        let b0 = p.got[at]
+        let b1 = p.got[at + 1]
+        var n = usize(b1 & 0x7F)
+        var h: usize = 2
+        if n == 126 {
+            n = (usize(p.got[at + 2]) << 8) | usize(p.got[at + 3])
+            h = 4
+        } else if n == 127 {
+            n = 0
+            for k in 2usize..10 {
+                n = (n << 8) | usize(p.got[at + k])
+            }
+            h = 10
+        }
+        if at + h + n > p.got.len() {
+            break
+        }
+        let body = p.got[at + h..at + h + n]
+        var word = match b0 & 0x0F {
+            1 => "text {String.from_utf8(body) ?? String("?")}",
+            2 => "binary {n}",
+            8 => if n >= 2 { "close {(u32(body[0]) << 8) | u32(body[1])} {String.from_utf8(body[2..]) ?? String("?")}".trim().copy() } else { String("close") },
+            10 => "pong {String.from_utf8(body) ?? String("?")}",
+            _ => "op {b0 & 0x0F}",
+        }
+        if (b0 & 0x80) == 0 or (b1 & 0x80) != 0 {
+            word.push_str(" (in parts or masked)")
+        }
+        out.push(word)
+        at += h + n
+    }
+    return out
+}
+
+// Whether what came holds `needle`.
+fn holds(p: Peer, needle: str) -> bool {
+    return needle.is_empty() or (String.from_utf8(p.got.copy()) ?? String()).contains(needle)
+}
+
+fn shown(p: Peer) -> String {
+    let f = frames(p).join(", ")
+    return if p.closed { "{f} [closed]" } else { f }
+}
+
+// Runs the client and the server until the client has `want` frames, or its connection closed,
+// the program has seen `logs` things, the connection closed if `closed` says to wait for that,
+// and what came holds `needle`, or 10 s have gone.
+fn pump(app: mut App, net: Net, p: mut Peer, want: usize, logs: usize, closed: bool = false, needle: str = "") {
+    var events = List<Event>()
+    var rounds = 0
+    while rounds < 5000 and ((not p.closed and (head_end(p.got) == none or frames(p).len() < want)) or app.log.len() < logs or
+        (closed and not p.closed) or (not p.closed and not holds(p, needle))) {
+        rounds += 1
+        net.poll(1, mut events)
+        for ev in events {
+            match ev {
+                Received(x) => {
+                    if x.id() == p.conn.id() {
+                        _ = net.read(x, mut p.got)
+                    } else {
+                        var junk = List<u8>()
+                        _ = net.read(x, mut junk)
+                    }
+                }
+                Closed(x) => {
+                    if x.id() == p.conn.id() {
+                        p.closed = true
+                    }
+                }
+                _ => {}
+            }
+        }
+        while let e = app.server.next_event(1) {
+            handle(mut app, e)
+        }
+    }
+}
+
+fn bytes(n: usize) -> List<u8> {
+    var out = List<u8>()
+    for i in 0..n {
+        out.push(u8.wrap(i))
+    }
+    return out
+}
+
+fn main() {
+    var app = App { server: Server.listen(0)!, log: List<String>(), sockets: List<ServerSocket>(), streams: List<EventStream>() }
+    let net = Net.new()!
+    let port = app.server.port
+
+    // The handshake, choosing the first of the server's subprotocols the client offers.
+    var p = connect(net, port, handshake(port, "Sec-WebSocket-Protocol: json, chat\r\n"))
+    pump(mut app, net, mut p, 0, 1)
+    println(head(p))
+    // out: HTTP/1.1 101 Switching Protocols|Server: Calx|Upgrade: websocket|Connection: Upgrade|Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=|Sec-WebSocket-Protocol: chat
+    println(said(mut app))    // out: upgraded chat
+
+    // Text both ways, a ping, a message in three frames with a ping between them, and binary
+    // messages whose lengths take 16 and 64 bits.
+    net.write(p.conn, text(0x81, "echo hi"))
+    pump(mut app, net, mut p, 1, 1)
+    // A ping is answered at once, before a message the program answers.
+    net.write(p.conn, text(0x89, "abc"))
+    var parts = text(0x01, "echo fra")
+    parts.extend(text(0x89, "p"))
+    parts.extend(text(0x00, "gm"))
+    parts.extend(text(0x80, "ent"))
+    net.write(p.conn, parts)
+    net.write(p.conn, frame(0x82, bytes(300)))
+    net.write(p.conn, frame(0x82, bytes(70000)))
+    pump(mut app, net, mut p, 6, 4)
+    println(shown(p))    // out: text hi, pong abc, pong p, text fragment, binary 300, binary 70000
+    println(said(mut app))    // out: text echo hi, text echo fragment, binary 300, binary 70000
+    let first = app.sockets[0]
+    println("{app.server.is_open(first)} {app.server.send_text(first, "more")}")    // out: true true
+
+    // The server closes, and the client answers.
+    net.write(p.conn, text(0x81, "close"))
+    pump(mut app, net, mut p, 8, 1)
+    println(shown(p))    // out: text hi, pong abc, pong p, text fragment, binary 300, binary 70000, text more, close 4000 done
+    println("{app.server.is_open(first)} {app.server.send_text(first, "late")}")    // out: false false
+    net.write(p.conn, frame(0x88, [0x0Fu8, 0xA0]))
+    pump(mut app, net, mut p, 9, 2)
+    println("{p.closed} {said(mut app)}")    // out: true text close, closed 4000
+
+    // The client closes, and the server answers with its code.
+    p = connect(net, port, handshake(port, String()))
+    pump(mut app, net, mut p, 0, 1)
+    var bye = List<u8>()
+    bye.push(0x03)
+    bye.push(0xE8)
+    bye.extend(String("bye").to_bytes())
+    net.write(p.conn, frame(0x88, bye))
+    pump(mut app, net, mut p, 1, 2)
+    println("{shown(p)} | {said(mut app)}")    // out: close 1000 [closed] | upgraded -, closed 1000 bye
+
+    // Frames that break the protocol, each sent with its handshake in one write, so the server
+    // reads them right behind it.
+    let cases: List<(str, List<u8>)> = [
+        ("not masked", frame(0x81, String("x").to_bytes(), false)),
+        ("a reserved bit", text(0xC1, "x")),
+        ("opcode 3", text(0x83, "x")),
+        ("a continuation first", text(0x80, "x")),
+        ("a ping in parts", text(0x09, "x")),
+        ("a ping of 126 bytes", frame(0x89, bytes(126))),
+        ("a message inside a message", joined(text(0x01, "a"), text(0x81, "b"))),
+        ("text that isn't UTF-8", frame(0x81, [0xFFu8])),
+        ("a close of one byte", frame(0x88, [0x03u8])),
+        ("a close with 1005", frame(0x88, [0x03u8, 0xED])),
+        ("a close whose reason isn't UTF-8", frame(0x88, [0x03u8, 0xE8, 0xFF])),
+    ]
+    for (name, f) in cases {
+        var raw = handshake(port, String()).to_bytes()
+        raw.extend(f)
+        let c = net.connect("127.0.0.1", port)!
+        net.write(c, raw)
+        var q = Peer { conn: c, got: List<u8>(), closed: false }
+        pump(mut app, net, mut q, 1, 2)
+        println("{name}: {shown(q)} | {said(mut app)}")
+    }
+    // out: not masked: close 1002 [closed] | upgraded -, closed 1002
+    // out: a reserved bit: close 1002 [closed] | upgraded -, closed 1002
+    // out: opcode 3: close 1002 [closed] | upgraded -, closed 1002
+    // out: a continuation first: close 1002 [closed] | upgraded -, closed 1002
+    // out: a ping in parts: close 1002 [closed] | upgraded -, closed 1002
+    // out: a ping of 126 bytes: close 1002 [closed] | upgraded -, closed 1002
+    // out: a message inside a message: close 1002 [closed] | upgraded -, closed 1002
+    // out: text that isn't UTF-8: close 1007 [closed] | upgraded -, closed 1007
+    // out: a close of one byte: close 1002 [closed] | upgraded -, closed 1002
+    // out: a close with 1005: close 1002 [closed] | upgraded -, closed 1002
+    // out: a close whose reason isn't UTF-8: close 1007 [closed] | upgraded -, closed 1007
+
+    // Messages longer than `max_message`, whole and in parts.
+    app.server.max_message = 1000
+    p = connect(net, port, handshake(port, String()))
+    pump(mut app, net, mut p, 0, 1)
+    net.write(p.conn, frame(0x82, bytes(2000)))
+    pump(mut app, net, mut p, 1, 2)
+    println("{shown(p)} | {said(mut app)}")    // out: close 1009 [closed] | upgraded -, closed 1009
+    p = connect(net, port, handshake(port, String()))
+    pump(mut app, net, mut p, 0, 1)
+    var two = frame(0x02, bytes(600))
+    two.extend(frame(0x80, bytes(600)))
+    net.write(p.conn, two)
+    pump(mut app, net, mut p, 1, 2)
+    println("{shown(p)} | {said(mut app)}")    // out: close 1009 [closed] | upgraded -, closed 1009
+    app.server.max_message = 67108864
+
+    // A client that goes without a close.
+    p = connect(net, port, handshake(port, String()))
+    pump(mut app, net, mut p, 0, 1)
+    net.close(p.conn)
+    pump(mut app, net, mut p, 0, 2)
+    println(said(mut app))    // out: upgraded -, closed 1006
+
+    // Handshakes it turns away, and origins it lets in.
+    let not_ws = "GET /ws HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    let refusals = [
+        not_ws,
+        handshake(port, "Connection: close\r\n").replace("Sec-WebSocket-Version: 13", "Sec-WebSocket-Version: 8"),
+        handshake(port, "Origin: https://evil.example\r\n"),
+        handshake(port, "Origin: null\r\n"),
+    ]
+    for raw in refusals {
+        p = connect(net, port, raw)
+        pump(mut app, net, mut p, 0, 1)
+        let h = head(p)
+        let version = if h.contains("Sec-WebSocket-Version: 13") { " (13)" } else { "" }
+        println("{h[0..h.find("|") ?? h.len()]}{version} | {said(mut app)}")
+        net.close(p.conn)
+    }
+    // out: HTTP/1.1 400 Bad Request | refused: not a WebSocket handshake
+    // out: HTTP/1.1 426 Upgrade Required (13) | refused: not version 13 of the WebSocket protocol
+    // out: HTTP/1.1 403 Forbidden | refused: a page from https://evil.example, which isn't allowed
+    // out: HTTP/1.1 403 Forbidden | refused: a page from null, which isn't allowed
+    for origin in ["http://127.0.0.1:{port}", String("HTTPS://allowed.example")] {
+        p = connect(net, port, handshake(port, "Origin: {origin}\r\n"))
+        pump(mut app, net, mut p, 0, 1)
+        net.close(p.conn)
+        pump(mut app, net, mut p, 0, 2)
+        println(said(mut app))
+    }
+    // out: upgraded -, closed 1006
+    // out: upgraded -, closed 1006
+
+    // A close the client never answers ends after 5 seconds.
+    p = connect(net, port, handshake(port, String()))
+    pump(mut app, net, mut p, 0, 1)
+    app.server.close_socket(app.sockets[app.sockets.len() - 1], why: "the reason, longer than a close has room for, is cut at a whole rune: {"é".repeat(60)}")
+    pump(mut app, net, mut p, 1, 2)
+    let closes = frames(p)
+    let cut = closes[0].copy()
+    println("{cut.len()} {cut.ends_with("é")} | {said(mut app)}")    // out: 133 true | upgraded -, closed 1006
+    net.close(p.conn)
+
+    // An event stream: its head and first event, then more, as the browser reads them.
+    p = connect(net, port, "GET /events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n")
+    pump(mut app, net, mut p, 0, 1, needle: "data: world\n\n")
+    let s = app.streams[0]
+    _ = app.server.send_event(s, "a\r\nb\rc\n")
+    _ = app.server.send_event(s, "")
+    _ = app.server.send_event(s, #"{"n": 7}"#, id: "7")
+    pump(mut app, net, mut p, 0, 1, needle: "id: 7\ndata: \{\"n\": 7\}\n\n")
+    println(head(p))
+    // out: HTTP/1.1 200 OK|Server: Calx|Content-Type: text/event-stream|Cache-Control: no-cache|X-Test: 1|Connection: close
+    let body = String.from_utf8(p.got[head_end(p.got) ?? 0..]) ?? String()
+    println(body.replace("\n", "/"))
+    // out: event: greet/id: 1/data: hello/data: world//data: a/data: b/data: c/data: //data: //id: 7/data: {"n": 7}//
+    println(said(mut app))    // out: stream
+    // The browser goes.
+    net.close(p.conn)
+    pump(mut app, net, mut p, 0, 1)
+    println("{said(mut app)} {app.server.send_event(s, "late")}")    // out: ended false
+
+    // The server ends a stream, and a HEAD request gets only the head.
+    p = connect(net, port, "GET /events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n")
+    pump(mut app, net, mut p, 0, 1)
+    app.server.end_stream(app.streams[1])
+    pump(mut app, net, mut p, 0, 2, closed: true)
+    println("{p.closed} {said(mut app)}")    // out: true stream, ended
+    p = connect(net, port, "HEAD /events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n")
+    pump(mut app, net, mut p, 0, 2, closed: true)
+    println("{p.closed} {(head_end(p.got) ?? 0) == p.got.len()} {said(mut app)}")    // out: true true stream, ended
+
+    // std.http.websocket's client, on a thread of its own, against the server on this one.
+    let ws = open("ws://127.0.0.1:{port}/ws", [Header { name: "Sec-WebSocket-Protocol", value: "json" }])
+    ws.send_text("echo from std.http.websocket")!
+    var answer = String()
+    var rounds = 0
+    while answer.is_empty() and rounds < 5000 {
+        rounds += 1
+        while let e = app.server.next_event(1) {
+            handle(mut app, e)
+        }
+        if let m = ws.receive(0)! {
+            answer = match m {
+                Text(t) => t,
+                Binary(_) => String("binary"),
+            }
+        }
+    }
+    println("{answer} {ws.protocol() ?? String("-")} | {said(mut app)}")    // out: from std.http.websocket json | upgraded json, text echo from std.http.websocket
+    app.server.close_socket(app.sockets[app.sockets.len() - 1], 1001, "going")
+    var ended = String()
+    rounds = 0
+    while ended.is_empty() and rounds < 5000 {
+        rounds += 1
+        while let e = app.server.next_event(1) {
+            handle(mut app, e)
+        }
+        match ws.receive(0) {
+            ok(_) => {},
+            err(why) => ended = "{why}",
+        }
+    }
+    while app.log.is_empty() and rounds < 10000 {
+        rounds += 1
+        while let e = app.server.next_event(1) {
+            handle(mut app, e)
+        }
+    }
+    println("{ended} | {said(mut app)}")    // out: closed: 1001 going | closed 1001
+    ws.close()
+}

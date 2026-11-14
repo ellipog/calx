@@ -9,6 +9,8 @@ A WebSocket client (RFC 6455), for talking to a server that pushes messages as t
 
 Each connection runs on a thread of its own. It answers the server's pings and its close by itself, checks that text is UTF-8, and keeps the messages that come until the program takes them, so a program that's busy loses none.
 
+The server's side is [std.http.server](http-server.md#websockets)'s `upgrade`, which makes a request's connection a WebSocket, with the same `Message`.
+
 ```
 import std.http.websocket.{Message, connect}
 import std.json

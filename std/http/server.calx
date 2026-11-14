@@ -1,16 +1,21 @@
 /// A small HTTP/1.1 server for scripts, as Python's `http.server` is: requests from as many
 /// connections as come, handed to the program one at a time by `next`, on std.net's event loop,
-/// and `serve_dir`, which serves a folder's files as `python -m http.server` does.
+/// and `serve_dir`, which serves a folder's files as `python -m http.server` does. It pushes to
+/// a browser too, over a WebSocket, as Python's `websockets.serve` does, or as a stream of
+/// events, `text/event-stream`, which a browser's `EventSource` reads.
 ///
 /// It listens on loopback, `127.0.0.1`, unless it's given another address, so only programs on
 /// the same machine reach it, and Windows' firewall never asks about it.
 module std.http.server
 
+import std.bytes.{base64, from_base64}
 import std.env.{os}
 import std.fs.{File, Kind, Metadata, is_dir, kind, list, open_read}
+import std.hash.{sha1}
 import std.html.{escape}
 import std.io.{flush}
 import std.http.{Header}
+import std.http.websocket.{Message}
 import std.net.{Conn, Event, Net, NetError, Waker}
 import std.process.{processors}
 import std.thread.{Task}
@@ -120,14 +125,118 @@ impl Response {
     }
 }
 
-// A connection and what's come on it that isn't a request yet.
+/// A WebSocket connection that `upgrade` gave, which `send_text`, `send_binary` and
+/// `close_socket` take and `next_event` names. It stands for the connection the server keeps, so
+/// it can be copied, compared, and kept in a list or a map. Once the connection has closed, what's
+/// sent to it is dropped.
+pub struct ServerSocket {
+    conn: Conn
+}
+
+impl ServerSocket {
+    /// A number for the connection, which no other connection open at the same time has, for a
+    /// map's key.
+    pub fn id(self) -> u32 {
+        return self.conn.id()
+    }
+}
+
+/// A stream of events, `text/event-stream`, that `stream` started, which `send_event` writes to
+/// and a browser's `EventSource` reads. It can be copied and compared, as a `ServerSocket` can.
+pub struct EventStream {
+    conn: Conn
+}
+
+impl EventStream {
+    /// A number for the connection, which no other connection open at the same time has.
+    pub fn id(self) -> u32 {
+        return self.conn.id()
+    }
+}
+
+/// What `next_event` gives: a request, or what happened on a WebSocket or an event stream.
+pub enum ServerEvent {
+    /// A request, as `next` gives it.
+    Request(Request)
+    /// A whole message from a WebSocket, its frames joined: text, which the server has checked
+    /// is UTF-8, or bytes.
+    Message(ServerSocket, Message)
+    /// A WebSocket that closed, with the code and reason it ended with: the client's close, the
+    /// server's own when the client broke the protocol (1002), sent text that isn't UTF-8 (1007)
+    /// or a message longer than `max_message` (1009), or 1006 and `""` when the connection ended
+    /// without a close. It's the last event for the socket.
+    Closed(ServerSocket, u16, String)
+    /// An event stream whose browser went away, or that `end_stream` ended. It's the last event
+    /// for the stream.
+    Ended(EventStream)
+}
+
+/// Why `upgrade` didn't make a request a WebSocket. It answered the request with the status that
+/// says so, except for `Gone`.
+pub enum UpgradeError {
+    /// The request isn't a WebSocket handshake: a `GET` by HTTP/1.1 with `Upgrade: websocket`,
+    /// `Connection: Upgrade`, and a `Sec-WebSocket-Key` of 16 bytes in base64. It got
+    /// `400 Bad Request`.
+    NotWebSocket
+    /// It asked for a version of the protocol other than 13, RFC 6455's. It got
+    /// `426 Upgrade Required`, with `Sec-WebSocket-Version: 13`.
+    Version
+    /// It came from a page of another site, whose `Origin` this is, and that isn't one of the
+    /// origins `upgrade` was given. It got `403 Forbidden`.
+    Origin(String)
+    /// The request was answered already, or its connection closed.
+    Gone
+}
+
+/// What went wrong, in words.
+impl Display for UpgradeError {
+    fn show(self) {
+        match self {
+            NotWebSocket => print("not a WebSocket handshake"),
+            Version => print("not version 13 of the WebSocket protocol"),
+            Origin(o) => print("a page from {o}, which isn't allowed"),
+            Gone => print("the request was answered already, or its connection closed"),
+        }
+    }
+}
+
+// What a connection is: one for HTTP requests, a WebSocket, or an event stream.
+const KIND_HTTP: u8 = 0
+const KIND_SOCKET: u8 = 1
+const KIND_STREAM: u8 = 2
+/// How long `close_socket` waits for the client's close before it closes the connection, 5 s.
+const CLOSE_WAIT_MS: u64 = 5000
+/// What RFC 6455 adds to a handshake's key before it's hashed for the answer.
+const WS_GUID: str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+// A connection and what's come on it that isn't a request yet, or a WebSocket's frames.
 struct Client {
     conn: Conn
     buf: List<u8>
-    // A request was handed out and has no response yet, or the connection is closing.
+    // A request was handed out and has no response yet, or the connection is closing, or it's
+    // a WebSocket or an event stream now.
     busy: bool
     // `100 Continue` went out for the request coming in.
     continued: bool
+    kind: u8
+    // A WebSocket's message coming in frames: its opcode, or 0 when none is, and its bytes.
+    op: u8
+    message: List<u8>
+    // The subprotocol `upgrade` chose, or `""`.
+    protocol: String
+    // The server sent its close, at `closed_at`, and waits for the client's.
+    closing: bool
+    closed_at: Instant
+}
+
+// A frame from a client, as `frame_at` read it: whether it ends its message, its opcode, where
+// its payload starts and how long it is, and its mask.
+struct Frame {
+    fin: bool
+    op: u8
+    start: usize
+    len: usize
+    mask: [u8; 4]
 }
 
 /// A file of this size or more, 64 KiB, `serve` doesn't read: it leaves the system to send it
@@ -149,6 +258,9 @@ pub struct Server {
     /// Whether `serve` says where it's serving and logs each request to standard error, as
     /// Python does. It does to start with.
     pub log: bool
+    /// The longest message it takes from a WebSocket, in bytes. A longer one closes the socket
+    /// with 1009. 64 MB to start with.
+    pub max_message: usize
     net: Net
     clients: Map<u32, Client>
     ready: Deque<u32>
@@ -156,6 +268,10 @@ pub struct Server {
     date: String
     date_second: i64
     streams: List<Stream>
+    // What happened on WebSockets and event streams, for `next_event`, and how many sockets
+    // wait for the client's close.
+    happened: Deque<ServerEvent>
+    closing: usize
 }
 
 // A file `serve` is sending in parts after its response's head: where the next part starts, how
@@ -209,7 +325,7 @@ impl Server {
     pub fn listen(port: u16, host: String = "127.0.0.1") -> Server ! NetError {
         let net = try Net.new()
         let p = try net.listen(host, port)
-        return Server { port: p, host: host.copy(), max_body: 67108864, log: true, net: net, clients: Map<u32, Client>(), ready: Deque<u32>(), events: List<Event>(), date: String(), date_second: -1, streams: List<Stream>() }
+        return Server { port: p, host: host.copy(), max_body: 67108864, log: true, max_message: 67108864, net: net, clients: Map<u32, Client>(), ready: Deque<u32>(), events: List<Event>(), date: String(), date_second: -1, streams: List<Stream>(), happened: Deque<ServerEvent>(), closing: 0 }
     }
 
     /// The address to open in a browser: `http://127.0.0.1:8000/`.
@@ -231,16 +347,52 @@ impl Server {
             if let r = self.take_ready() {
                 return some(r)
             }
-            var wait = timeout_ms
-            if timeout_ms >= 0 {
-                let spent = i64.wrap(unsafe { Instant.now() }.nanos_since(start) / 1000000)
-                if spent >= timeout_ms {
-                    return none
-                }
-                wait = timeout_ms - spent
+            let wait = self.wait_left(start, timeout_ms)
+            if wait == none {
+                return none
             }
-            self.poll_events(wait)
+            self.poll_events(wait ?? 0)
         }
+    }
+
+    /// The next thing that happens, as `next` gives requests: a request, a WebSocket's message
+    /// or close, or an event stream's end, waiting up to `timeout_ms` milliseconds for it, or
+    /// forever if it's negative. `none` if nothing happened in that time. What happens on
+    /// sockets and streams waits for it in order, while `next` gives only the requests.
+    pub fn next_event(mut self, timeout_ms: i64 = -1) -> ServerEvent? {
+        let start = unsafe { Instant.now() }
+        loop {
+            if let h = self.happened.pop_first() {
+                return some(h)
+            }
+            if let r = self.take_ready() {
+                return some(ServerEvent.Request(r))
+            }
+            let wait = self.wait_left(start, timeout_ms)
+            if wait == none {
+                return none
+            }
+            self.poll_events(wait ?? 0)
+        }
+    }
+
+    // How long a poll may wait, from `start` and a timeout that's negative for forever, or
+    // `none` once the time is up. A socket waiting for the client's close is let go at its time,
+    // so a poll waits no more than 100 ms while one does.
+    fn wait_left(mut self, start: Instant, timeout_ms: i64) -> i64? {
+        self.expire_closes()
+        var wait = timeout_ms
+        if timeout_ms >= 0 {
+            let spent = i64.wrap(unsafe { Instant.now() }.nanos_since(start) / 1000000)
+            if spent >= timeout_ms {
+                return none
+            }
+            wait = timeout_ms - spent
+        }
+        if self.closing > 0 and (wait < 0 or wait > 100) {
+            wait = 100
+        }
+        return some(wait)
     }
 
     // The next request a connection has ready, if one has.
@@ -257,27 +409,83 @@ impl Server {
     // what came: new connections, bytes, and connections that closed.
     fn poll_events(mut self, wait: i64) {
         self.net.poll(wait, mut self.events)
+        // WebSockets with bytes to read as frames, and sockets and streams that ended, which are
+        // seen to after the events, since their frames come before their end.
+        var sockets = List<u32>()
+        var ended = List<u32>()
         for e in self.events {
             match e {
                 Accepted(c) => {
-                    self.clients.insert(c.id(), Client { conn: c, buf: List<u8>(), busy: false, continued: false })
+                    self.clients.insert(c.id(), Client { conn: c, buf: List<u8>(), busy: false, continued: false, kind: KIND_HTTP, op: 0, message: List<u8>(), protocol: String(), closing: false, closed_at: unsafe { Instant.now() } })
                 }
                 Received(c) => {
                     let id = c.id()
                     if let client = mut self.clients.find(id) {
                         _ = self.net.read(c, mut client.buf)
-                        self.ready.push_last(id)
+                        if client.kind == KIND_HTTP {
+                            self.ready.push_last(id)
+                        } else if client.kind == KIND_SOCKET {
+                            sockets.push(id)
+                        } else {
+                            // A browser sends nothing on an event stream.
+                            client.buf.clear()
+                        }
                     } else {
                         var junk = List<u8>()
                         _ = self.net.read(c, mut junk)
                     }
                 }
                 Closed(c) => {
-                    _ = self.clients.remove(c.id())
+                    let id = c.id()
+                    if self.clients.contains(id) and self.clients[id].kind != KIND_HTTP {
+                        ended.push(id)
+                    } else {
+                        _ = self.clients.remove(id)
+                    }
                 }
                 Connected(_) => {}
                 Woken => {}
             }
+        }
+        for id in sockets {
+            self.read_frames(id)
+        }
+        for id in ended {
+            self.end_client(id, 1006, String())
+        }
+    }
+
+    // The client `id` let go, if it's still here, and its end told to `next_event`: a socket's
+    // close with `code` and `reason`, or a stream's end.
+    fn end_client(mut self, id: u32, code: u16, why: String) {
+        if let client = self.clients.remove(id) {
+            if client.kind == KIND_SOCKET {
+                if client.closing {
+                    self.closing -= 1
+                }
+                self.happened.push_last(ServerEvent.Closed(ServerSocket { conn: client.conn }, code, why.copy()))
+            } else if client.kind == KIND_STREAM {
+                self.happened.push_last(ServerEvent.Ended(EventStream { conn: client.conn }))
+            }
+        }
+    }
+
+    // Each socket whose close has waited `CLOSE_WAIT_MS` for the client's closed, as one that
+    // ended without a close.
+    fn expire_closes(mut self) {
+        if self.closing == 0 {
+            return
+        }
+        let now = unsafe { Instant.now() }
+        var late = List<u32>()
+        for (id, client) in self.clients {
+            if client.closing and now.nanos_since(client.closed_at) / 1000000 >= CLOSE_WAIT_MS {
+                late.push(id)
+            }
+        }
+        for id in late {
+            self.net.close(self.clients[id].conn)
+            self.end_client(id, 1006, String())
         }
     }
 
@@ -320,7 +528,7 @@ impl Server {
     /// asked for that, came by HTTP/1.0 without `keep-alive`, or `res` has `Connection: close`.
     pub fn respond(mut self, req: Request, res: Response) {
         let id = req.conn.id()
-        if not self.clients.contains(id) or not self.clients[id].busy {
+        if not self.answerable(id) {
             return
         }
         let keep = keeps_open(req, res)
@@ -328,6 +536,368 @@ impl Server {
         if keep {
             self.clients[id].busy = false
             self.ready.push_last(id)
+        }
+    }
+
+    // Whether the request on the connection `id` waits for its answer: the connection is open,
+    // has handed out a request, and is still HTTP's.
+    fn answerable(self, id: u32) -> bool {
+        return self.clients.contains(id) and self.clients[id].busy and self.clients[id].kind == KIND_HTTP
+    }
+
+    /// `req` answered by making its connection a WebSocket (RFC 6455), as Python's
+    /// `websockets.serve` does for each connection that asks. The socket's messages, and its
+    /// close, come from `next_event`, and the server answers its pings itself.
+    ///
+    /// The subprotocol is the first of `protocols` that the request's `Sec-WebSocket-Protocol`
+    /// offers, or none. A request from a page, which has an `Origin`, is turned away unless the
+    /// page is the server's own, at the address the request was sent to, or its origin is one of
+    /// `origins`, such as `"https://example.com"`; `"*"` lets every page in. It fails if the
+    /// request isn't a WebSocket handshake, and answers it with the status that says why.
+    pub fn upgrade(mut self, req: Request, protocols: List<String> = [], origins: List<String> = []) -> ServerSocket ! UpgradeError {
+        let id = req.conn.id()
+        if not self.answerable(id) {
+            fail UpgradeError.Gone
+        }
+        let key = (req.header("Sec-WebSocket-Key") ?? String()).trim().copy()
+        let key_bytes = from_base64(key.copy()) ?? List<u8>()
+        let upgrade = req.header("Upgrade") ?? String()
+        let connection = req.header("Connection") ?? String()
+        if req.method != "GET" or req.version != "HTTP/1.1" or not has_token(upgrade, "websocket") or
+            not has_token(connection, "upgrade") or key_bytes.len() != 16 {
+            self.respond(req, Response.error(400, "This address is a WebSocket, which takes a WebSocket handshake."))
+            fail UpgradeError.NotWebSocket
+        }
+        if (req.header("Sec-WebSocket-Version") ?? String()).trim() != "13" {
+            self.respond(req, Response.error(426, "This WebSocket speaks version 13.").with_header("Sec-WebSocket-Version", "13"))
+            fail UpgradeError.Version
+        }
+        if let origin = req.header("Origin") {
+            if not origin_allowed(origin, req.header("Host") ?? String(), origins) {
+                self.respond(req, Response.error(403, "A page from {origin} can't open this WebSocket."))
+                fail UpgradeError.Origin(origin)
+            }
+        }
+        // Each header that offers subprotocols, and each one it offers.
+        var offered = List<String>()
+        for h in req.headers {
+            if same_name(h.name, "sec-websocket-protocol") {
+                for p in h.value.split(",") {
+                    offered.push(p.trim().copy())
+                }
+            }
+        }
+        var chosen = String()
+        for p in protocols {
+            if chosen.is_empty() and offered.contains(p) {
+                chosen = p.copy()
+            }
+        }
+        var res = Response { status: 101, headers: List<Header>(), body: List<u8>() }
+        res.headers.push(Header { name: "Upgrade", value: "websocket" })
+        res.headers.push(Header { name: "Connection", value: "Upgrade" })
+        res.headers.push(Header { name: "Sec-WebSocket-Accept", value: base64(sha1("{key}{WS_GUID}".to_bytes())) })
+        if not chosen.is_empty() {
+            res.headers.push(Header { name: "Sec-WebSocket-Protocol", value: chosen.copy() })
+        }
+        let head = self.head_of(res, true, false)
+        self.net.write(req.conn, head.to_bytes())
+        self.net.flush()
+        self.clients[id].kind = KIND_SOCKET
+        self.clients[id].protocol = chosen
+        // Frames the client sent right behind its handshake.
+        if not self.clients[id].buf.is_empty() {
+            self.read_frames(id)
+        }
+        return ServerSocket { conn: req.conn }
+    }
+
+    /// The subprotocol `upgrade` chose for the socket, or `none` if it chose none or the socket
+    /// has closed.
+    pub fn protocol(self, s: ServerSocket) -> String? {
+        let id = s.id()
+        if not self.clients.contains(id) or self.clients[id].kind != KIND_SOCKET or self.clients[id].protocol.is_empty() {
+            return none
+        }
+        return some(self.clients[id].protocol.copy())
+    }
+
+    /// Whether the socket is open: neither the client nor `close_socket` has closed it.
+    pub fn is_open(self, s: ServerSocket) -> bool {
+        let id = s.id()
+        return self.clients.contains(id) and self.clients[id].kind == KIND_SOCKET and not self.clients[id].closing
+    }
+
+    /// Sends a text message on the socket. `false` if it has closed or is closing, so nothing
+    /// was sent.
+    pub fn send_text(self, s: ServerSocket, text: String) -> bool {
+        return self.send_frame(s, 1, text.to_bytes())
+    }
+
+    /// Sends a binary message on the socket. `false` if it has closed or is closing.
+    pub fn send_binary(self, s: ServerSocket, bytes: List<u8>) -> bool {
+        return self.send_frame(s, 2, bytes)
+    }
+
+    fn send_frame(self, s: ServerSocket, op: u8, payload: List<u8>) -> bool {
+        if not self.is_open(s) {
+            return false
+        }
+        self.net.write(s.conn, frame_head(op, payload.len()))
+        if not payload.is_empty() {
+            self.net.write(s.conn, payload)
+        }
+        self.net.flush()
+        return true
+    }
+
+    /// Closes the socket with `code` and the reason `why`: the client is told, and the connection
+    /// closes once it answers, or after 5 seconds, when `next_event` gives the socket's `Closed`.
+    /// A reason has room for 123 bytes, and a longer one is cut at the last whole rune that fits.
+    /// It panics for a code a close can't carry: one under 1000, 1004 to 1006, 1015 to 2999, or
+    /// over 4999.
+    @track_caller
+    pub fn close_socket(mut self, s: ServerSocket, code: u16 = 1000, why: String = "") {
+        if not close_code_ok(code) {
+            panic("a WebSocket's close can't carry the code {code}; 1000 is a normal close, 1001 a server going away, and 4000 to 4999 are the program's own")
+        }
+        if not self.is_open(s) {
+            return
+        }
+        var n = why.len().min(123)
+        while n > 0 and n < why.len() and (why.byte_at(n) & 0xC0) == 0x80 {
+            n -= 1
+        }
+        var body = List<u8>()
+        body.push(u8.wrap(u32(code) >> 8))
+        body.push(u8.wrap(code))
+        body.extend(why.to_bytes()[0..n])
+        self.net.write(s.conn, frame_head(8, body.len()))
+        self.net.write(s.conn, body)
+        self.net.flush()
+        let id = s.id()
+        self.clients[id].closing = true
+        self.clients[id].closed_at = unsafe { Instant.now() }
+        self.closing += 1
+    }
+
+    // The whole frames a WebSocket's client has sent, taken in turn: its messages and its close
+    // for `next_event`, and its pings answered. A frame that breaks the protocol closes the
+    // socket.
+    fn read_frames(mut self, id: u32) {
+        var at: usize = 0
+        var f = Frame { fin: false, op: 0, start: 0, len: 0, mask: [0u8; 4] }
+        while self.clients.contains(id) {
+            let got = frame_at(self.clients[id].buf, at, self.max_message, mut f)
+            if got == 0 {
+                break
+            }
+            if got > 1 {
+                self.fail_socket(id, got)
+                return
+            }
+            at = f.start + f.len
+            let payload = unmasked(self.clients[id].buf, f)
+            if f.op == 9 {
+                // A ping, answered with its bytes.
+                if not self.clients[id].closing {
+                    self.net.write(self.clients[id].conn, frame_head(10, payload.len()))
+                    self.net.write(self.clients[id].conn, payload)
+                    self.net.flush()
+                }
+                continue
+            }
+            if f.op == 10 {
+                continue
+            }
+            if f.op == 8 {
+                self.client_closed(id, payload)
+                return
+            }
+            // A message's first frame, or one that goes on with it.
+            if (f.op == 0) != (self.clients[id].op != 0) {
+                self.fail_socket(id, 1002)
+                return
+            }
+            if f.fin and f.op != 0 {
+                // A message in one frame, as most are.
+                if not self.deliver(id, f.op, payload) {
+                    return
+                }
+                continue
+            }
+            if f.op != 0 {
+                self.clients[id].op = f.op
+            }
+            if self.clients[id].message.len() + payload.len() > self.max_message {
+                self.fail_socket(id, 1009)
+                return
+            }
+            self.clients[id].message.extend(payload)
+            if f.fin {
+                let op = self.clients[id].op
+                self.clients[id].op = 0
+                let bytes = self.clients[id].message.copy()
+                self.clients[id].message.clear()
+                if not self.deliver(id, op, bytes) {
+                    return
+                }
+            }
+        }
+        if self.clients.contains(id) and at > 0 {
+            let rest = self.clients[id].buf[at..]
+            self.clients[id].buf = rest
+        }
+    }
+
+    // A whole message from the socket `id` given to `next_event`, or `false` if it's text that
+    // isn't UTF-8, which closes the socket.
+    fn deliver(mut self, id: u32, op: u8, bytes: own List<u8>) -> bool {
+        let s = ServerSocket { conn: self.clients[id].conn }
+        if op == 2 {
+            self.happened.push_last(ServerEvent.Message(s, Message.Binary(bytes)))
+            return true
+        }
+        if let text = String.from_utf8(bytes) {
+            self.happened.push_last(ServerEvent.Message(s, Message.Text(text)))
+            return true
+        }
+        self.fail_socket(id, 1007)
+        return false
+    }
+
+    // The client's close: answered with its code, unless the server's own close went first,
+    // and the connection closed. A close that isn't one RFC 6455 allows breaks the protocol.
+    fn client_closed(mut self, id: u32, payload: List<u8>) {
+        var code: u16 = 1005
+        var why = String()
+        if payload.len() == 1 {
+            self.fail_socket(id, 1002)
+            return
+        }
+        if payload.len() >= 2 {
+            code = u16.wrap((u32(payload[0]) << 8) | u32(payload[1]))
+            if not close_code_ok(code) {
+                self.fail_socket(id, 1002)
+                return
+            }
+            if let r = String.from_utf8(payload[2..]) {
+                why = r
+            } else {
+                self.fail_socket(id, 1007)
+                return
+            }
+        }
+        let c = self.clients[id].conn
+        if not self.clients[id].closing {
+            let echo = if payload.len() >= 2 { payload[0..2] } else { List<u8>() }
+            self.net.write(c, frame_head(8, echo.len()))
+            self.net.write(c, echo)
+        }
+        self.net.close(c)
+        self.end_client(id, code, why)
+    }
+
+    // The socket closed with `code`, telling the client so unless the server's close went
+    // already, after a frame that broke the protocol (1002), text that isn't UTF-8 (1007) or a
+    // message that's too long (1009).
+    fn fail_socket(mut self, id: u32, code: u16) {
+        let c = self.clients[id].conn
+        if not self.clients[id].closing {
+            var body = List<u8>()
+            body.push(u8.wrap(u32(code) >> 8))
+            body.push(u8.wrap(code))
+            self.net.write(c, frame_head(8, 2))
+            self.net.write(c, body)
+        }
+        self.net.close(c)
+        self.end_client(id, code, String())
+    }
+
+    /// `req` answered with a stream of events, `text/event-stream`, which a browser's
+    /// `EventSource` reads. It stays open for `send_event` until `end_stream`, or until the
+    /// browser goes, when `next_event` gives its `Ended`. `headers` go with the answer, after
+    /// `Content-Type: text/event-stream` and `Cache-Control: no-cache`. A browser that connects
+    /// again sends `Last-Event-ID`, the `id` of the last event it had.
+    pub fn stream(mut self, req: Request, headers: List<Header> = []) -> EventStream {
+        let s = EventStream { conn: req.conn }
+        let id = req.conn.id()
+        if not self.answerable(id) {
+            self.happened.push_last(ServerEvent.Ended(s))
+            return s
+        }
+        var res = Response { status: 200, headers: List<Header>(), body: List<u8>() }
+        res.headers.push(Header { name: "Content-Type", value: "text/event-stream" })
+        res.headers.push(Header { name: "Cache-Control", value: "no-cache" })
+        for h in headers {
+            res.headers.push(h.copy())
+        }
+        let head = self.head_of(res, false, false)
+        self.net.write(req.conn, head.to_bytes())
+        self.clients[id].kind = KIND_STREAM
+        self.clients[id].buf.clear()
+        if req.method == "HEAD" {
+            self.end_stream(s)
+        } else {
+            self.net.flush()
+        }
+        return s
+    }
+
+    /// An event sent on the stream: `data`, each of its lines a `data:` line, which the
+    /// browser's `EventSource` joins with `\n`, with the `event:` name, the type its listeners
+    /// listen for, and the `id:`, unless they're empty. `false` if the stream has ended, so
+    /// nothing was sent. It panics if `event` or `id` has a line break.
+    @track_caller
+    pub fn send_event(self, s: EventStream, data: String, event: String = "", id: String = "") -> bool {
+        if event.contains("\n") or event.contains("\r") or id.contains("\n") or id.contains("\r") {
+            panic("an event's name and id are one line each, and this has a line break")
+        }
+        let k = s.id()
+        if not self.clients.contains(k) or self.clients[k].kind != KIND_STREAM {
+            return false
+        }
+        var out = String()
+        out.reserve(data.len() + event.len() + id.len() + 24)
+        if not event.is_empty() {
+            out.push_str("event: ")
+            out.push_str(event)
+            out.push('\n')
+        }
+        if not id.is_empty() {
+            out.push_str("id: ")
+            out.push_str(id)
+            out.push('\n')
+        }
+        // A line ends at `\r\n`, `\r` or `\n`, as EventSource reads them.
+        var from: usize = 0
+        var i: usize = 0
+        while i <= data.len() {
+            let b = if i < data.len() { data.byte_at(i) } else { 10u8 }
+            if b == 10 or b == 13 {
+                out.push_str("data: ")
+                out.push_str(data[from..i])
+                out.push('\n')
+                if b == 13 and i + 1 < data.len() and data.byte_at(i + 1) == 10 {
+                    i += 1
+                }
+                from = i + 1
+            }
+            i += 1
+        }
+        out.push('\n')
+        self.net.write(s.conn, out.to_bytes())
+        self.net.flush()
+        return true
+    }
+
+    /// Ends the stream: its connection closes once what was sent has gone, and `next_event`
+    /// gives its `Ended`.
+    pub fn end_stream(mut self, s: EventStream) {
+        let id = s.id()
+        if self.clients.contains(id) and self.clients[id].kind == KIND_STREAM {
+            self.net.close(s.conn)
+            self.end_client(id, 1006, String())
         }
     }
 
@@ -407,7 +977,7 @@ impl Server {
     // already, so the connection's next request can be answered at once.
     fn start_stream(mut self, req: Request, res: Response, f: own File, size: u64) {
         let id = req.conn.id()
-        if not self.clients.contains(id) or not self.clients[id].busy {
+        if not self.answerable(id) {
             close_quietly(f)
             return
         }
@@ -480,8 +1050,9 @@ impl Server {
     }
 
     // The status line and headers of `res`, with `Server`, `Date`, `Content-Length` where it has
-    // none, and `Connection: close` unless the connection stays open.
-    fn head_of(mut self, res: Response, keep: bool) -> String {
+    // none unless `length` is false, as for a stream whose end is the connection's, and
+    // `Connection: close` unless the connection stays open.
+    fn head_of(mut self, res: Response, keep: bool, length: bool = true) -> String {
         let now = unsafe { Timestamp.now() }.unix_ms
         let second = now / 1000
         if second != self.date_second {
@@ -504,7 +1075,7 @@ impl Server {
             head.push_str("\r\n")
         }
         let no_body = res.status < 200 or res.status == 204 or res.status == 304
-        if not has_length and not no_body {
+        if length and not has_length and not no_body {
             head.push_str("Content-Length: {res.body.len()}\r\n")
         }
         if not keep {
@@ -513,6 +1084,115 @@ impl Server {
         head.push_str("\r\n")
         return head
     }
+}
+
+// The head of a frame the server sends: whole, unmasked, with `op` and a payload of `n` bytes.
+fn frame_head(op: u8, n: usize) -> List<u8> {
+    var out = List<u8>()
+    out.push(0x80 | op)
+    if n < 126 {
+        out.push(u8.wrap(n))
+    } else if n < 65536 {
+        out.push(126)
+        out.push(u8.wrap(n >> 8))
+        out.push(u8.wrap(n))
+    } else {
+        out.push(127)
+        let big = u64(n)
+        for k in 0u64..8 {
+            out.push(u8.wrap(big >> (56 - 8 * k)))
+        }
+    }
+    return out
+}
+
+// The frame at `at` in a WebSocket client's bytes, into `f`: 0 if it isn't all there yet, 1 if
+// it is, or the code to close the socket with: 1002 for a frame RFC 6455 doesn't allow from a
+// client, and 1009 for one longer than `max`.
+fn frame_at(buf: List<u8>, at: usize, max: usize, f: mut Frame) -> u16 {
+    let n = buf.len() - at
+    if n < 2 {
+        return 0
+    }
+    let b0 = buf[at]
+    let b1 = buf[at + 1]
+    f.fin = (b0 & 0x80) != 0
+    f.op = b0 & 0x0F
+    var head: usize = 2
+    var len = u64(b1 & 0x7F)
+    if len == 126 {
+        if n < 4 {
+            return 0
+        }
+        len = (u64(buf[at + 2]) << 8) | u64(buf[at + 3])
+        head = 4
+    } else if len == 127 {
+        if n < 10 {
+            return 0
+        }
+        len = 0
+        for k in 2usize..10 {
+            len = (len << 8) | u64(buf[at + k])
+        }
+        head = 10
+    }
+    // No extension was agreed, so the reserved bits are 0. A client masks every frame. A control
+    // frame comes whole, with up to 125 bytes.
+    let control = f.op >= 8
+    if (b0 & 0x70) != 0 or (b1 & 0x80) == 0 or (f.op > 2 and f.op < 8) or f.op > 10 or (control and (not f.fin or len > 125)) {
+        return 1002
+    }
+    if len > u64(max) {
+        return 1009
+    }
+    if u64(n) < u64(head + 4) + len {
+        return 0
+    }
+    for k in 0usize..4 {
+        f.mask[k] = buf[at + head + k]
+    }
+    f.start = at + head + 4
+    f.len = usize.wrap(len)
+    return 1
+}
+
+// The payload of the frame `f` in `buf`, unmasked.
+fn unmasked(buf: List<u8>, f: Frame) -> List<u8> {
+    var out = buf[f.start..f.start + f.len]
+    for i in 0..out.len() {
+        out[i] = out[i] ^ f.mask[i & 3]
+    }
+    return out
+}
+
+// Whether a close may carry `code`: RFC 6455 section 7.4's, with 1012 to 1014, which IANA has
+// registered since, and the codes for libraries and programs, 3000 to 4999.
+fn close_code_ok(code: u16) -> bool {
+    if code >= 3000 and code <= 4999 {
+        return true
+    }
+    return code >= 1000 and code <= 1014 and code != 1004 and code != 1005 and code != 1006
+}
+
+// Whether a page from `origin` may open a WebSocket: it's one of `origins`, `"*"` is, or it's the
+// server's own, `http://` or `https://` and the `Host` the request was sent to.
+fn origin_allowed(origin: String, host: String, origins: List<String>) -> bool {
+    for o in origins {
+        if o == "*" or same_name(o, origin) {
+            return true
+        }
+    }
+    let o = origin.trim()
+    let h = host.trim()
+    if h.is_empty() {
+        return false
+    }
+    for scheme in ["http://", "https://"] {
+        if o.len() == scheme.len() + h.len() and same_name(o[0..scheme.len()], scheme) and same_name(o[scheme.len()..], h) {
+            return true
+        }
+    }
+    return false
 }
 
 // Whether the connection stays open after `res`: the request asked for that, and `res` has no

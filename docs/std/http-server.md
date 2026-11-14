@@ -5,7 +5,7 @@ description: A small HTTP/1.1 server for scripts, as Python's http.server is, wh
 
 # `std.http.server`
 
-A small HTTP/1.1 server for scripts, as Python's `http.server` is. A `Server` takes requests from as many connections as come and hands them to the program one at a time, as `next` gives them. The program answers each with `respond`. `serve_dir` serves a folder's files, as `python -m http.server` does, and [`calx serve`](../reference/command.md#serving-a-folder) runs it from the command line.
+A small HTTP/1.1 server for scripts, as Python's `http.server` is. A `Server` takes requests from as many connections as come and hands them to the program one at a time, as `next` gives them. The program answers each with `respond`. `serve_dir` serves a folder's files, as `python -m http.server` does, and [`calx serve`](../reference/command.md#serving-a-folder) runs it from the command line. It also [pushes to a browser](#pushing-to-a-browser) as things happen: over a WebSocket, as Python's `websockets.serve` does, or as a stream of events, which a browser's `EventSource` reads.
 
 It listens on loopback, `127.0.0.1`, unless it's given another address. So only programs on the same machine reach it, and Windows' firewall doesn't ask about it.
 
@@ -78,7 +78,24 @@ fn main() ! Error {
 | `content_type(name: String) -> String` | The `Content-Type` of a file from its name's extension: `text/html; charset=utf-8` for `.html`, `image/png` for `.png`, and `application/octet-stream` for one it doesn't know |
 | `reason(status: u16) -> str` | The reason phrase for a status, as RFC 9110 names it: `Not Found` for 404, or `""` for one it doesn't name |
 
-`Header` is [std.http](http.md)'s, `{ name: String, value: String }`.
+For [pushing to a browser](#pushing-to-a-browser):
+
+| Item | Gives |
+| --- | --- |
+| `server.next_event(timeout_ms: i64 = -1) -> ServerEvent?` | The next thing that happens, waiting as `next` does: a request, a WebSocket's message or close, or an event stream's end |
+| `ServerEvent` | `Request(Request)`, `Message(ServerSocket, Message)`, `Closed(ServerSocket, u16, String)`, with the code and reason it ended with, or `Ended(EventStream)` |
+| `server.upgrade(req: Request, protocols: List<String> = [], origins: List<String> = []) -> ServerSocket ! UpgradeError` | `req` answered by making its connection a WebSocket, with the first of `protocols` the request offers. A page from another site is turned away unless its origin is one of `origins` ([below](#websockets)) |
+| `server.send_text(s: ServerSocket, text: String) -> bool`, `send_binary(s, bytes: List<u8>) -> bool` | Sends a message. `false` if the socket has closed or is closing, so nothing was sent |
+| `server.close_socket(s: ServerSocket, code: u16 = 1000, why: String = "")` | Closes the socket with `code` and the reason `why`, once the client answers, or after 5 seconds |
+| `server.is_open(s: ServerSocket) -> bool`, `server.protocol(s) -> String?` | Whether neither side has closed the socket, and the subprotocol `upgrade` chose |
+| `server.max_message: usize` | The longest message it takes from a WebSocket: 64 MB to start with. A longer one closes the socket with 1009 |
+| `server.stream(req: Request, headers: List<Header> = []) -> EventStream` | `req` answered with a stream of events, `text/event-stream`, kept open for `send_event` ([below](#event-streams)) |
+| `server.send_event(s: EventStream, data: String, event: String = "", id: String = "") -> bool` | Sends an event: `data`, and the `event` type and `id` if they aren't empty. `false` if the stream has ended |
+| `server.end_stream(s: EventStream)` | Ends the stream, closing its connection |
+| `ServerSocket`, `EventStream` | A WebSocket or an event stream. Each can be copied, compared and kept in a list, and `s.id() -> u32` is a key for a map |
+| `UpgradeError` | Why `upgrade` didn't make a WebSocket: `NotWebSocket`, `Version`, `Origin(String)` or `Gone`. `{e}` says it in words |
+
+`Header` is [std.http](http.md)'s, `{ name: String, value: String }`, and `Message` is [std.http.websocket](http-websocket.md)'s, `Text(String)` or `Binary(List<u8>)`.
 
 ## How requests come
 
@@ -98,6 +115,119 @@ Some requests are answered by the server itself, without coming from `next`, and
 | `414 URI Too Long` | The request line is longer than 64 KB |
 | `431 Request Header Fields Too Large` | A header line is longer than 64 KB, or there are more than 100 |
 | `505 HTTP Version Not Supported` | HTTP/2 or later, which this server doesn't speak |
+
+## Pushing to a browser
+
+A page that shows what's happening, such as a server's load or a build's progress, needn't ask again and again. It opens a connection that stays open, and the server sends on it as things happen. `next_event` gives what comes back, beside the requests, so one loop does both:
+
+```calx
+import std.http.{Header, get}
+import std.http.server.{Server}
+import std.http.websocket.{Message, open}
+
+fn main() ! Error {
+    var server = try Server.listen(0)
+    // A browser's EventSource, played by std.http's client, which takes the whole stream.
+    var r = get("{server.url()}ticks", List<Header>(), 5000, 1024)
+    while not r.done() {
+        if let req = server.next(10) {
+            let s = server.stream(req)
+            for i in 1..4 {
+                _ = server.send_event(s, "tick {i}")
+            }
+            server.end_stream(s)
+        }
+    }
+    let resp = try r.wait()
+    println((String.from_utf8(resp.body) ?? String()).trim().replace("\n\n", " | "))    // out: data: tick 1 | data: tick 2 | data: tick 3
+
+    // A WebSocket, with std.http.websocket's client on a thread of its own.
+    let ws = open("ws://127.0.0.1:{server.port}/live")
+    try ws.send_text("ping")
+    loop {
+        match server.next_event(10) {
+            some(Request(req)) => {
+                let s = try server.upgrade(req)
+                println("{server.is_open(s)}")    // out: true
+            },
+            some(Message(s, Text(t))) => {
+                _ = server.send_text(s, "{t} back")
+                server.close_socket(s)
+            },
+            _ => {},
+        }
+        if let Message.Text(t) = try ws.receive(0) {
+            println(t)    // out: ping back
+            break
+        }
+    }
+    ws.close()
+}
+```
+
+A dashboard keeps the sockets it has, and sends to each in turn. `next_event` waits at most a second, so the numbers go out every second whether or not anything came:
+
+```
+import std.http.server.{Response, Server, ServerSocket, from_dir}
+
+fn main() ! Error {
+    var server = try Server.listen(8000)
+    var live = List<ServerSocket>()
+    loop {
+        match server.next_event(1000) {
+            some(Request(req)) => {
+                if req.path == "/live" {
+                    match server.upgrade(req) {
+                        ok(s) => live.push(s),
+                        err(e) => eprintln("{req.client}: {e}"),
+                    }
+                } else {
+                    server.respond(req, from_dir("public", req))
+                }
+            },
+            some(Closed(s, _, _)) => live.retain(|x| x != s),
+            _ => {},
+        }
+        let stats = read_stats()    // the program's own
+        for s in live {
+            _ = server.send_text(s, stats)
+        }
+    }
+}
+```
+
+In the page, `new WebSocket("ws://" + location.host + "/live")` connects, and its `onmessage` gets each message. An event stream is `new EventSource("/live")`, with `onmessage`, or `addEventListener(type, ...)` for events sent with an `event` type.
+
+### WebSockets
+
+`upgrade` answers a WebSocket handshake (RFC 6455) with `101 Switching Protocols`, and from then on the connection carries messages.
+
+- **Messages.** Each comes whole from `next_event`, as `Message(s, Text(t))` or `Message(s, Binary(b))`, its frames joined. Text is checked to be UTF-8. `send_text` and `send_binary` send one as a single frame, unmasked, as a server sends it. A message longer than `max_message` closes the socket.
+- **Pings and closes.** The server answers a client's ping with a pong of the same bytes, and a client's close with the same code, then closes the connection. `close_socket` sends a close and waits for the client's answer, for 5 seconds at most.
+- **The end.** Each socket ends with one `Closed`, which carries the code it ended with. That's the client's, or the server's own when the client broke the protocol, and the client is told so in a close:
+
+| Code | When |
+| --- | --- |
+| The client's, such as `1000` or `1001` | The client closed it, or answered `close_socket`. `1005` is a close that gave no code |
+| `1002` | A frame that RFC 6455 doesn't allow from a client: one that isn't masked, has a reserved bit set or an unknown opcode, or is a control frame in pieces or longer than 125 bytes. Also a message's next frame without its first, a new message before the last one ended, or a close with a code a close can't carry |
+| `1007` | Text, or a close's reason, that isn't UTF-8 |
+| `1009` | A message longer than `max_message` |
+| `1006` | The connection ended without a close, or the client didn't answer `close_socket` in 5 seconds |
+
+- **Who may connect.** A page in any browser tab can open a WebSocket to any address, a server on loopback included, and its browser sends the page's `Origin`. So `upgrade` turns away a page from another site with `403 Forbidden`, unless its origin is one of `origins`, compared without case, or `origins` has `"*"`. A request with no `Origin` isn't from a page, and a page served by this server has the server's own address as its origin, so both are let in. An origin of `null`, from a page opened as a file, is another site's.
+- **Handshakes it turns away.** A request that isn't a WebSocket handshake gets `400 Bad Request`, and one for a version other than 13 gets `426 Upgrade Required`, with `Sec-WebSocket-Version: 13`. `upgrade` fails with why in each case, so the program can log it.
+- **Subprotocols.** The client offers them in `Sec-WebSocket-Protocol`. `upgrade` takes the first of `protocols` that the client offered, in the server's order, and `protocol(s)` says which. With none offered or none in common, there's none.
+- **No extensions.** It agrees to none, so messages aren't compressed.
+
+### Event streams
+
+`stream` answers a request with `200 OK` and `Content-Type: text/event-stream`, with no length, and the connection stays open for events until `end_stream` or the browser goes. The connection is the stream's alone, and closes when it ends.
+
+- **Events.** `send_event(s, data)` sends `data` as `data:` lines, one for each line of it, which the browser joins with `\n`. With `event`, the event has that type, which `addEventListener` listens for, and with `id`, the browser keeps that id and sends it as `Last-Event-ID` when it connects again, so the server can send what it missed.
+- **The end.** Each stream ends with one `Ended` from `next_event`: when the browser closes the connection, or `end_stream` ends it. `send_event` gives `false` after.
+- **Headers.** `stream` sends `Cache-Control: no-cache` and the headers it's given. A `HEAD` request gets the head, and its stream ends at once.
+
+An event stream goes one way, from the server, over plain HTTP, and a browser connects again by itself when it's cut off. A WebSocket goes both ways. A browser keeps at most six HTTP/1.1 connections to one server, so a page should open one stream, not one for each thing it shows.
 
 ## Serving a folder
 
@@ -130,6 +260,9 @@ Serving HTTP on 127.0.0.1 port 8000 (http://127.0.0.1:8000/) ...
 - **No HTTPS.** Python 3.14's `--tls-cert` has no match here yet.
 - **A zero byte.** A path with `%00` in it gets `404`. Python's handler raises an error at it and closes the connection without an answer.
 - **Pages.** Error pages and folder listings are its own short HTML, with the same statuses, links and names as Python's.
+- **WebSockets in the loop.** Python's `websockets.serve` runs a coroutine for each connection. Here each socket's messages come from `next_event`, in the one loop, with the requests.
+- **Origins.** `websockets.serve` lets a page from any site connect unless it's given `origins`. `upgrade` lets in only the server's own pages and requests that aren't from a page, unless it's given more, since any page a browser has open can reach a server on loopback.
+- **No pings of its own.** `websockets.serve` pings each client every 20 seconds, and closes a connection whose client doesn't answer. This server answers pings, and leaves it to the system to find a connection that's gone.
 
 ## Checked against Python
 
@@ -147,6 +280,24 @@ The [tests](../../tests/std/http_server.calx) send requests to a server in the s
 - **Compared:** status, `Location`, `Content-Length`, `Last-Modified`, the type, the body, and each listing's links and names.
 
 They answered the same to all but `/%00`, where Python's handler fails.
+
+[tests/std/http_server_push.calx](../../tests/std/http_server_push.calx) checks the pushes with a client of its own on std.net, which sends what a browser would and frames no browser should:
+
+- **The handshake:** RFC 6455's own example key, whose answer the RFC gives, and the subprotocol chosen.
+- **Messages:** echoes, a ping, a message in three frames with a ping between them, and binary messages whose lengths take 16 and 64 bits.
+- **Closes:** closes from either side, a client that goes without a close, and a close the client never answers, which ends after 5 seconds.
+- **What's turned away:** each frame that breaks the protocol, sent right behind the handshake, a message past `max_message` whole and in parts, and handshakes refused by version and by origin.
+- **Event streams:** events with types, ids and lines ending in `\r\n`, `\r` and `\n`, a browser that goes, `end_stream`, and `HEAD`.
+- **Its own client:** [std.http.websocket](http-websocket.md)'s client, on a thread of its own, against the server.
+
+On Linux, headless Chrome 157 also loaded a page from the server whose script opened a WebSocket and an `EventSource`, and the two agreed on every point:
+
+- the subprotocol;
+- text with `é` in it, a message of 70,000 characters, and binary, both ways;
+- the server's close with its code and reason, which Chrome called clean, and Chrome's own close;
+- events of several lines, with their types and ids;
+- the stream's end when the page closed it;
+- a page from `127.0.0.1` turned away at `localhost`, which is another origin.
 
 ## Speed
 
