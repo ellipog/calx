@@ -218,6 +218,8 @@ fn main() ! Error {
 | `requests.post(url, data={...}, files={...})` | `post_form(url, headers, Form.new().field(n, v).file(n, filename, bytes), timeout_ms, limit)` from [`std.http`](../std/http.md), a `multipart/form-data` body with its boundary and quoting done |
 | `http.server.HTTPServer`, `BaseHTTPRequestHandler`, `do_GET` | `Server.listen(port)`, then `next()` for each request and `respond(req, res)` from [`std.http.server`](../std/http-server.md) |
 | `websockets.connect(url)`, `await ws.send(m)`, `await ws.recv()` | `connect(url)`, `ws.send_text(m)`, `ws.receive(timeout_ms)` from [`std.http.websocket`](../std/http-websocket.md), on a thread of its own rather than `asyncio` |
+| `websockets.serve(handler, host, port)`, `await ws.send(m)`, `async for m in ws` | `server.upgrade(req)`, `server.send_text(s, m)`, and each message from `server.next_event()` in [`std.http.server`](../std/http-server.md#websockets) |
+| A `text/event-stream` response kept open, written to as events happen | `server.stream(req)`, then `server.send_event(s, data)` ([event streams](../std/http-server.md#event-streams)) |
 | `hashlib.sha256(b).hexdigest()` | `hex(sha256(b))`, with [`std.hash`](../std/hash.md) and [`std.bytes`](../std/bytes.md) |
 | `base64.b64encode(b)` | `base64(b)` from [`std.bytes`](../std/bytes.md) |
 | `zipfile`, `tarfile`, `gzip` | [`std.zip`](../std/zip.md), [`std.tar`](../std/tar.md), [`std.zlib`](../std/zlib.md) |
