@@ -97,11 +97,13 @@ Everything is as the source writes it. Types, defaults and values are text, and 
 
 | Type | Fields |
 | --- | --- |
-| `StructDecl` | `name`, `is_pub`, `generics`, the names of its generic parameters, `fields: List<Field>`, `doc` |
-| `EnumDecl` | `name`, `is_pub`, `generics`, `variants: List<Variant>`, `repr`, such as `"u8"` for `enum Flag: u8` or `""`, `doc` |
-| `FnDecl` | `name`, `is_pub`, `is_unsafe`, `generics`, `params: List<Param>`, `result: TypeRef`, `error: TypeRef`, `can_fail`, `doc` |
+| `StructDecl` | `name`, `is_pub`, `generics`, the names of its generic parameters, `lengths`, those of them that are lengths, `fields: List<Field>`, `doc` |
+| `EnumDecl` | `name`, `is_pub`, `generics`, `lengths`, `variants: List<Variant>`, `repr`, such as `"u8"` for `enum Flag: u8` or `""`, `doc` |
+| `FnDecl` | `name`, `is_pub`, `is_unsafe`, `generics`, `lengths`, `params: List<Param>`, `result: TypeRef`, `error: TypeRef`, `can_fail`, `doc` |
 
 `doc` is the declaration's `///` lines, joined with newlines, without the slashes and the space after them.
+
+`generics` names every generic parameter, types and lengths, in order, and `lengths` names those that are [lengths](../reference/generics.md#lengths), `const N: usize` (CLX-326). `decl.generic_params()` writes them as an `impl` or a function declares them, `<T, const N: usize>`, and `decl.generic_args()` as the type's arguments, `<T, N>`. Both are `""` for a declaration that isn't generic, so `"impl{decl.generic_params()} Show for {decl.name}{decl.generic_args()}"` fits either.
 
 | Type | Fields |
 | --- | --- |
@@ -125,7 +127,7 @@ A `TypeRef` is a type as it's written:
 | `text` | The whole type: `List<VarInt>` |
 | `name` | A named type's name, such as `List` or `std.c.int`, or a `dyn` type's interface |
 | `args: List<TypeRef>` | The types inside it |
-| `len` | An array's length, as written |
+| `len` | An array's length, or a `Length`, as written |
 
 | `TypeKind` | Written | Has |
 | --- | --- | --- |
@@ -137,6 +139,7 @@ A `TypeRef` is a type as it's written:
 | `Pointer` | `*T` and `*const T` | `args[0]` |
 | `Dyn` | `dyn Shape` | `name` |
 | `SelfType` | `Self` | Nothing |
+| `Length` | `8` in `Grid<8>`, a length given for a length parameter | `len`, and `name`, as written |
 
 ## Generated
 
