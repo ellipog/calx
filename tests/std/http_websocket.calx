@@ -5,6 +5,7 @@
 // protocol, a message past the limit, a refusal, and messages sent while it opens (CLX-320). The
 // server says what it saw of each close, so the codes the client sends are checked too.
 import std.bytes.{base64}
+import std.env.{os}
 import std.hash.{sha1}
 import std.http.{Header}
 import std.http.websocket.{Message, WebSocket, connect, open}
@@ -107,7 +108,7 @@ fn handshake(net: Net, c: Conn, head: String) -> bool {
 }
 
 // What the server does with a text message.
-fn act(net: Net, c: Conn, s: String, closing: mut Set<u32>) {
+fn act(net: Net, c: Conn, s: String, closing: mut Set<u32>, done: mut Set<u32>) {
     if s.starts_with("echo:") {
         net.write(c, text_frame(s))
     } else if s == "fragments" {
@@ -124,6 +125,7 @@ fn act(net: Net, c: Conn, s: String, closing: mut Set<u32>) {
         closing.insert(c.id())
         net.write(c, close_frame(4000, "bye"))
     } else if s == "drop" {
+        done.insert(c.id())
         net.close(c)
     } else if s == "badutf8" {
         net.write(c, frame(1, [0xC3, 0x28], true, false))
@@ -134,8 +136,9 @@ fn act(net: Net, c: Conn, s: String, closing: mut Set<u32>) {
     }
 }
 
-// Each whole frame at the start of `buf`, taken off it.
-fn frames(net: Net, c: Conn, buf: mut List<u8>, closing: mut Set<u32>, log: mut Sender<String>) {
+// Each whole frame at the start of `buf`, taken off it. A connection the server ends, after a
+// close or a `drop`, goes in `done`.
+fn frames(net: Net, c: Conn, buf: mut List<u8>, closing: mut Set<u32>, done: mut Set<u32>, log: mut Sender<String>) {
     var start: usize = 0
     loop {
         let avail = buf.len() - start
@@ -179,7 +182,7 @@ fn frames(net: Net, c: Conn, buf: mut List<u8>, closing: mut Set<u32>, log: mut 
             log.send(String("a frame from the client wasn't masked"))
         }
         if op == 1 {
-            act(net, c, String.from_utf8(payload) ?? String(), mut closing)
+            act(net, c, String.from_utf8(payload) ?? String(), mut closing, mut done)
         } else if op == 2 {
             net.write(c, frame(2, payload, true, false))
         } else if op == 10 {
@@ -193,6 +196,7 @@ fn frames(net: Net, c: Conn, buf: mut List<u8>, closing: mut Set<u32>, log: mut 
                 log.send(if reason.is_empty() { "the client closed with {code}" } else { "the client closed with {code} {reason}" })
                 net.write(c, close_frame(u16.wrap(code), ""))
             }
+            done.insert(c.id())
             net.close(c)
         }
     }
@@ -209,6 +213,7 @@ impl Task for Serving {
         var bufs = Map<u32, List<u8>>()
         var upgraded = Set<u32>()
         var closing = Set<u32>()
+        var done = Set<u32>()
         var events = List<Event>()
         loop {
             net.poll(-1, mut events)
@@ -229,20 +234,31 @@ impl Task for Serving {
                             }
                         }
                         if upgraded.contains(c.id()) {
-                            frames(net, c, mut buf, mut closing, mut self.log)
+                            frames(net, c, mut buf, mut closing, mut done, mut self.log)
                         }
                         bufs.insert(c.id(), buf)
                     },
                     Closed(c) => {
+                        if upgraded.contains(c.id()) and not done.contains(c.id()) {
+                            self.log.send(String("the client dropped the connection"))
+                        }
                         _ = bufs.remove(c.id())
                         upgraded.remove(c.id())
                         closing.remove(c.id())
+                        done.remove(c.id())
                     },
                     _ => {},
                 }
             }
         }
     }
+}
+
+// Whether the server saw what it should of the client's close after a frame that broke the
+// protocol: the close with `code`, except on Windows, where WinHTTP finds such a frame itself
+// and ends the connection with no close it lets the client send.
+fn broken_close(said: String, code: u32) -> bool {
+    return said == (if os() == "windows" { String("the client dropped the connection") } else { "the client closed with {code}" })
 }
 
 // The next message, as a line.
@@ -306,12 +322,12 @@ fn main() {
     let bad = connect("{base}/")!
     bad.send_text("badutf8")!
     println(next(bad))    // out: error: the server broke the WebSocket protocol
-    println(log.wait()!)    // out: the client closed with 1007
+    println("{broken_close(log.wait()!, 1007)}")    // out: true
     bad.close()
     let masked = connect("{base}/")!
     masked.send_text("masked")!
     println(next(masked))    // out: error: the server broke the WebSocket protocol
-    println(log.wait()!)    // out: the client closed with 1002
+    println("{broken_close(log.wait()!, 1002)}")    // out: true
     masked.close()
     let small = connect("{base}/", limit: 100)!
     small.send_text("toolong")!

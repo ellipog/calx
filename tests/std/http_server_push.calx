@@ -286,7 +286,9 @@ fn main() {
     bye.push(0xE8)
     bye.extend(String("bye").to_bytes())
     net.write(p.conn, frame(0x88, bye))
-    pump(mut app, net, mut p, 1, 2)
+    // Waiting for the connection to close too: on Windows the close frame and the end of the
+    // connection come in separate polls, as std.net closes there once the frame has gone.
+    pump(mut app, net, mut p, 1, 2, closed: true)
     println("{shown(p)} | {said(mut app)}")    // out: close 1000 [closed] | upgraded -, closed 1000 bye
 
     // Frames that break the protocol, each sent with its handshake in one write, so the server
@@ -310,7 +312,7 @@ fn main() {
         let c = net.connect("127.0.0.1", port)!
         net.write(c, raw)
         var q = Peer { conn: c, got: List<u8>(), closed: false }
-        pump(mut app, net, mut q, 1, 2)
+        pump(mut app, net, mut q, 1, 2, closed: true)
         println("{name}: {shown(q)} | {said(mut app)}")
     }
     // out: not masked: close 1002 [closed] | upgraded -, closed 1002
@@ -330,14 +332,14 @@ fn main() {
     p = connect(net, port, handshake(port, String()))
     pump(mut app, net, mut p, 0, 1)
     net.write(p.conn, frame(0x82, bytes(2000)))
-    pump(mut app, net, mut p, 1, 2)
+    pump(mut app, net, mut p, 1, 2, closed: true)
     println("{shown(p)} | {said(mut app)}")    // out: close 1009 [closed] | upgraded -, closed 1009
     p = connect(net, port, handshake(port, String()))
     pump(mut app, net, mut p, 0, 1)
     var two = frame(0x02, bytes(600))
     two.extend(frame(0x80, bytes(600)))
     net.write(p.conn, two)
-    pump(mut app, net, mut p, 1, 2)
+    pump(mut app, net, mut p, 1, 2, closed: true)
     println("{shown(p)} | {said(mut app)}")    // out: close 1009 [closed] | upgraded -, closed 1009
     app.server.max_message = 67108864
 
