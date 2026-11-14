@@ -512,8 +512,7 @@ private:
         }
         int kind = 0;
         switch (t->kind) {
-            // A length, `8` in `Grid<8>`, is named by its text (CLX-324).
-            case TypeExprKind::named: case TypeExprKind::length: kind = 0; break;
+            case TypeExprKind::named: kind = 0; break;
             case TypeExprKind::optional: kind = 1; break;
             case TypeExprKind::array: kind = 2; break;
             case TypeExprKind::tuple: kind = 3; break;
@@ -521,6 +520,8 @@ private:
             case TypeExprKind::pointer: kind = 5; break;
             case TypeExprKind::dyn: kind = 6; break;
             case TypeExprKind::self: kind = 7; break;
+            // A length, `8` in `Grid<8>`, with its text as its name and its `len` (CLX-324, CLX-326).
+            case TypeExprKind::length: kind = 8; break;
         }
         put_count(out, static_cast<std::size_t>(kind));
         put(out, span_text(t->span));
@@ -535,7 +536,8 @@ private:
         } else {
             put(out, "");
         }
-        put(out, t->kind == TypeExprKind::array && t->length ? span_text(t->length->span) : std::string());
+        put(out, (t->kind == TypeExprKind::array || t->kind == TypeExprKind::length) && t->length ? span_text(t->length->span)
+                                                                                                : std::string());
         std::vector<const TypeExpr*> args;
         if (t->kind == TypeExprKind::optional || t->kind == TypeExprKind::array || t->kind == TypeExprKind::pointer) {
             if (t->inner) args.push_back(t->inner);
@@ -554,9 +556,13 @@ private:
         put_count(out, 0);
     }
 
+    // Each generic parameter's name, and whether it's a length, `const N: usize` (CLX-326).
     void write_generics(std::string& out, const Item* it) {
         put_count(out, it->generics.size());
-        for (const GenericParam& g : it->generics) put(out, text(g.name));
+        for (const GenericParam& g : it->generics) {
+            put(out, text(g.name));
+            put_flag(out, g.is_const);
+        }
     }
 
     void write_fields(std::string& out, const Slice<FieldDecl>& fields) {

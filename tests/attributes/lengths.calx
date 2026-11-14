@@ -1,0 +1,91 @@
+// An attribute sees which generic parameters are lengths, `const N: usize`, and writes an impl
+// over them, and sees a length given for one, `2` in `Ring<i32, 2>`, as one (CLX-326).
+// file: main.calx
+import gen.{sized, sized_enum, kinds}
+
+@sized
+struct Ring<T, const N: usize> {
+    items: [T; N]
+    at: usize
+}
+
+@sized_enum
+enum Cells<const W: usize> {
+    Row([u8; W])
+    Empty
+}
+
+@kinds
+struct Uses {
+    small: Ring<i32, 2>
+}
+
+fn main() {
+    let r = Ring { items: [1, 2, 3], at: 0 }
+    let c: Cells<4> = Cells.Empty
+    println("{r.capacity_of()} {c.capacity_of()} {r.at}")    // out: 3 4 0
+    println(uses_kinds())                                    // out: small: Ring<i32, 2> = Named Named(i32) Length(2, 2)
+    let u = Uses { small: Ring { items: [1, 2], at: 0 } }
+    println("{u.small.items}")                               // out: [1, 2]
+}
+
+// file: gen.calx
+import std.meta.{StructDecl, EnumDecl, Generated, TypeKind, TypeRef}
+
+/// Gives the type a method that says how many its arrays hold.
+@attribute
+pub fn sized(decl: StructDecl) -> Generated {
+    var g = Generated.new()
+    g.add(capacity(decl.generic_params(), decl.name, decl.generic_args(), decl.lengths[0]))
+    return g
+}
+
+/// The same for an enum.
+@attribute
+pub fn sized_enum(decl: EnumDecl) -> Generated {
+    var g = Generated.new()
+    g.add(capacity(decl.generic_params(), decl.name, decl.generic_args(), decl.lengths[0]))
+    return g
+}
+
+fn capacity(params: String, name: String, args: String, n: String) -> String {
+    return #"
+        impl#{params} #{name}#{args} {
+            fn capacity_of(self) -> usize {
+                _ = self
+                return #{n}
+            }
+        }
+        "#
+}
+
+/// Says what kind of type each field's type and its arguments are.
+@attribute
+pub fn kinds(decl: StructDecl) -> Generated {
+    var s = String()
+    for f in decl.fields {
+        s.push_str("{f.name}: {f.ty.text} = {kind(f.ty)}")
+        for a in f.ty.args {
+            if a.kind == TypeKind.Length {
+                s.push_str(" {kind(a)}({a.name}, {a.len})")
+            } else {
+                s.push_str(" {kind(a)}({a.name})")
+            }
+        }
+    }
+    var g = Generated.new()
+    g.add(##"
+        fn uses_kinds() -> String {
+            return #"##{s}"#
+        }
+        "##)
+    return g
+}
+
+fn kind(t: TypeRef) -> String {
+    return match t.kind {
+        TypeKind.Named => "Named",
+        TypeKind.Length => "Length",
+        _ => "other",
+    }
+}

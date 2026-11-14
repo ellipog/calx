@@ -26,6 +26,8 @@ pub enum TypeKind {
     Dyn
     /// `Self`.
     SelfType
+    /// `8` in `Grid<8>`, a length given for a length parameter: `len`, and `name`, as written (CLX-326).
+    Length
 }
 
 /// A type as the declaration writes it.
@@ -36,7 +38,7 @@ pub struct TypeRef {
     /// A named type's name as written, such as `List` or `std.c.int`, or a `dyn` type's interface.
     pub name: String
     pub args: List<TypeRef>
-    /// An array's length, as written.
+    /// An array's length, or a `Length`, as written.
     pub len: String
 }
 
@@ -63,8 +65,10 @@ pub struct Field {
 pub struct StructDecl {
     pub name: String
     pub is_pub: bool
-    /// The names of its generic parameters.
+    /// The names of its generic parameters, types and lengths, in order.
     pub generics: List<String>
+    /// Those of `generics` that are lengths, `const N: usize`, rather than types (CLX-326).
+    pub lengths: List<String>
     pub fields: List<Field>
     pub doc: String
 }
@@ -85,6 +89,8 @@ pub struct EnumDecl {
     pub name: String
     pub is_pub: bool
     pub generics: List<String>
+    /// Those of `generics` that are lengths, `const N: usize`.
+    pub lengths: List<String>
     pub variants: List<Variant>
     /// Its representation as written, for `enum Flag: u8`, or `""`.
     pub repr: String
@@ -117,6 +123,8 @@ pub struct FnDecl {
     pub is_pub: bool
     pub is_unsafe: bool
     pub generics: List<String>
+    /// Those of `generics` that are lengths, `const N: usize`.
+    pub lengths: List<String>
     pub params: List<Param>
     /// What it returns, or a `Tuple` with no `args` when it returns nothing.
     pub result: TypeRef
@@ -124,6 +132,70 @@ pub struct FnDecl {
     pub error: TypeRef
     pub can_fail: bool
     pub doc: String
+}
+
+impl StructDecl {
+    /// Its generic parameters as an impl declares them, `<T, const N: usize>`, or `""`.
+    pub fn generic_params(self) -> String {
+        return params_text(self.generics, self.lengths)
+    }
+
+    /// Its generic parameters as its type's arguments, `<T, N>`, or `""`.
+    pub fn generic_args(self) -> String {
+        return args_text(self.generics)
+    }
+}
+
+impl EnumDecl {
+    /// Its generic parameters as an impl declares them, `<T, const N: usize>`, or `""`.
+    pub fn generic_params(self) -> String {
+        return params_text(self.generics, self.lengths)
+    }
+
+    /// Its generic parameters as its type's arguments, `<T, N>`, or `""`.
+    pub fn generic_args(self) -> String {
+        return args_text(self.generics)
+    }
+}
+
+impl FnDecl {
+    /// Its generic parameters as a function declares them, `<T, const N: usize>`, or `""`.
+    pub fn generic_params(self) -> String {
+        return params_text(self.generics, self.lengths)
+    }
+
+    /// Its generic parameters as a call gives them, `<T, N>`, or `""`.
+    pub fn generic_args(self) -> String {
+        return args_text(self.generics)
+    }
+}
+
+// `<T, const N: usize>`: each of `names`, with `const` and its type for each length.
+fn params_text(names: List<String>, lengths: List<String>) -> String {
+    if names.is_empty() {
+        return String()
+    }
+    var s = String("<")
+    for i in 0..names.len() {
+        if i > 0 {
+            s.push_str(", ")
+        }
+        if lengths.contains(names[i]) {
+            s.push_str("const {names[i]}: usize")
+        } else {
+            s.push_str(names[i])
+        }
+    }
+    s.push_str(">")
+    return s
+}
+
+// `<T, N>`.
+fn args_text(names: List<String>) -> String {
+    if names.is_empty() {
+        return String()
+    }
+    return "<{names.join(", ")}>"
 }
 
 /// The code an attribute gives back, which the compiler adds to the module the declaration is in.
@@ -224,9 +296,9 @@ impl Request {
         let name = self.piece()
         let is_pub = self.flag_piece()
         let doc = self.piece()
-        let generics = self.names()
+        let (generics, lengths) = self.generics()
         let fields = self.fields()
-        return StructDecl { name: name, is_pub: is_pub, generics: generics, fields: fields, doc: doc }
+        return StructDecl { name: name, is_pub: is_pub, generics: generics, lengths: lengths, fields: fields, doc: doc }
     }
 
     /// The declaration the use is on, when it's an enum.
@@ -234,7 +306,7 @@ impl Request {
         let name = self.piece()
         let is_pub = self.flag_piece()
         let doc = self.piece()
-        let generics = self.names()
+        let (generics, lengths) = self.generics()
         let repr = self.piece()
         var variants = List<Variant>()
         let n = self.count()
@@ -251,7 +323,9 @@ impl Request {
             let fields = self.fields()
             variants.push(Variant { name: vname, payload: payload, fields: fields, value: value, doc: vdoc })
         }
-        return EnumDecl { name: name, is_pub: is_pub, generics: generics, variants: variants, repr: repr, doc: doc }
+        return EnumDecl {
+            name: name, is_pub: is_pub, generics: generics, lengths: lengths, variants: variants, repr: repr, doc: doc,
+        }
     }
 
     /// The declaration the use is on, when it's a function.
@@ -259,7 +333,7 @@ impl Request {
         let name = self.piece()
         let is_pub = self.flag_piece()
         let doc = self.piece()
-        let generics = self.names()
+        let (generics, lengths) = self.generics()
         let is_unsafe = self.flag_piece()
         var params = List<Param>()
         let n = self.count()
@@ -279,7 +353,7 @@ impl Request {
         let can_fail = self.flag_piece()
         let error = self.type_ref()
         return FnDecl {
-            name: name, is_pub: is_pub, is_unsafe: is_unsafe, generics: generics, params: params,
+            name: name, is_pub: is_pub, is_unsafe: is_unsafe, generics: generics, lengths: lengths, params: params,
             result: result, error: error, can_fail: can_fail, doc: doc,
         }
     }
@@ -309,6 +383,21 @@ impl Request {
         return self.piece() == "1"
     }
 
+    // The generic parameters' names, and those of them that are lengths.
+    fn generics(mut self) -> (List<String>, List<String>) {
+        var names = List<String>()
+        var lengths = List<String>()
+        let n = self.count()
+        for _ in 0..n {
+            let name = self.piece()
+            if self.flag_piece() {
+                lengths.push(name.copy())
+            }
+            names.push(name)
+        }
+        return (names, lengths)
+    }
+
     fn names(mut self) -> List<String> {
         var out = List<String>()
         let n = self.count()
@@ -328,6 +417,7 @@ impl Request {
             5 => TypeKind.Pointer,
             6 => TypeKind.Dyn,
             7 => TypeKind.SelfType,
+            8 => TypeKind.Length,
             _ => TypeKind.Named,
         }
         let text = self.piece()
