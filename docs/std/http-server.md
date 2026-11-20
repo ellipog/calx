@@ -91,6 +91,7 @@ For [pushing to a browser](#pushing-to-a-browser):
 | `server.close_socket(s: ServerSocket, code: u16 = 1000, why: String = "")` | Closes the socket with `code` and the reason `why`, once the client answers, or after 5 seconds |
 | `server.is_open(s: ServerSocket) -> bool`, `server.protocol(s) -> String?` | Whether neither side has closed the socket, and the subprotocol `upgrade` chose |
 | `server.max_message: usize` | The longest message it takes from a WebSocket: 64 MB to start with. A longer one closes the socket with 1009 |
+| `server.ping_interval_ms: u64`, `server.ping_timeout_ms: u64` | How often it pings each open WebSocket, and how long a ping waits for its pong before the socket is closed with 1011: 20 seconds each to start with, as Python's `websockets.serve` does. 0 turns pings off, or waits forever ([below](#keeping-sockets-alive)) |
 | `server.stream(req: Request, headers: List<Header> = []) -> EventStream` | `req` answered with a stream of events, `text/event-stream`, kept open for `send_event` ([below](#event-streams)) |
 | `server.send_event(s: EventStream, data: String, event: String = "", id: String = "") -> bool` | Sends an event: `data`, and the `event` type and `id` if they aren't empty. `false` if the stream has ended |
 | `server.end_stream(s: EventStream)` | Ends the stream, closing its connection |
@@ -205,7 +206,7 @@ In the page, `new WebSocket("ws://" + location.host + "/live")` connects, and it
 `upgrade` answers a WebSocket handshake (RFC 6455) with `101 Switching Protocols`, and from then on the connection carries messages.
 
 - **Messages.** Each comes whole from `next_event`, as `Message(s, Text(t))` or `Message(s, Binary(b))`, its frames joined. Text is checked to be UTF-8. `send_text` and `send_binary` send one as a single frame, unmasked, as a server sends it. A message longer than `max_message` closes the socket.
-- **Pings and closes.** The server answers a client's ping with a pong of the same bytes, and a client's close with the same code, then closes the connection. `close_socket` sends a close and waits for the client's answer, for 5 seconds at most.
+- **Pings and closes.** The server answers a client's ping with a pong of the same bytes, and a client's close with the same code, then closes the connection. It pings each client too, and closes one that doesn't answer ([below](#keeping-sockets-alive)). `close_socket` sends a close and waits for the client's answer, for 5 seconds at most.
 - **The end.** Each socket ends with one `Closed`, which carries the code it ended with. That's the client's, or the server's own when the client broke the protocol, and the client is told so in a close:
 
 | Code | When |
@@ -214,12 +215,30 @@ In the page, `new WebSocket("ws://" + location.host + "/live")` connects, and it
 | `1002` | A frame that RFC 6455 doesn't allow from a client: one that isn't masked, has a reserved bit set or an unknown opcode, or is a control frame in pieces or longer than 125 bytes. Also a message's next frame without its first, a new message before the last one ended, or a close with a code a close can't carry |
 | `1007` | Text, or a close's reason, that isn't UTF-8 |
 | `1009` | A message longer than `max_message` |
+| `1011` | The client didn't answer a ping within `ping_timeout_ms`. Its reason is `keepalive ping timeout` |
 | `1006` | The connection ended without a close, or the client didn't answer `close_socket` in 5 seconds |
 
 - **Who may connect.** A page in any browser tab can open a WebSocket to any address, a server on loopback included, and its browser sends the page's `Origin`. So `upgrade` turns away a page from another site with `403 Forbidden`, unless its origin is one of `origins`, compared without case, or `origins` has `"*"`. A request with no `Origin` isn't from a page, and a page served by this server has the server's own address as its origin, so both are let in. An origin of `null`, from a page opened as a file, is another site's.
 - **Handshakes it turns away.** A request that isn't a WebSocket handshake gets `400 Bad Request`, and one for a version other than 13 gets `426 Upgrade Required`, with `Sec-WebSocket-Version: 13`. `upgrade` fails with why in each case, so the program can log it.
 - **Subprotocols.** The client offers them in `Sec-WebSocket-Protocol`. `upgrade` takes the first of `protocols` that the client offered, in the server's order, and `protocol(s)` says which. With none offered or none in common, there's none.
 - **No extensions.** It agrees to none, so messages aren't compressed.
+
+### Keeping sockets alive
+
+A client on a phone or a laptop can go without a close: the laptop sleeps, or the Wi-Fi drops. Nothing comes to say so, and without pings the server would keep the socket, and whatever the program queues for it, until the system notices, which can take minutes or hours. So the server pings each open WebSocket every `ping_interval_ms`, and closes one whose client hasn't answered within `ping_timeout_ms`, as Python's `websockets.serve(ping_interval=20, ping_timeout=20)` does:
+
+- **When.** A socket's first ping goes out `ping_interval_ms` after `upgrade`, and each one after that goes `ping_interval_ms` after the last was answered. Each ping carries 4 bytes, and only a pong with the same bytes answers it. A browser answers pings by itself, and so does [std.http.websocket](http-websocket.md)'s client.
+- **No answer.** A ping that has waited `ping_timeout_ms` closes the socket: the server sends a close with `1011` and `keepalive ping timeout`, in case the client is still there, closes the connection at once, and `next_event` gives the socket's `Closed` with that code and reason.
+- **In the loop.** Pings go out and time out while `next` or `next_event` waits, which wake for them, so a loop that calls either often keeps its sockets alive. A pong that came while the program was busy counts, since the server reads what came before it looks at the time.
+- **Setting them.** Both are 20 seconds to start with, and can be changed at any time; the next poll goes by the new values. A `ping_interval_ms` of 0 sends no pings, and a `ping_timeout_ms` of 0 keeps pinging but never closes a socket for not answering.
+
+A server for clients that may sleep for a while, with pings every 20 seconds and a minute to answer:
+
+```
+var server = try Server.listen(8000)
+server.ping_interval_ms = 20000
+server.ping_timeout_ms = 60000
+```
 
 ### Event streams
 
@@ -295,7 +314,7 @@ fn main() ! Error {
 - **Pages.** Error pages and folder listings are its own short HTML, with the same statuses, links and names as Python's.
 - **WebSockets in the loop.** Python's `websockets.serve` runs a coroutine for each connection. Here each socket's messages come from `next_event`, in the one loop, with the requests.
 - **Origins.** `websockets.serve` lets a page from any site connect unless it's given `origins`. `upgrade` lets in only the server's own pages and requests that aren't from a page, unless it's given more, since any page a browser has open can reach a server on loopback.
-- **No pings of its own.** `websockets.serve` pings each client every 20 seconds, and closes a connection whose client doesn't answer. This server answers pings, and leaves it to the system to find a connection that's gone.
+- **Pings.** Both ping each client every 20 seconds to start with, and close one that doesn't answer within 20 seconds. `ping_interval` and `ping_timeout` are seconds, as floats, and `None` turns them off; here they're `ping_interval_ms` and `ping_timeout_ms`, and 0 turns them off. Both send a close with 1011 to a client that didn't answer, but where a `websockets` handler sees `1006`, as no close came back, `next_event` gives `1011` and `keepalive ping timeout`, so a program can tell a client that stopped answering from one whose connection broke.
 
 ## Checked against Python
 

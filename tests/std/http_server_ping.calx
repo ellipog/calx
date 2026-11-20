@@ -1,0 +1,255 @@
+// std.http.server's keepalive (CLX-394): it pings each open WebSocket every `ping_interval_ms`,
+// and closes one whose client hasn't answered within `ping_timeout_ms` with 1011, as Python's
+// `websockets.serve(ping_interval=..., ping_timeout=...)` does. Clients written here on std.net
+// answer its pings, or never do, and std.http.websocket's client answers them by itself.
+import std.http.server.{Server, ServerEvent, ServerSocket}
+import std.http.websocket.{open}
+import std.net.{Conn, Event, Net}
+import std.time.{Instant}
+
+// The program's side: the sockets it has, and what it saw, in `log`.
+struct App {
+    server: Server
+    log: List<String>
+    sockets: List<ServerSocket>
+}
+
+fn handle(app: mut App, e: own ServerEvent) {
+    match e {
+        Request(req) => {
+            match app.server.upgrade(req) {
+                ok(s) => app.sockets.push(s),
+                err(why) => app.log.push("refused: {why}"),
+            }
+        },
+        Message(s, m) => {
+            match m {
+                Text(t) => {
+                    app.log.push("text {t}")
+                    _ = app.server.send_text(s, t)
+                },
+                Binary(_) => app.log.push("binary"),
+            }
+        },
+        Closed(_, code, why) => app.log.push(if why.is_empty() { "closed {code}" } else { "closed {code} {why}" }),
+        Ended(_) => app.log.push("ended"),
+    }
+}
+
+fn said(app: mut App) -> String {
+    let s = app.log.join(", ")
+    app.log.clear()
+    return s
+}
+
+// A client of the server's on std.net: what came on its connection, how far it has been read
+// as frames, the frames in words, and whether it answers pings.
+struct Peer {
+    conn: Conn
+    got: List<u8>
+    at: usize
+    seen: List<String>
+    pings: usize
+    answers: bool
+    closed: bool
+}
+
+fn connect(net: Net, port: u16, answers: bool) -> Peer {
+    let c = net.connect("127.0.0.1", port)!
+    let raw = "GET /ws HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    net.write(c, raw.to_bytes())
+    return Peer { conn: c, got: List<u8>(), at: 0, seen: List<String>(), pings: 0, answers: answers, closed: false }
+}
+
+// A masked frame from the client, whole, with `op` and `payload`.
+fn frame(op: u8, payload: List<u8>) -> List<u8> {
+    var out = List<u8>()
+    out.push(0x80 | op)
+    out.push(0x80 | u8.wrap(payload.len()))
+    let key = [0x37u8, 0xFA, 0x21, 0x3D]
+    for k in key {
+        out.push(k)
+    }
+    for i in 0..payload.len() {
+        out.push(payload[i] ^ key[i & 3])
+    }
+    return out
+}
+
+// The frames that have come whole since the last time, read into `seen`, with each ping
+// counted, and answered with a pong of its bytes if the client answers.
+fn read_frames(net: Net, p: mut Peer) {
+    if p.at == 0 {
+        var i: usize = 0
+        while i + 3 < p.got.len() and p.at == 0 {
+            if p.got[i] == 13 and p.got[i + 1] == 10 and p.got[i + 2] == 13 and p.got[i + 3] == 10 {
+                p.at = i + 4
+            }
+            i += 1
+        }
+        if p.at == 0 {
+            return
+        }
+    }
+    while p.at + 2 <= p.got.len() {
+        let op = p.got[p.at] & 0x0F
+        let n = usize(p.got[p.at + 1] & 0x7F)
+        if p.at + 2 + n > p.got.len() {
+            break
+        }
+        let body = p.got[p.at + 2..p.at + 2 + n]
+        p.at += 2 + n
+        if op == 9 {
+            p.pings += 1
+            if p.answers {
+                net.write(p.conn, frame(10, body))
+            }
+            // Only the first ping is shown, since how many come depends on the clock.
+            if p.pings == 1 {
+                p.seen.push("ping of {n} bytes")
+            }
+        } else if op == 8 {
+            let code = (u32(body[0]) << 8) | u32(body[1])
+            p.seen.push("close {code} {String.from_utf8(body[2..]) ?? String("?")}")
+        } else {
+            p.seen.push("op {op}")
+        }
+    }
+}
+
+// The clients and the server run for `ms` milliseconds, or, if `until_closed` says, until the
+// last client has closed and the program has seen something.
+fn run(app: mut App, net: Net, peers: mut List<Peer>, ms: u64, until_closed: bool = false) {
+    var events = List<Event>()
+    let start = unsafe { Instant.now() }
+    while unsafe { Instant.now() }.nanos_since(start) / 1000000 < ms {
+        net.poll(1, mut events)
+        for ev in events {
+            match ev {
+                Received(x) => {
+                    var found = false
+                    for i in 0..peers.len() {
+                        if peers[i].conn.id() == x.id() {
+                            _ = net.read(x, mut peers[i].got)
+                            found = true
+                        }
+                    }
+                    if not found {
+                        var junk = List<u8>()
+                        _ = net.read(x, mut junk)
+                    }
+                }
+                Closed(x) => {
+                    for i in 0..peers.len() {
+                        if peers[i].conn.id() == x.id() {
+                            peers[i].closed = true
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for i in 0..peers.len() {
+            read_frames(net, mut peers[i])
+        }
+        while let e = app.server.next_event(1) {
+            handle(mut app, e)
+        }
+        if until_closed and not app.log.is_empty() and peers[peers.len() - 1].closed {
+            return
+        }
+    }
+}
+
+fn shown(p: Peer) -> String {
+    let f = p.seen.join(", ")
+    return if p.closed { "{f} [closed]" } else { f }
+}
+
+fn main() {
+    var app = App { server: Server.listen(0)!, log: List<String>(), sockets: List<ServerSocket>() }
+    let net = Net.new()!
+    let port = app.server.port
+    println("{app.server.ping_interval_ms} {app.server.ping_timeout_ms}")    // out: 20000 20000
+
+    // A client that answers and one that never does, side by side: pings every 100 ms, and 400
+    // ms for each to be answered.
+    app.server.ping_interval_ms = 100
+    app.server.ping_timeout_ms = 400
+    var peers = List<Peer>()
+    peers.push(connect(net, port, true))
+    peers.push(connect(net, port, false))
+    run(mut app, net, mut peers, 20)
+    let quiet = app.sockets[1]
+    let start = unsafe { Instant.now() }
+    run(mut app, net, mut peers, 10000, until_closed: true)
+    let took = unsafe { Instant.now() }.nanos_since(start) / 1000000
+    // It was pinged once, at 100 ms, and closed 400 ms later.
+    println("{shown(peers[1])} | {said(mut app)}")    // out: ping of 4 bytes, close 1011 keepalive ping timeout [closed] | closed 1011 keepalive ping timeout
+    println("{took >= 450} {peers[1].pings} {app.server.is_open(quiet)}")    // out: true 1 false
+    // The one that answers stays open across many intervals, after the other has gone.
+    run(mut app, net, mut peers, 1000)
+    let answering = app.sockets[0]
+    println("{shown(peers[0])} | {peers[0].pings >= 8} {app.server.is_open(answering)} {said(mut app).is_empty()}")    // out: ping of 4 bytes | true true true
+    println("{app.server.send_text(answering, "still here")}")    // out: true
+
+    // A pong that doesn't carry the last ping's bytes isn't its answer. The client that answers
+    // still runs beside it.
+    peers.push(connect(net, port, false))
+    run(mut app, net, mut peers, 150)
+    net.write(peers[2].conn, frame(10, String("nope").to_bytes()))
+    run(mut app, net, mut peers, 10000, until_closed: true)
+    println("{shown(peers[2])} | {app.server.is_open(answering)} | {said(mut app)}")    // out: ping of 4 bytes, close 1011 keepalive ping timeout [closed] | true | closed 1011 keepalive ping timeout
+
+    // The client that answers closes, so the next part needn't run it.
+    net.write(peers[0].conn, frame(8, [0x03u8, 0xE8]))
+    while app.log.is_empty() {
+        run(mut app, net, mut peers, 10)
+    }
+    println(said(mut app))    // out: closed 1000
+
+    // std.http.websocket's client answers the server's pings by itself, on its own thread, so
+    // its socket stays open well past the timeout.
+    let ws = open("ws://127.0.0.1:{port}/ws")
+    let ws_start = unsafe { Instant.now() }
+    while unsafe { Instant.now() }.nanos_since(ws_start) / 1000000 < 1500 {
+        while let e = app.server.next_event(5) {
+            handle(mut app, e)
+        }
+    }
+    ws.send_text("hello")!
+    var answer = String()
+    var rounds = 0
+    while answer.is_empty() and rounds < 5000 {
+        rounds += 1
+        while let e = app.server.next_event(1) {
+            handle(mut app, e)
+        }
+        if let m = ws.receive(0)! {
+            answer = match m {
+                Text(t) => t,
+                Binary(_) => String("binary"),
+            }
+        }
+    }
+    let client = app.sockets[app.sockets.len() - 1]
+    println("{answer} {ws.is_open()} {app.server.is_open(client)} | {said(mut app)}")    // out: hello true true | text hello
+    // The server closes it, since the client's `close` would wait on this thread's server.
+    app.server.close_socket(client)
+    rounds = 0
+    while app.log.is_empty() and rounds < 5000 {
+        rounds += 1
+        while let e = app.server.next_event(1) {
+            handle(mut app, e)
+        }
+    }
+    println(said(mut app))    // out: closed 1000
+    ws.close()
+
+    // With `ping_interval_ms` 0 it sends no pings, and closes nothing.
+    app.server.ping_interval_ms = 0
+    var off = List<Peer>()
+    off.push(connect(net, port, false))
+    run(mut app, net, mut off, 700)
+    println("{off[0].pings} {off[0].closed} {app.server.is_open(app.sockets[app.sockets.len() - 1])} {said(mut app).is_empty()}")    // out: 0 false true true
+}

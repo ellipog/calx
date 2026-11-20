@@ -164,8 +164,9 @@ pub enum ServerEvent {
     Message(ServerSocket, Message)
     /// A WebSocket that closed, with the code and reason it ended with: the client's close, the
     /// server's own when the client broke the protocol (1002), sent text that isn't UTF-8 (1007)
-    /// or a message longer than `max_message` (1009), or 1006 and `""` when the connection ended
-    /// without a close. It's the last event for the socket.
+    /// or a message longer than `max_message` (1009), or didn't answer a ping in time (1011, with
+    /// `keepalive ping timeout`), or 1006 and `""` when the connection ended without a close.
+    /// It's the last event for the socket.
     Closed(ServerSocket, u16, String)
     /// An event stream whose browser went away, or that `end_stream` ended. It's the last event
     /// for the stream.
@@ -228,6 +229,12 @@ struct Client {
     // The server sent its close, at `closed_at`, and waits for the client's.
     closing: bool
     closed_at: Instant
+    // A WebSocket's keepalive: when the server last pinged it, in the server's milliseconds, or
+    // when that ping was answered, or when the socket was upgraded if it hasn't been pinged yet;
+    // whether that ping waits for its pong, and the ping's number, which its payload carries.
+    pinged_at: u64
+    awaiting: bool
+    ping_n: u32
 }
 
 // A frame from a client, as `frame_at` read it: whether it ends its message, its opcode, where
@@ -262,6 +269,13 @@ pub struct Server {
     /// The longest message it takes from a WebSocket, in bytes. A longer one closes the socket
     /// with 1009. 64 MB to start with.
     pub max_message: usize
+    /// How often it pings each open WebSocket, in milliseconds, as Python's `websockets.serve`
+    /// does with `ping_interval`: 20 s to start with, and 0 for never. Each ping goes out
+    /// `ping_interval_ms` after the last one was answered, or after the socket opened.
+    pub ping_interval_ms: u64
+    /// How long a ping waits for its pong, in milliseconds, before the socket is closed with
+    /// 1011, as with `ping_timeout`: 20 s to start with, and 0 to wait forever.
+    pub ping_timeout_ms: u64
     net: Net
     clients: Map<u32, Client>
     ready: Deque<u32>
@@ -275,6 +289,12 @@ pub struct Server {
     closing: usize
     // `wake_on_signal` was called, so `next`, `next_event` and `serve` stop at a signal.
     on_signal: bool
+    // The keepalive's clock, which starts with the server, the time of its next ping or timeout,
+    // `u64.MAX` for none, and the interval and timeout that time was worked out with.
+    born: Instant
+    ping_due: u64
+    due_interval: u64
+    due_timeout: u64
 }
 
 // A file `serve` is sending in parts after its response's head: where the next part starts, how
@@ -328,7 +348,7 @@ impl Server {
     pub fn listen(port: u16, host: String = "127.0.0.1") -> Server ! NetError {
         let net = try Net.new()
         let p = try net.listen(host, port)
-        return Server { port: p, host: host.copy(), max_body: 67108864, log: true, max_message: 67108864, net: net, clients: Map<u32, Client>(), ready: Deque<u32>(), events: List<Event>(), date: String(), date_second: -1, streams: List<Stream>(), happened: Deque<ServerEvent>(), closing: 0, on_signal: false }
+        return Server { port: p, host: host.copy(), max_body: 67108864, log: true, max_message: 67108864, ping_interval_ms: 20000, ping_timeout_ms: 20000, net: net, clients: Map<u32, Client>(), ready: Deque<u32>(), events: List<Event>(), date: String(), date_second: -1, streams: List<Stream>(), happened: Deque<ServerEvent>(), closing: 0, on_signal: false, born: unsafe { Instant.now() }, ping_due: u64.MAX, due_interval: 20000, due_timeout: 20000 }
     }
 
     /// The address to open in a browser: `http://127.0.0.1:8000/`.
@@ -492,7 +512,88 @@ impl Server {
         if self.closing > 0 and (wait < 0 or wait > 100) {
             wait = 100
         }
+        // The poll wakes for the next ping or timeout, or at once if the interval or the timeout
+        // changed, so the time is worked out again.
+        if self.ping_interval_ms != self.due_interval or self.ping_timeout_ms != self.due_timeout {
+            wait = 0
+        } else if self.ping_due != u64.MAX {
+            let now = self.clock()
+            let until = if self.ping_due > now { i64.wrap((self.ping_due - now).min(1000000000)) } else { 0 }
+            if wait < 0 or wait > until {
+                wait = until
+            }
+        }
         return some(wait)
+    }
+
+    // The keepalive's clock: the milliseconds since the server started.
+    fn clock(self) -> u64 {
+        return unsafe { Instant.now() }.nanos_since(self.born) / 1000000
+    }
+
+    // Each open WebSocket pinged when its time has come, and closed with 1011 if its last ping
+    // has waited `ping_timeout_ms` for its pong. It runs after a poll has read what came, so a
+    // pong that came while the program was busy counts. It looks at the sockets only when the
+    // time it worked out comes, or the interval or the timeout has changed since.
+    fn keep_alive(mut self) {
+        let interval = self.ping_interval_ms
+        let timeout = self.ping_timeout_ms
+        let now = self.clock()
+        if interval == self.due_interval and timeout == self.due_timeout and now < self.ping_due {
+            return
+        }
+        self.due_interval = interval
+        self.due_timeout = timeout
+        var due = u64.MAX
+        if interval == 0 {
+            self.ping_due = due
+            return
+        }
+        var ids = List<u32>()
+        for (id, client) in self.clients {
+            if client.kind == KIND_SOCKET and not client.closing {
+                ids.push(id)
+            }
+        }
+        var late = List<u32>()
+        for id in ids {
+            let waiting = self.clients[id].awaiting and timeout > 0
+            if waiting {
+                let end = later(self.clients[id].pinged_at, timeout)
+                if now >= end {
+                    late.push(id)
+                    continue
+                }
+                due = due.min(end)
+                continue
+            }
+            var next = later(self.clients[id].pinged_at, interval)
+            if now >= next {
+                let n = self.clients[id].ping_n + 1
+                self.clients[id].ping_n = n
+                self.clients[id].pinged_at = now
+                self.clients[id].awaiting = true
+                let c = self.clients[id].conn
+                self.net.write(c, frame_head(9, 4))
+                self.net.write(c, ping_payload(n))
+                self.net.flush()
+                next = if timeout > 0 { later(now, timeout) } else { later(now, interval) }
+            }
+            due = due.min(next)
+        }
+        for id in late {
+            let c = self.clients[id].conn
+            let why = "keepalive ping timeout"
+            var body = List<u8>()
+            body.push(0x03)
+            body.push(0xF3)
+            body.extend(why.to_bytes())
+            self.net.write(c, frame_head(8, body.len()))
+            self.net.write(c, body)
+            self.net.close(c)
+            self.end_client(id, 1011, String(why))
+        }
+        self.ping_due = due
     }
 
     // The next request a connection has ready, if one has.
@@ -516,7 +617,7 @@ impl Server {
         for e in self.events {
             match e {
                 Accepted(c) => {
-                    self.clients.insert(c.id(), Client { conn: c, buf: List<u8>(), busy: false, continued: false, kind: KIND_HTTP, op: 0, message: List<u8>(), protocol: String(), closing: false, closed_at: unsafe { Instant.now() } })
+                    self.clients.insert(c.id(), Client { conn: c, buf: List<u8>(), busy: false, continued: false, kind: KIND_HTTP, op: 0, message: List<u8>(), protocol: String(), closing: false, closed_at: unsafe { Instant.now() }, pinged_at: 0, awaiting: false, ping_n: 0 })
                 }
                 Received(c) => {
                     let id = c.id()
@@ -553,6 +654,7 @@ impl Server {
         for id in ended {
             self.end_client(id, 1006, String())
         }
+        self.keep_alive()
     }
 
     // The client `id` let go, if it's still here, and its end told to `next_event`: a socket's
@@ -647,7 +749,8 @@ impl Server {
 
     /// `req` answered by making its connection a WebSocket (RFC 6455), as Python's
     /// `websockets.serve` does for each connection that asks. The socket's messages, and its
-    /// close, come from `next_event`, and the server answers its pings itself.
+    /// close, come from `next_event`. The server answers its pings itself, and pings it every
+    /// `ping_interval_ms`, closing it if it doesn't answer within `ping_timeout_ms`.
     ///
     /// The subprotocol is the first of `protocols` that the request's `Sec-WebSocket-Protocol`
     /// offers, or none. A request from a page, which has an `Origin`, is turned away unless the
@@ -705,6 +808,12 @@ impl Server {
         self.net.flush()
         self.clients[id].kind = KIND_SOCKET
         self.clients[id].protocol = chosen
+        // Its first ping goes out an interval from now.
+        let now = self.clock()
+        self.clients[id].pinged_at = now
+        if self.ping_interval_ms > 0 {
+            self.ping_due = self.ping_due.min(later(now, self.ping_interval_ms))
+        }
         // Frames the client sent right behind its handshake.
         if not self.clients[id].buf.is_empty() {
             self.read_frames(id)
@@ -808,6 +917,17 @@ impl Server {
                 continue
             }
             if f.op == 10 {
+                // The pong for the server's last ping, which starts the wait for the next one.
+                // Another pong, as RFC 6455 lets a client send unasked, is let be.
+                if self.clients[id].awaiting and payload == ping_payload(self.clients[id].ping_n) {
+                    self.clients[id].awaiting = false
+                    let now = self.clock()
+                    self.clients[id].pinged_at = now
+                    let next = later(now, self.ping_interval_ms)
+                    if self.ping_interval_ms > 0 {
+                        self.ping_due = self.ping_due.min(next)
+                    }
+                }
                 continue
             }
             if f.op == 8 {
@@ -1221,6 +1341,20 @@ fn frame_head(op: u8, n: usize) -> List<u8> {
         for k in 0u64..8 {
             out.push(u8.wrap(big >> (56 - 8 * k)))
         }
+    }
+    return out
+}
+
+// `a` milliseconds and `b` more, or `u64.MAX` past it, for a time that's never.
+fn later(a: u64, b: u64) -> u64 {
+    return if b > u64.MAX - a { u64.MAX } else { a + b }
+}
+
+// The payload of the server's ping number `n`: its 4 bytes, high byte first.
+fn ping_payload(n: u32) -> List<u8> {
+    var out = List<u8>()
+    for k in 0u32..4 {
+        out.push(u8.wrap(n >> (24 - 8 * k)))
     }
     return out
 }
