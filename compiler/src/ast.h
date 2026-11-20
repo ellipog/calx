@@ -558,6 +558,8 @@ struct Item {
     bool is_attribute = false;   // `@attribute`: a function the compiler runs while compiling (D57, D124)
     bool is_handle = false;      // `@handle`: a struct that stands for something of the system's, which can't be copied
     bool is_test = false;        // `@test`: a test, which `calx test` runs in a process of its own (CLX-87)
+    // A `@handle` struct's `fn drop(mut self)`, which runs when a value of it is dropped (CLX-332).
+    Item* drop_fn = nullptr;
     // A closure's body, as a function of its own (CLX-98), which each C file that reaches it
     // copies, as instances are. It reads `captures`, the locals of the code around it that it
     // names, through their addresses; one that captures nothing and is a `fn(...)` value takes

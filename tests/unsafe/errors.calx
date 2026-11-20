@@ -10,8 +10,8 @@ extern "C" {
     }
 }
 
-pub struct Holder {
-    p: *u8                                    // error: a pointer can only be the type of a variable
+pub enum Holder {
+    Some(*u8)                                 // error: a pointer can only be the type of a variable
 }
 
 pub fn safe_param(_p: *const u8) {           // error: a pointer can only be the type of a variable

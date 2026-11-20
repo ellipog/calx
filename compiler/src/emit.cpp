@@ -116,6 +116,10 @@ public:
                         if (Item* h = hand(t, prop)) take(h);
                     }
                 }
+                // A `@handle` struct's drop glue calls its `drop` (CLX-332).
+                for (const Type* t : closure(p.all.types)) {
+                    if (t->kind == TypeKind::struct_ && t->item->drop_fn) take(t->item->drop_fn);
+                }
                 if (p.defs.size() == defs && p.externs.size() == externs) break;
             }
             plans.push_back(std::move(p));
@@ -2841,6 +2845,35 @@ $dropall    m->len = 0;
     // A struct's or enum's name as Calx code writes it, without a generic type's arguments.
     std::string item_name(const Type* t) const { return std::string(text((t->generic ? t->generic : t->item)->name)); }
 
+    // C that's true when the value `at` has a bit set in one of its fields, so a padding byte
+    // doesn't count: numbers, pointers and the like as they are, structs and tuples field by
+    // field, and anything else byte by byte.
+    std::string any_set(const Type* t, const std::string& at) {
+        switch (t->kind) {
+            case TypeKind::int_: case TypeKind::float_: case TypeKind::bool_: case TypeKind::char_: case TypeKind::rune:
+            case TypeKind::pointer: case TypeKind::fn_: return "(" + at + " != 0)";
+            case TypeKind::enum_:
+                if (!t->has_data) return "(" + at + " != 0)";
+                break;
+            case TypeKind::struct_: {
+                std::string s;
+                for (const FieldDecl& f : t->item->fields) s += (s.empty() ? "" : " || ") + any_set(f.resolved, at + "." + ident(f.name));
+                return s.empty() ? "0" : "(" + s + ")";
+            }
+            case TypeKind::tuple: {
+                std::string s;
+                for (std::size_t i = 0; i < t->elems.size(); i++) {
+                    s += (s.empty() ? "" : " || ") + any_set(t->elems[i], at + ".f" + std::to_string(i));
+                }
+                return "(" + s + ")";
+            }
+            case TypeKind::optional: return "(" + at + ".has)";
+            default: break;
+        }
+        return "({ const cx_u8* cx_b = (const cx_u8*)&" + at + "; cx_u8 cx_any = 0; for (cx_usize cx_i = 0; cx_i < sizeof(" + at +
+               "); cx_i++) cx_any |= cx_b[cx_i]; cx_any != 0; })";
+    }
+
     // Frees what the value at `p` owns.
     std::string drop_body(const Type* t) {
         std::string s;
@@ -2898,6 +2931,12 @@ $dropall    m->len = 0;
                 s += "    cx_table_free(p->ctrl, p->mask + 1, sizeof(" + slot_ctype(t) + "), " + table_extra(t, "p->mask + 1") + ");\n";
                 break;
             case TypeKind::struct_:
+                // A `@handle` struct's own `drop` first, which sees its fields as they are (CLX-332).
+                // A value that might have moved away is zeroed where it moves, and dropped all the
+                // same, so `drop` runs only on one with a field that isn't zero.
+                if (t->item->drop_fn) {
+                    s += "    if (" + any_set(t, "(*p)") + ") " + std::string(t->item->drop_fn->c_name) + "(p);\n";
+                }
                 for (const FieldDecl& f : t->item->fields) part_drop(f.resolved, "p->" + ident(f.name));
                 break;
             case TypeKind::tuple:

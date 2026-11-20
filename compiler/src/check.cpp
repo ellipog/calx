@@ -220,6 +220,7 @@ public:
         for (Type* t : pending_defaults_) check_instance_defaults(t);
         for (Item* f : all_fns_) check_signature(f);
         collect_exports();
+        collect_drops();
         collect_tests();
         for (Item* f : all_fns_) {
             if (f->is_attribute) check_attribute_fn(f);
@@ -1181,7 +1182,8 @@ private:
                 note(seen[f.name], "the first declaration is here");
             }
             current_item_ = s;
-            f.resolved = resolve_type(f.type);
+            // A struct's field can be a pointer, which only `unsafe` code reads or writes (CLX-332).
+            f.resolved = resolve_type(f.type, true);
             if (s->is_pub && f.is_pub) public_type(f.resolved, f.type->span, "a `pub` field of a `pub` struct can't hold it");
         }
         pop_env(mark);
@@ -3553,8 +3555,8 @@ private:
             }
             case TypeExprKind::pointer: {
                 if (!pointer_ok) {
-                    error(t->span, "a pointer can only be the type of a variable in `unsafe` code, or of a C function's "
-                                   "parameter or result");
+                    error(t->span, "a pointer can only be the type of a variable in `unsafe` code, a struct's field, or a "
+                                   "parameter or result of a C function or an `unsafe fn`");
                     return T.error;
                 }
                 Type* inner = resolve_type(t->inner, true);
@@ -3737,6 +3739,11 @@ private:
     }
 
 
+    // Whether `f`'s parameters and result can be pointers (CLX-332): a C function's, and an `unsafe
+    // fn`'s, whose callers are `unsafe` code. Using the pointer, in the body or at the call, is
+    // `unsafe` all the same.
+    static bool pointers_ok(const Item* f) { return f->is_extern || f->is_unsafe; }
+
     void check_signature(Item* f) {
         if (f->checked_signature) return;
         f->checked_signature = true;
@@ -3767,7 +3774,7 @@ private:
                     }
                 }
             } else {
-                t = resolve_type(p.type, f->is_extern, !f->is_extern && p.mode != ParamMode::own);
+                t = resolve_type(p.type, pointers_ok(f), !f->is_extern && p.mode != ParamMode::own);
             }
             if (t->kind == TypeKind::unit) error(p.type->span, "a parameter can't be `()`");
             if (i == 0 && f->impl_type && t == f->impl_type) f->is_method = true;
@@ -3781,7 +3788,7 @@ private:
             p.local = l;
             if (p.default_value) check_default(f, p, t);
         }
-        f->result_type = !f->result ? T.unit : names_never(f->result) ? T.never : resolve_type(f->result, f->is_extern);
+        f->result_type = !f->result ? T.unit : names_never(f->result) ? T.never : resolve_type(f->result, pointers_ok(f));
         if (exported(f)) {
             for (const Param& p : f->params) {
                 if (p.local && p.type) public_type(p.local->type, p.type->span, "a `pub` function can't take it");
@@ -4091,6 +4098,8 @@ private:
             // An interface fixes its functions' parameters, names included, so one impl not using
             // a parameter is fine.
             if (fn_ && fn_->interface_item) return;
+            // So is a `@handle` struct's `fn drop(mut self)` (CLX-332).
+            if (fn_ && fn_->impl_type && fn_->impl_type->kind == TypeKind::struct_ && fn_->impl_type->item->drop_fn == fn_) return;
             // One whose type is an error has an error already, such as a closure's parameter that
             // isn't wanted.
             if (!l->used && !l->mutated && !starts_with_underscore(n) && !is_bad(l->type)) {
@@ -5423,6 +5432,13 @@ private:
         if (e == str_view_ok_ && t == T.str && expected == T.string) {
             e->str_view = true;
             return T.string;
+        }
+        // A `*T` goes where a `*const T` is wanted, as C's `T*` does where a `T const*` is: a
+        // pointer that can write can be one that only reads (CLX-332).
+        if (expected && expected->kind == TypeKind::pointer && expected->is_const && t->kind == TypeKind::pointer &&
+            !t->is_const && t->elem == expected->elem) {
+            e->type = expected;
+            return expected;
         }
         if (expected && !is_bad(expected) && !is_bad(t) && t != expected && t->kind != TypeKind::never) {
             mismatch(e, expected, t);
@@ -8134,6 +8150,13 @@ private:
                 return false;
             }
             use_item(t->item);
+            // CLX-332: taking it apart would leave nothing for its `drop` to run on.
+            if (t->item->drop_fn) {
+                error(p->span, name_of(t) + " has a `drop`, which runs on the whole value, so a pattern can't take it apart; "
+                                            "read its fields instead");
+                bind_names(p);
+                return false;
+            }
             fields = t->item->fields;
             what = t->name;
         } else {
@@ -9360,6 +9383,11 @@ private:
         dyn_self_ = false;
         e->call = receiver ? CallKind::method : CallKind::fn;
         e->item = f;
+        // CLX-332: a `@handle` struct's `drop` runs once, when the value is dropped.
+        if (f->impl_type && f->impl_type->kind == TypeKind::struct_ && f->impl_type->item && f->impl_type->item->drop_fn == f) {
+            error(e->callee->span, "`drop` runs by itself when " + a_type(f->impl_type) + " is dropped, so it isn't called; to "
+                                   "drop one now, pass it to a function that takes it with `own`");
+        }
         if (f->is_extern) {
             if (unsafe_depth_ == 0) {
                 error(e->callee->span, q(text(f->name)) + " is a C function, so calling it needs `unsafe`");
@@ -12519,6 +12547,48 @@ private:
                 }
                 if (bad) continue;
                 prog_.exports.push_back({f, T.fn_of(params, modes, f->result_type, f->is_unsafe)});
+            }
+        }
+    }
+
+    // CLX-332: `fn drop(mut self)` in an `impl` of a `@handle` struct, which runs when a value of
+    // it is dropped, before what its fields own is freed. It's how a struct that holds a C library's
+    // handle gives it back.
+    void collect_drops() {
+        for (Item* it : structs_) {
+            if (it->origin) continue;
+            Type* t = it->declared;
+            if (!t) continue;
+            std::vector<Item*> drops;
+            auto found = impls_by_head_.find(head(t));
+            if (found != impls_by_head_.end()) {
+                for (ImplInfo* info : found->second) {
+                    if (info->iface) continue;
+                    for (Item* m : info->impl->members) {
+                        if (m->kind == ItemKind::fn && text(m->name) == "drop") drops.push_back(m);
+                    }
+                }
+            }
+            for (Item* f : drops) {
+                f->used = true;  // it's meant to run whenever a value is dropped
+                if (!it->is_handle) {
+                    error(f->name_span, "only a `@handle` struct has a `drop` that runs by itself; mark " + q(text(it->name)) +
+                                            " `@handle`, which also keeps it from being copied, or name the method otherwise");
+                    continue;
+                }
+                bool shape = f->params.size() == 1 && f->params[0].is_self && f->params[0].mode == ParamMode::mut &&
+                             !f->result && !f->error && f->type_params.empty() && !f->is_unsafe;
+                if (!shape) {
+                    error(f->name_span, "a `@handle` struct's `drop` is `fn drop(mut self)`, which takes nothing else and "
+                                        "returns nothing");
+                    continue;
+                }
+                if (!it->type_params.empty()) {
+                    error(f->name_span, "a generic struct can't have a `drop` yet");
+                    continue;
+                }
+
+                it->drop_fn = f;
             }
         }
     }
