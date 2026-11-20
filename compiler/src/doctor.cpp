@@ -233,11 +233,18 @@ int run_doctor() {
         ok(std::string("calx ") + CALX_VERSION + ", built from source, at " + self.string(), "calx",
            std::string(CALX_VERSION) + term::dim(c, "  built from source"), self.string());
     }
-    // What it builds programs for, and the processor a release build counts on (D612).
-    std::string cpu = release_cpu_flag(kTarget);
-    cpu = cpu.substr(cpu.find('=') + 1);
+    // What it builds programs for, and the processor a release build counts on (D612), which
+    // CALX_CPU can change (CLX-381).
+    std::string cpu = default_cpu(kTarget);
+    const char* cpu_env = std::getenv("CALX_CPU");
+    std::string cpu_error;
+    if (cpu_env && *cpu_env && !cpu_flag(kTarget, cpu_env, cpu_error).empty()) cpu = std::string(cpu_env) + " (from CALX_CPU)";
     ok("builds for " + target_name(kTarget) + " (" + target_label(kTarget) + "), release builds for " + cpu, "target",
        target_name(kTarget) + term::dim(c, "  " + target_label(kTarget) + ", release builds for " + cpu));
+    if (!cpu_error.empty()) {
+        fail("CALX_CPU: " + cpu_error, "CALX_CPU", cpu_error);
+        fix("Set CALX_CPU to one of those, or unset it for the default.");
+    }
     std::string home_error;
     std::string home = find_home(home_error);
     if (home.empty()) {

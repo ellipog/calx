@@ -315,7 +315,7 @@ Built: see [Modules](reference/modules.md), with [a module's items through its n
 
 - **A package** is a folder with a `calx.toml` giving its name, version and dependencies. Calcite, each plugin and the standard library are packages, and a package's modules are found under its own root.
 - **Merging instances.** Each module's file has its own copy of the generic instances it uses. Release builds can have the linker fold identical copies (`-ffunction-sections` with identical code folding).
-- **Targets:** `x86_64-windows`, `x86_64-linux`, `aarch64-linux`, `aarch64-windows` and `aarch64-macos`, on Apple Silicon from macOS 14, are built, each released and tested on GitHub's runners (D612, superseding D7), and `wasm32` comes with Phase 7. Release builds use x86-64-v3 on x86, `apple-m1` on macOS and `armv8.2-a` on Arm Linux and Windows. On macOS the SDK comes from Apple's Command Line Tools.
+- **Targets:** `x86_64-windows`, `x86_64-linux`, `aarch64-linux`, `aarch64-windows` and `aarch64-macos`, on Apple Silicon from macOS 14, are built, each released and tested on GitHub's runners (D612, superseding D7), and `wasm32` comes with Phase 7. Release builds use x86-64-v3 on x86, `apple-m1` on macOS and `armv8.2-a` on Arm Linux and Windows, unless `--cpu` or `CALX_CPU` picks an older level: `x86-64` or `x86-64-v2` on x86 and `armv8-a` on Arm (CLX-381). On macOS the SDK comes from Apple's Command Line Tools.
 
 ### Build speed
 

@@ -54,16 +54,16 @@ fn main() {
     println("{service()}")    // out: false
 
     // A copy that handles the stop finishes its work and ends as it means to.
-    var c = Command.new(current_exe()).arg("handles").new_group().stdout(Stdio.Pipe).spawn()!
+    var c = Command.new(current_exe()).arg("handles").own_group().stdout(Stdio.Pipe).spawn()!
     println("{c.wait_for_line("ready", 30000) != none}")    // out: true
-    println("{c.stop()}")                                    // out: true
+    c.stop()
     let out = c.wait()
     println("{out.text().trim()} {out.status.code ?? -1}")    // out: stopping on terminate, saved 0
 
     // One that doesn't is ended by it, as by any signal that isn't handled.
-    var d = Command.new(current_exe()).arg("plain").new_group().stdout(Stdio.Pipe).spawn()!
+    var d = Command.new(current_exe()).arg("plain").own_group().stdout(Stdio.Pipe).spawn()!
     println("{d.wait_for_line("ready", 30000) != none}")    // out: true
-    println("{d.stop()}")                                    // out: true
+    d.stop()
     let ended = d.wait()
     let how = if os() == "windows" { ended.status.code == some(-1073741510) } else { ended.status.signal == some(15) }
     println("{ended.status.success()} {how}")    // out: false true
@@ -71,27 +71,24 @@ fn main() {
     // With std.term's text to write at the end, set before the handler: a copy that handles the
     // stop writes it as it ends, after what it printed, and one that doesn't writes it as the
     // stop ends it.
-    var t = Command.new(current_exe()).arg("term-handles").new_group().stdout(Stdio.Pipe).spawn()!
-    println("{t.wait_for_line("ready", 30000) != none} {t.stop()}")    // out: true true
+    var t = Command.new(current_exe()).arg("term-handles").own_group().stdout(Stdio.Pipe).spawn()!
+    println("{t.wait_for_line("ready", 30000) != none}")    // out: true
+    t.stop()
     let t_out = t.wait()
     println("{t_out.text().trim().replace("\n", "|")} {t_out.status.code ?? -1}")    // out: stopping on terminate, saved|bye 0
-    var u = Command.new(current_exe()).arg("term-plain").new_group().stdout(Stdio.Pipe).spawn()!
-    println("{u.wait_for_line("ready", 30000) != none} {u.stop()}")    // out: true true
+    var u = Command.new(current_exe()).arg("term-plain").own_group().stdout(Stdio.Pipe).spawn()!
+    println("{u.wait_for_line("ready", 30000) != none}")    // out: true
+    u.stop()
     let u_out = u.wait()
     println("{u_out.text().trim()} {u_out.status.success()}")    // out: bye false
 
-    // On Windows only a child in a group of its own can be asked, and none that has ended.
-    var p = Command.new(current_exe()).arg("plain").stdout(Stdio.Pipe).spawn()!
-    println("{p.wait_for_line("ready", 30000) != none}")    // out: true
-    println("{p.stop() == (os() != "windows")}")             // out: true
-    p.kill()
-    _ = p.wait()
-    var q = Command.new(current_exe()).arg("quick").new_group().spawn()!
+    // Asking one that has ended does nothing.
+    var q = Command.new(current_exe()).arg("quick").own_group().spawn()!
     while q.try_wait() == none {
         unsafe { sleep(1000000) }
     }
-    println("{q.stop()}")    // out: false
-    _ = q.wait()
+    q.stop()
+    println("{q.wait().status.success()}")    // out: true
 }
 
 fn child(what: String) {

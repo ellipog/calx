@@ -13,6 +13,7 @@ calx run hello.calx -- a b     # arguments after -- go to the program
 calx hello.calx a b            # the same, as `python hello.py a b` is
 calx build hello.calx -o hello # build an executable
 calx build --release hello.calx
+calx build --release --cpu x86-64-v2 hello.calx   # for a processor without AVX2
 calx build --lib plugin.calx   # build a library, which a program opens while it runs
 calx test tool.calx           # run its @test functions, each in a process of its own
 calx eval "1 << 20"           # run code given on the command line, and print its value
@@ -37,6 +38,7 @@ Before it checks a program, each command runs the [attributes](attributes.md) th
 | Option | Meaning |
 | --- | --- |
 | `--release` | Optimize. Without it, programs build in debug mode, which builds fastest |
+| `--cpu LEVEL` | The processor a release build counts on: `x86-64-v2` for one without AVX2, and the others [below](#processor-levels). `--cpu=LEVEL` is the same |
 | `-o PATH` | Where `build` writes the executable, or `emit-c` the C: a file for one module, a folder for several. Folders on the way are made if they aren't there. `build` defaults to the file's name in the current folder |
 | `--lib` | Build or check a [library](libraries.md): a `.dll` or `.so` with the functions marked `@export`, which a program opens while it runs. `calx run` doesn't take it |
 | `--timings` | Print how long the front end, the C emitter, clang and the linker took, or that nothing had changed, so none of them ran ([fast builds](#fast-builds)) |
@@ -73,7 +75,7 @@ calx tool.calx --release -o out.txt   # tool.calx gets --release, -o and out.txt
 calx --release tool.calx input.txt    # built optimized; tool.calx gets input.txt
 ```
 
-The program sees the file as its `argv[0]`, as a Python script sees `sys.argv[0]`, rather than the path of the program built from it, so [`std.env.program()`](../std/env.md) names it after the file, as `calx run` does too, and [`std.env.script()`](../std/env.md) gives its full path, as Python's `__file__` does. The options before the file are `--release`, `--timings` and `--verbose`. The file is one whose name ends in `.calx`, or any file that's there, for a script without the extension. A name that's neither a command nor a file is an error, with status 2, so `calx biuld x.calx` says so instead of running anything.
+The program sees the file as its `argv[0]`, as a Python script sees `sys.argv[0]`, rather than the path of the program built from it, so [`std.env.program()`](../std/env.md) names it after the file, as `calx run` does too, and [`std.env.script()`](../std/env.md) gives its full path, as Python's `__file__` does. The options before the file are `--release`, `--cpu`, `--timings` and `--verbose`. The file is one whose name ends in `.calx`, or any file that's there, for a script without the extension. A name that's neither a command nor a file is an error, with status 2, so `calx biuld x.calx` says so instead of running anything.
 
 A first line that starts with `#!` is the system's, and the compiler skips it, so on Linux a program runs by its own name, as a shell or Python script does:
 
@@ -243,6 +245,8 @@ Both modes keep every check: bounds checks, division by zero, and Java's integer
 | debug (the default) | `-O0 -DCX_DEBUG` | Fast builds while you work |
 | release | `-O3 -march=x86-64-v3 -flto=thin` | Speed |
 
+The `-march` is the [processor level](#processor-levels), which `--cpu` changes.
+
 Release builds use `-O3`, the level Rust's release builds use, since it's the one that specializes a loop for each value of a test that doesn't change inside it, such as which layout a palette has (D89). In both modes the C is compiled with `-std=gnu17 -fwrapv -ffp-contract=off -fno-math-errno -gline-tables-only -ffunction-sections -fdata-sections`. `-fwrapv` and `-ffp-contract=off` are part of Calx's semantics: without them C wouldn't wrap on overflow or round every float operation as Java does ([integers](integers.md), [floats](floats.md)).
 
 Release builds also optimize the program as a whole when it links, with ThinLTO (D99). Each module is a C file of its own, so without it a call from one module to another could never be inlined, however small the function: a loop that adds vectors from another module ran 4.6 times faster with it, and one that packs block positions 7.6 times. The runtime's functions inline the same way. lld does this, so it needs lld next to clang or on `PATH`; with another linker, each file is optimized alone. Since clang can then see that a call to a function in another module has no side effects, a benchmark should pass what it measures through [`std.hint.black_box`](../std/hint.md).
@@ -271,6 +275,24 @@ Keeping them takes a lock and a look at the stack for each allocation. On Calcit
 Both modes have line tables, which don't change the generated code, so a debugger or profiler shows Calx source lines. On Windows they're in a PDB next to the executable in the cache, which the executable records.
 
 On Windows, a release builds with the toolchain it carries in `toolchain\` ([install](../guide/install.md#clang)): clang and lld from LLVM, with mingw-w64's headers and libraries, so programs use the UCRT, the C runtime DLL every Windows from 10 on has, in both modes. They run as fast as with Visual Studio's C runtime: on the [tick benchmark](../benchmarks.md), 18.6 ms a tick on one worker and 2.45 ms on 24, against 18.8 ms and 2.47 ms. With a clang that builds with Visual Studio's C runtime instead, such as one from LLVM's installer, debug builds use its DLL, since linking the static one puts its debug information into every PDB and doubles the link time, and release builds link it statically.
+
+## Processor levels
+
+A release build counts on its processor having the instructions of a level: by default x86-64-v3, with AVX2, as most x86 processors made since 2015 have; the M1's, which every Apple Silicon Mac has, on macOS; and ARMv8.2 on Arm Linux and Windows. A program built so stops with an illegal instruction on a processor without them, and some VPS processors and older home servers have no AVX2. `--cpu`, or `CALX_CPU`, picks an older level, so the program runs there (CLX-381):
+
+```sh
+calx build --release --cpu x86-64-v2 server.calx
+```
+
+| Target | Levels |
+| --- | --- |
+| x86-64 | `x86-64`, any 64-bit processor; `x86-64-v2`, with SSE4.2 and POPCNT, as nearly every one since 2009 has; `x86-64-v3`, the default, with AVX2; and `x86-64-v4`, with AVX-512 |
+| Arm Linux and Windows | `armv8-a`, any Arm64 processor, the Raspberry Pi 4's too; and `armv8.2-a`, the default |
+| macOS | `apple-m1`, the default |
+
+The program gives the same output at every level. Where the runtime has AVX2 code, either it asks the processor as the program runs, as the hashes, Adler-32 and the CRCs do, so a build for an older level still takes it on a processor that has it, or it has SSE2 code that a build without AVX2 takes, as `find`, zstd's encoder and JPEG's writer do, which are slower there. A level is part of every key in the [object cache](#fast-builds), so builds for two levels never share a compiled file. A level another target has, such as `x86-64-v2` on Arm64, is an error, as is one that isn't a level, and so is either in `CALX_CPU`. A debug build counts on nothing past the architecture, whatever the level, but still checks it. `--verbose` shows the `-march` the build passes, and `calx doctor` the level release builds count on.
+
+A program built for `x86-64-v4` runs only on processors with AVX-512. The runtime has no AVX-512 code of its own, so only the loops clang vectorizes can gain from it.
 
 ## Fast builds
 
@@ -308,6 +330,7 @@ Windows Defender scans every new executable the first time it starts, which cost
 | `CALX_HOME` | Where the runtime and the [standard library](modules.md#the-standard-library) are. Otherwise, the installation `calx` is in: the folder above its `bin`, which holds `runtime` and `std`. A compiler built from source that isn't in one uses the checkout it was built from |
 | `CALX_CACHE` | The object cache. Otherwise `%LOCALAPPDATA%\calx\cache` on Windows, `$XDG_CACHE_HOME/calx`, or else `~/.cache/calx` on Linux and `~/Library/Caches/calx` on macOS. On Windows it can be at any length: past 100 characters, calx names what's under it in the `\\?\` form, which Windows, clang and lld take past the usual 260 |
 | `CALX_CACHE_MB` | How many megabytes the cache keeps of compiled files, and of programs, however many files that is. Otherwise the limits below hold. For a CI job that builds more than they hold and keeps the cache for its next run |
+| `CALX_CPU` | The [processor level](#processor-levels) a release build counts on when `--cpu` doesn't say, such as `x86-64-v2`. Otherwise x86-64-v3 on x86, the M1's on macOS and ARMv8.2 on Arm Linux and Windows |
 | `CALX_LEAKS` | Set to `1`, a program built in debug keeps where each block of memory was allocated, so if it ends with blocks still allocated, it says where each came from ([build modes](#build-modes)). The program reads it, not `calx` |
 | `CALX_TRACE_DEBUG` | Set to `1`, a program on Windows writes what dbghelp says of each frame of a stack trace to standard error: its address, its name and line or the error, and the PDB it came from. For bringing traces up on a new system. The program reads it, not `calx` |
 | `CALX_LTO` | Set to `0`, release builds leave out ThinLTO and optimize each file alone, as they do without lld. Each file's machine code is then kept in the object cache, so a build that finds all its files there only links, where ThinLTO makes the machine code again in every link. That suits a test run that builds many programs and keeps its cache. Their code can be slower, since a call to another module no longer inlines |
@@ -342,7 +365,7 @@ calx doctor
 Everything works.
 ```
 
-The target is the system and processor it builds programs for, which is the one it runs on, and the processor a release build counts on: x86-64-v3, with AVX2, on x86; the M1's, which every Apple Silicon Mac has, on macOS; and ARMv8.2 on Arm Linux and Windows. It finds clang as a build does: `CALX_CC`, then the toolchain the installation carries, then `PATH`, and says if the toolchain the release builds with isn't the one installed, which `calx update --toolchain` mends. The real test is building a program, in debug and release, which is what everything else is for. When that fails, it shows what clang said and names what's missing: on Windows, mingw-w64's headers and libraries beside the toolchain's clang, or with another clang, the C runtime and SDK from Visual Studio's Build Tools; on Linux, the C library's headers. It exits with 1 if something needs fixing, and 0 if not. A failed build points at it too.
+The target is the system and processor it builds programs for, which is the one it runs on, and the processor a release build counts on: x86-64-v3, with AVX2, on x86; the M1's, which every Apple Silicon Mac has, on macOS; and ARMv8.2 on Arm Linux and Windows. With `CALX_CPU` set, it says that level, and fails if it isn't one the target has. It finds clang as a build does: `CALX_CC`, then the toolchain the installation carries, then `PATH`, and says if the toolchain the release builds with isn't the one installed, which `calx update --toolchain` mends. The real test is building a program, in debug and release, which is what everything else is for. When that fails, it shows what clang said and names what's missing: on Windows, mingw-w64's headers and libraries beside the toolchain's clang, or with another clang, the C runtime and SDK from Visual Studio's Build Tools; on Linux, the C library's headers. It exits with 1 if something needs fixing, and 0 if not. A failed build points at it too.
 
 ## Updating
 

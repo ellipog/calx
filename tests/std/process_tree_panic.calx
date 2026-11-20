@@ -1,0 +1,15 @@
+// Stopping a child's group needs one: a child not started with own_group has none, so it panics,
+// on every system, rather than reaching only the child on one and nothing on another.
+
+import std.env.{args}
+import std.process.{Command, Stdio, current_exe}
+
+fn main() {
+    if args().len() > 0 {
+        return
+    }
+    var c = Command.new(current_exe()).arg("child").stdout(Stdio.Null).spawn()!
+    println("{c.wait_timeout(60000) != none}")    // out: true
+    c.stop()    // panic: the child wasn't started with own_group
+    _ = c.wait()
+}
