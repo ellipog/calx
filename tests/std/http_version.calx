@@ -1,0 +1,227 @@
+// HTTP versions, kept connections and timings (CLX-383), against a server in the same program on
+// loopback, as tests/std/http.calx's is. It keeps each HTTP/1.1 connection open, and speaks
+// enough HTTP/2 (RFC 9113) to answer GETs that come with prior knowledge, h2c. HTTP/2 over TLS,
+// which ALPN chooses, can't be tested without a TLS server, so h2c is what shows that requests
+// multiplex over one connection. WinHTTP has no h2c, so on Windows that part checks that the
+// requests say so, and gives the lines Linux and macOS print.
+
+import std.env
+import std.http.{Error, Request, Response, Version, get}
+import std.net.{Conn, Event, Net}
+
+// What the server knows of one connection: the bytes it hasn't read yet, whether it's HTTP/2,
+// its number, counting from 1 in the order the server accepted them, and the HTTP/2 streams it
+// holds the answers to.
+struct Peer {
+    buf: List<u8>,
+    h2: bool,
+    number: u32,
+    held: List<u32>,
+}
+
+struct Server {
+    peers: List<Peer>,
+    accepted: u32,
+}
+
+fn preface() -> List<u8> {
+    return "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_bytes()
+}
+
+// An HTTP/2 frame: its length, type, flags and stream, then its payload.
+fn frame(kind: u8, flags: u8, stream: u32, payload: List<u8>) -> List<u8> {
+    let n = payload.len()
+    var out: List<u8> = [u8.wrap(n >> 16), u8.wrap(n >> 8), u8.wrap(n), kind, flags, u8.wrap(stream >> 24), u8.wrap(stream >> 16), u8.wrap(stream >> 8), u8.wrap(stream)]
+    out.extend(payload)
+    return out
+}
+
+// The answer to an HTTP/2 GET on `stream`: `:status: 200` from HPACK's static table, 0x88, and
+// `x-thing: seven` written out, in a HEADERS frame, then the body in a DATA frame that ends the
+// stream.
+fn h2_answer(stream: u32, number: u32) -> List<u8> {
+    var head: List<u8> = [0x88, 0x00, 7]
+    head.extend("x-thing".to_bytes())
+    head.push(5)
+    head.extend("seven".to_bytes())
+    var out = frame(1, 4, stream, head)
+    out.extend(frame(0, 1, stream, "stream {stream} on connection {number}".to_bytes()))
+    return out
+}
+
+fn starts_with(bytes: List<u8>, prefix: List<u8>) -> bool {
+    if bytes.len() < prefix.len() {
+        return false
+    }
+    for i in 0..prefix.len() {
+        if bytes[i] != prefix[i] {
+            return false
+        }
+    }
+    return true
+}
+
+// Reads what the peer has sent, and answers each whole request in it. On HTTP/2 the first two
+// streams are answered once both have come, so they must have come over this one connection at
+// once.
+fn take(net: Net, c: Conn, p: mut Peer) {
+    let pre = preface()
+    if not p.h2 and starts_with(p.buf, pre) {
+        p.h2 = true
+        p.buf = p.buf[pre.len()..]
+        net.write(c, frame(4, 0, 0, List<u8>()))
+    }
+    if p.h2 {
+        while p.buf.len() >= 9 {
+            let n = usize(p.buf[0]) << 16 | usize(p.buf[1]) << 8 | usize(p.buf[2])
+            if p.buf.len() < 9 + n {
+                return
+            }
+            let kind = p.buf[3]
+            let flags = p.buf[4]
+            let stream = (u32(p.buf[5]) & 127) << 24 | u32(p.buf[6]) << 16 | u32(p.buf[7]) << 8 | u32(p.buf[8])
+            p.buf = p.buf[9 + n..]
+            if kind == 4 and flags & 1 == 0 {
+                net.write(c, frame(4, 1, 0, List<u8>()))
+            } else if kind == 1 and stream > 3 {
+                net.write(c, h2_answer(stream, p.number))
+            } else if kind == 1 {
+                p.held.push(stream)
+                if p.held.len() == 2 {
+                    for s in p.held {
+                        net.write(c, h2_answer(s, p.number))
+                    }
+                }
+            }
+        }
+        return
+    }
+    if starts_with(pre, p.buf) {
+        return    // maybe the start of the preface
+    }
+    let text = String.from_utf8(p.buf.copy()) ?? String()
+    let end = text.find("\r\n\r\n") ?? text.len()
+    if end == text.len() {
+        return
+    }
+    let line = text[..text.find("\r\n") ?? 0]
+    let path = line[(line.find(" ") ?? 0) + 1..]
+    let target = path[..path.find(" ") ?? path.len()]
+    p.buf = p.buf[end + 4..]
+    let body = "{target} on connection {p.number}"
+    net.write(c, "HTTP/1.1 200 OK\r\nContent-Length: {body.len()}\r\n\r\n{body}".to_bytes())
+}
+
+// Runs the server until the request finishes. Connections stay open after it.
+fn serve(net: Net, s: mut Server, req: Request) {
+    var events = List<Event>()
+    while not req.done() {
+        net.poll(5, mut events)
+        for e in events {
+            match e {
+                Accepted(c) => {
+                    while s.peers.len() <= c.slot() {
+                        s.peers.push(Peer { buf: List<u8>(), h2: false, number: 0, held: List<u32>() })
+                    }
+                    s.accepted += 1
+                    s.peers[c.slot()] = Peer { buf: List<u8>(), h2: false, number: s.accepted, held: List<u32>() }
+                }
+                Received(c) => {
+                    var got = List<u8>()
+                    _ = net.read(c, mut got)
+                    s.peers[c.slot()].buf.extend(got)
+                    take(net, c, mut s.peers[c.slot()])
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn body_of(r: Response) -> String {
+    return String.from_utf8(r.body.copy()) ?? "bad"
+}
+
+@track_caller
+fn unavailable(r: mut Request) {
+    match r.wait() {
+        err(Error.Unavailable) => {}
+        _ => panic("WinHTTP has no h2c, so Http2Only on http:// is Unavailable"),
+    }
+}
+
+// The h2c part, as the lines it prints, with the HTTP/2 connection's number written N.
+fn h2c(net: Net, s: mut Server, base: String) -> List<String> {
+    let before = s.accepted
+    var x = get("{base}/x", [], 5000, 1000, version: Version.Http2Only)
+    var y = get("{base}/y", [], 5000, 1000, version: Version.Http2Only)
+    if env.os() == "windows" {
+        unavailable(mut x)
+        unavailable(mut y)
+        return [
+            "HTTP/2 200 seven true",
+            "stream 1 on connection N + stream 3 on connection N",
+            "reused: false true, connections more: 1",
+            "HTTP/2 stream 5 on connection N reused=true",
+        ]
+    }
+    serve(net, mut s, x)
+    serve(net, mut s, y)
+    let rx = x.wait()!
+    let ry = y.wait()!
+    var out = List<String>()
+    out.push("{rx.version} {rx.status} {rx.header("X-Thing") ?? "none"} {rx.headers.len() == 1 and rx.headers[0].name == "x-thing"}")
+    out.push("{body_of(rx)} + {body_of(ry)}")
+    out.push("reused: {rx.reused} {ry.reused}, connections more: {s.accepted - before}")
+    // And one after them, over the same connection.
+    var z = get("{base}/z", [], 5000, 1000, version: Version.Http2Only)
+    serve(net, mut s, z)
+    let rz = z.wait()!
+    out.push("{rz.version} {body_of(rz)} reused={rz.reused}")
+    let numbered = "connection {before + 1}"
+    var named = List<String>()
+    for line in out {
+        named.push(line.replace(numbered, "connection N"))
+    }
+    return named
+}
+
+fn main() {
+    let net = Net.new()!
+    let port = net.listen("127.0.0.1", 0)!
+    let base = "http://127.0.0.1:{port}"
+    var s = Server { peers: List<Peer>(), accepted: 0 }
+
+    // HTTP/1.1, the default: the second request goes over the connection the first opened.
+    var a = get("{base}/one", [], 5000, 1000)
+    serve(net, mut s, a)
+    let one = a.wait()!
+    var b = get("{base}/two", [], 5000, 1000)
+    serve(net, mut s, b)
+    let two = b.wait()!
+    println("{one.version} {body_of(one)} reused={one.reused}")    // out: HTTP/1.1 /one on connection 1 reused=false
+    println("{two.version} {body_of(two)} reused={two.reused}")    // out: HTTP/1.1 /two on connection 1 reused=true
+    println("connections: {s.accepted}")    // out: connections: 1
+
+    // The first connected, with no TLS; the second didn't connect at all.
+    let t = one.timings
+    println("{t.connect_ns > 0} {t.tls_ns} {t.first_byte_ns >= t.connect_ns} {t.total_ns >= t.first_byte_ns}")    // out: true 0 true true
+    let u = two.timings
+    println("{u.resolve_ns} {u.connect_ns} {u.tls_ns} {u.first_byte_ns > 0} {u.total_ns >= u.first_byte_ns}")    // out: 0 0 0 true true
+
+    // HTTP/2 is offered in the TLS handshake, so over http:// it's HTTP/1.1.
+    var c = get("{base}/three", [], 5000, 1000, version: Version.Http2)
+    serve(net, mut s, c)
+    let three = c.wait()!
+    println("{three.version} {three.status}")    // out: HTTP/1.1 200
+
+    // Two HTTP/2 requests at once, over one connection, which the server answers only once both
+    // have come, then one more after them over it.
+    for line in h2c(net, mut s, base) {
+        println(line)
+    }
+    // out: HTTP/2 200 seven true
+    // out: stream 1 on connection N + stream 3 on connection N
+    // out: reused: false true, connections more: 1
+    // out: HTTP/2 stream 5 on connection N reused=true
+}

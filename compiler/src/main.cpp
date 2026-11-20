@@ -103,6 +103,7 @@ const std::vector<HelpGroup>& help_groups() {
           {"version", "", "print the version, and where this calx is"}}},
         {"options",
          {{"--release", "", "optimize; the default, a debug build, builds fastest"},
+          {"--cpu", "LEVEL", "the processor a release build counts on: `x86-64-v2` for one without AVX2"},
           {"--lib", "", "build a library, which a program opens while it runs"},
           {"-o", "PATH", "where build and emit-c write"},
           {"--timings", "", "print how long each step took"},
@@ -187,6 +188,9 @@ int usage(bool asked = false) {
         "\n"
         "options:\n"
         "  --release   optimize (the default is a debug build, which builds fastest)\n"
+        "  --cpu LEVEL the processor a release build counts on: x86-64, x86-64-v2, x86-64-v3 (the\n"
+        "            default) or x86-64-v4 on x86; armv8-a or armv8.2-a (the default) on Arm\n"
+        "            Linux and Windows. CALX_CPU says the same\n"
         "  --lib       build a library, which a program opens while it runs\n"
         "  -o PATH     where build and emit-c write\n"
         "  --timings   print how long each step took\n"
@@ -204,6 +208,8 @@ struct Options {
     std::vector<std::string> program_args;
     std::vector<std::string> filters;  // `calx test`: the tests to run are those whose names hold one
     BuildMode mode = BuildMode::debug;
+    std::string cpu;    // `--cpu`: the processor level a release build counts on, or "" (CLX-381)
+    bool cpu_given = false;
     bool library = false;
     bool timings = false;
     bool verbose = false;
@@ -214,6 +220,22 @@ struct Options {
 
 double ms(std::chrono::steady_clock::time_point t) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+}
+
+// `--cpu LEVEL` or `--cpu=LEVEL` at `argv[i]`, its level put in `opt` (CLX-381): 1 if it was one, 0 if
+// it's something else, and 2, the status to stop with, if it has no level.
+int cpu_option(int argc, char** argv, int& i, Options& opt) {
+    std::string a = argv[i];
+    if (a.rfind("--cpu=", 0) == 0) opt.cpu = a.substr(6);
+    else if (a != "--cpu") return 0;
+    else opt.cpu = i + 1 < argc ? argv[++i] : "";
+    if (opt.cpu.empty()) {
+        std::fprintf(stderr, "calx: --cpu takes the processor level a release build counts on, such as `--cpu %s`\n",
+                     kTarget.arch == Arch::x86_64 ? "x86-64-v2" : cpu_levels(kTarget)[0]);
+        return 2;
+    }
+    opt.cpu_given = true;
+    return 1;
 }
 
 bool is_command(const std::string& c) {
@@ -233,10 +255,12 @@ int direct_run(int argc, char** argv, Options& opt) {
             opt.mode = BuildMode::release;
         } else if (a == "--timings") {
             opt.timings = true;
+        } else if (int got = cpu_option(argc, argv, i, opt)) {
+            if (got == 2) return 2;
         } else if (a == "--verbose") {
             opt.verbose = true;
         } else if (!a.empty() && a[0] == '-') {
-            std::fprintf(stderr, "calx: %s isn't an option for running a file; the options before one are --release, --timings and --verbose\n", a.c_str());
+            std::fprintf(stderr, "calx: %s isn't an option for running a file; the options before one are --release, --cpu, --timings and --verbose\n", a.c_str());
             return 2;
         } else {
             break;
@@ -726,11 +750,13 @@ std::string record_for(const Options& opt) {
                                     opt.library ? "library" : "",
                                     opt.line_directives ? "lines" : "",
                                     opt.mode == BuildMode::release ? "release" : "debug",
+                                    opt.cpu,
                                     home,
                                     env("PATH"),
                                     env("CALX_CC"),
                                     env("CALX_PROFILE"),
-                                    env("CALX_LTO")};
+                                    env("CALX_LTO"),
+                                    env("CALX_CPU")};
     std::vector<std::string_view> parts(key.begin(), key.end());
     return record_path(cache_dir(), parts);
 }
@@ -853,6 +879,8 @@ int main(int argc, char** argv) {
             opt.json = true;
         } else if (a == "--stdin") {
             opt.stdin_text = true;
+        } else if (int got = cpu_option(argc, argv, i, opt)) {
+            if (got == 2) return 2;
         } else if (a == "-o" && i + 1 < argc) {
             opt.output = argv[++i];
         } else if (!a.empty() && a[0] == '-' && !(opt.command == "eval" && opt.input.empty())) {
@@ -872,6 +900,22 @@ int main(int argc, char** argv) {
         }
     }
     if (opt.input.empty()) return usage();
+    // The processor level a release build counts on (CLX-381): `--cpu`, or CALX_CPU, or the
+    // default. A debug build counts on nothing past the architecture whatever it says, but a level
+    // the target hasn't is an error in either, so a typo isn't found only in the release build.
+    if (!opt.cpu_given) {
+        const char* v = std::getenv("CALX_CPU");
+        opt.cpu = v ? v : "";
+    }
+    std::string march;
+    if (!opt.cpu.empty()) {
+        std::string why;
+        march = cpu_flag(kTarget, opt.cpu, why);
+        if (march.empty()) {
+            std::fprintf(stderr, "calx: %s%s\n", why.c_str(), opt.cpu_given ? "" : " (from CALX_CPU)");
+            return 2;
+        }
+    }
     if (!opt.json) update_notice();
     if (opt.library && opt.command == "run") {
         std::fprintf(stderr, "calx: a library doesn't run by itself; build it with `calx build --lib`, and open it from a program\n");
@@ -1044,7 +1088,7 @@ int main(int argc, char** argv) {
     // process ends: freeing its many small pieces one at a time took a cached build of a program
     // that uses std.regex half a millisecond (CLX-240).
     (void)front.release();
-    BuildResult b = build_program(tc, c_sources, opt.mode, opt.library ? BuildKind::library : BuildKind::program, opt.verbose);
+    BuildResult b = build_program(tc, c_sources, opt.mode, opt.library ? BuildKind::library : BuildKind::program, opt.verbose, march);
     building.reset();
     if (!b.ok) return 1;
     if (opt.timings) {

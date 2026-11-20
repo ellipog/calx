@@ -24,6 +24,8 @@ extern "C" {
     fn cx_net_flush(net: u64)
     fn cx_net_waker(net: u64) -> bool
     fn cx_net_wake(net: u64)
+    fn cx_net_wake_on_signal(net: u64) -> bool
+    fn cx_net_drain(net: u64, timeout_ms: i64) -> bool
     fn cx_net_peer(net: u64, conn: u32, out: *u8) -> u32
     fn cx_net_error_kind() -> u32
     fn cx_net_error_code() -> i32
@@ -196,7 +198,8 @@ pub enum Event {
     /// `close` finished. It's the last event for the connection, and what arrived before it can
     /// still be read until the next poll.
     Closed(Conn)
-    /// A `Waker` woke the poll. Wakes before the poll that reports them come as one.
+    /// A `Waker` woke the poll, or a signal did, after `wake_on_signal`. Wakes before the poll
+    /// that reports them come as one.
     Woken
 }
 
@@ -335,6 +338,24 @@ impl Net {
             fail NetError.Os(0)
         }
         return Waker { handle: self.handle }
+    }
+
+    /// Waits up to `timeout_ms` milliseconds, or forever if it's negative, until what was
+    /// written to every connection has gone to the system and each connection `close` closed has
+    /// closed, for a program about to end, which would cut both off, as asyncio's `drain()` and
+    /// `wait_closed()` do. `false` if the time ran out first. What happens meanwhile, a new
+    /// connection or bytes arriving, waits for the next poll.
+    pub fn drain(self, timeout_ms: i64) -> bool {
+        return unsafe { cx_net_drain(self.handle, timeout_ms) }
+    }
+
+    /// Wakes this `Net`'s polls at each signal the program handles with `std.signal`, as a
+    /// `Waker` would, so a server waiting for connections hears that it's asked to stop: the
+    /// poll reports `Woken`, and `std.signal.take` says which signal it was.
+    pub fn wake_on_signal(self) ! NetError {
+        if not unsafe { cx_net_wake_on_signal(self.handle) } {
+            fail NetError.Os(0)
+        }
     }
 
     /// Sends what was queued on the connection, then closes it. A poll reports `Closed` after.

@@ -1,0 +1,139 @@
+// `calx build --release --cpu LEVEL` builds for an older processor than the default, such as
+// x86-64-v2 for one without AVX2 (CLX-381). The runtime's AVX2 code checks for AVX2 as the
+// program runs, or has an SSE2 path a build without it takes, so the program gives the same output
+// at each level: here a search, zstd, JPEG, the hashes and normalizing, which have such code. The
+// level is in clang's flags, and so in the cache's keys; one the target hasn't is an error.
+import std.env.{arch, os, variable}
+import std.fs.{remove_dir_all, temp_dir, write_text, separator}
+import std.process.{Command}
+
+const PROGRAM: str = #"
+    import std.hash.{sha256, sha512}
+    import std.image.jpeg.{Sampling}
+    import std.image.{Color, Image, Kind}
+    import std.unicode.{Form, normalize}
+    import std.zlib.{adler32, crc32}
+    import std.zstd.{compress}
+
+    fn hex(bytes: List<u8>) -> String {
+        var s = String()
+        for b in bytes {
+            s.push_str("{b:02x}")
+        }
+        return s
+    }
+
+    fn main() {
+        var text = String()
+        var x: u64 = 7
+        for i in 0..20000 {
+            x = x * 6364136223846793005 + 1442695040888963407
+            text.push_str("line {i} has {x >> 40} and cafe\u{301} ")
+            if i % 997 == 0 {
+                text.push_str("needle {i} ")
+            }
+        }
+        var found = 0
+        var at: usize = 0
+        while let n = text[at..].find("needle") {
+            found += 1
+            at += n + 1
+        }
+        let bytes = text.to_bytes()
+        println("{text.len()} {found}")
+        println("{adler32(bytes.copy())} {crc32(bytes.copy())}")
+        println(hex(sha256(bytes.copy())))
+        println(hex(sha512(bytes.copy())))
+        println("{crc32(compress(bytes.copy(), 3))} {crc32(compress(bytes.copy(), 19))}")
+        println("{crc32(normalize(text.copy(), Form.NFC).to_bytes())}")
+        var im = Image.new(61, 43, Kind.Rgb, Color.rgb(0, 0, 0))
+        for py in 0usize..43 {
+            for px in 0usize..61 {
+                im.set(px, py, Color.rgb(u8.wrap(px * 17 + py * 3), u8.wrap(py * 29 + px), u8.wrap(px * py * 7)))
+            }
+        }
+        println("{crc32(im.encode_jpeg(75, Sampling.S420))} {crc32(im.encode_jpeg(90, Sampling.S444))}")
+    }
+    "#
+
+// What a calx or a program printed on standard output, how it ended, and its standard error.
+struct Ran {
+    out: String,
+    status: String,
+    err: String,
+}
+
+fn run(exe: String, args: List<String>, dir: String, cpu_env: String) -> Ran {
+    var cmd = Command.new(exe).args(args).dir(dir)
+    if not cpu_env.is_empty() {
+        cmd = cmd.env("CALX_CPU", cpu_env)
+    }
+    match cmd.output() {
+        ok(o) => return Ran { out: o.text().trim_end(), status: "{o.status}", err: o.error_text().trim_end() },
+        err(e) => return Ran { out: String(), status: "{e}", err: String() },
+    }
+}
+
+// The first line of a calx's errors, and how it ended.
+fn refused(calx: String, args: List<String>, dir: String, cpu_env: String = "") -> String {
+    let r = run(calx, args, dir, cpu_env)
+    let lines = r.err.lines()
+    return "{if lines.is_empty() { String() } else { lines[0].copy() }} [{r.status}]"
+}
+
+fn main() {
+    let calx = variable("CALX") ?? String("calx")
+    let dir = temp_dir()!
+    let s = separator()
+    let exe = if os() == "windows" { ".exe" } else { "" }
+    write_text("{dir}{s}simd.calx", PROGRAM)!
+    let x86 = arch() == "x86_64"
+
+    // The default level, and each older one this target has, give the same output.
+    let levels: List<String> = if x86 { ["x86-64-v2", "x86-64"] } else if os() == "macos" { ["apple-m1"] } else { ["armv8-a"] }
+    let base = run(calx.copy(), ["build", "--release", "simd.calx", "-o", "simd-default{exe}"], dir.copy(), "")
+    let want = run("{dir}{s}simd-default{exe}", [], dir.copy(), "")
+    println("{base.status} {want.status}")    // out: exited with status 0 exited with status 0
+    println(want.out)
+    // out: 675947 21
+    // out: 3383215220 3275834758
+    // out: a990986137026af7c0f1029f24c4b1e9afb72c7255f8561152008220b4dbfcf9
+    // out: 8acc39eaebd89563adb67c2d7e8255a83a5a029a72224a1a1647b657a70049c71d432ea4e01eb816a7dc0be61e43d155fd2541cbca3ca4f965cc21965a2db1c9
+    // out: 443657897 4104889731
+    // out: 4074380844
+    // out: 786573989 1711182831
+    var same = true
+    for level in levels {
+        let name = "simd-{level}{exe}"
+        let built = run(calx.copy(), ["build", "--release", "--cpu", level.copy(), "simd.calx", "-o", name.copy()], dir.copy(), "")
+        let got = run("{dir}{s}{name}", [], dir.copy(), "")
+        if built.status != "exited with status 0" or got.out != want.out {
+            println("{level}: {built.status} {built.err} {got.status}\n{got.out}")
+            same = false
+        }
+    }
+    // CALX_CPU says the same as --cpu, and a debug build takes it too, counting on nothing.
+    let env_built = run(calx.copy(), ["build", "--release", "simd.calx", "-o", "simd-env{exe}"], dir.copy(), levels[0].copy())
+    let env_got = run("{dir}{s}simd-env{exe}", [], dir.copy(), "")
+    let debug_got = run(calx.copy(), ["run", "--cpu={levels[0]}", "simd.calx"], dir.copy(), "")
+    println("{same} {env_built.status} {env_got.out == want.out} {debug_got.out == want.out}")    // out: true exited with status 0 true true
+
+    // The level is in clang's flags. The program's text is new each run, so its module is compiled,
+    // and printed with --verbose, rather than found in the cache: it prints its temporary folder.
+    write_text("{dir}{s}flag.calx", "fn main() \{\n    println(#\"{dir}\"#)\n\}\n")!
+    let flagged = run(calx.copy(), ["build", "--release", "--verbose", "--cpu", levels[0].copy(), "flag.calx", "-o", "flag{exe}"], dir.copy(), "")
+    let march = if os() == "macos" { "-mcpu=" } else { "-march=" }
+    println("{flagged.status} {flagged.err.contains("{march}{levels[0]} ")}")    // out: exited with status 0 true
+
+    // A level the target hasn't is an error, from --cpu or CALX_CPU, before anything is built.
+    let other = String(if x86 { "armv8-a" } else { "x86-64-v2" })
+    let wrong = refused(calx.copy(), ["build", "--release", "--cpu", other, "simd.calx"], dir.copy())
+    println("{wrong.contains("is a level of") and wrong.contains("this calx builds for")}")    // out: true
+    let bad = String(if x86 { "x86-64-v9" } else { "armv9.9-a" })
+    let typo = refused(calx.copy(), ["build", "--release", "--cpu", bad.copy(), "simd.calx"], dir.copy())
+    println("{typo.contains("`{bad}` isn't a processor level; release builds for") and typo.ends_with("[exited with status 2]")}")    // out: true
+    let from_env = refused(calx.copy(), ["run", "--release", "simd.calx"], dir.copy(), "pentium")
+    println("{from_env.contains("(from CALX_CPU) [exited with status 2]")}")    // out: true
+    println("{refused(calx.copy(), ["build", "simd.calx", "--cpu"], dir.copy()).contains("--cpu takes the processor level")}")    // out: true
+    remove_dir_all(dir)!
+}

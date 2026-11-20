@@ -1613,8 +1613,10 @@ bool place_build(const std::string& built, const std::string& out, std::string& 
 }
 
 BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c_sources_in, BuildMode mode, BuildKind kind,
-                          bool verbose) {
+                          bool verbose, const std::string& cpu) {
     BuildResult r;
+    // The processor a release build counts on, in its compile and its link, and so in every key.
+    const std::string march = cpu.empty() ? std::string(release_cpu_flag(kTarget)) : cpu;
     bool library = kind == BuildKind::library;
     fs::path runtime = fs::path(tc.home) / "runtime";
     // Each of the runtime's files the keys hold, which a build's record names (CLX-242).
@@ -1696,7 +1698,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
 #endif
     } else {
         flags.push_back("-O3");
-        flags.push_back(release_cpu_flag(kTarget));
+        flags.push_back(march);
     }
     // `CALX_PROFILE=1` keeps every function's frame pointer, so a sampling profiler such as perf
     // walks the stack from its samples without unwind tables. It costs a register, so it's off.
@@ -1787,8 +1789,11 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     if (parts_ok && calls({"cx_text_trim(", "cx_text_replace", "cx_text_repeat", "cx_text_pad", "cx_text_split(", "cx_text_split_first(", "cx_text_split_into(", "cx_text_split_whitespace(", "cx_text_lines(", "cx_text_join", "cx_text_words"})) {
         parts_ok = part("calx_text.c");
     }
-    if (parts_ok && calls({"cx_digest_"})) parts_ok = part("calx_digest.c");
+    // argon2 hashes with BLAKE2b and Ed25519 with SHA-512, both in calx_digest.c.
+    if (parts_ok && calls({"cx_digest_", "cx_argon2_", "cx_ed25519_"})) parts_ok = part("calx_digest.c");
     if (parts_ok && calls({"cx_crypto_", "cx_cfb8_", "cx_rsa_"})) parts_ok = part("calx_crypto.c");
+    if (parts_ok && calls({"cx_argon2_"})) parts_ok = part("calx_argon2.c");
+    if (parts_ok && calls({"cx_ed25519_"})) parts_ok = part("calx_ed25519.c");
     if (parts_ok && calls({"cx_zlib_", "cx_inflate", "cx_deflate"})) parts_ok = part("calx_zlib.c");
     if (parts_ok && calls({"cx_http_"})) parts_ok = part("calx_http.c");
     if (parts_ok && calls({"cx_keyring_"})) parts_ok = part("calx_keyring.c");
@@ -1801,6 +1806,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     if (parts_ok && calls({"cx_jpg_"})) parts_ok = part("calx_jpeg.c");
     if (parts_ok && calls({"cx_fs_"})) parts_ok = part("calx_fs.c");
     if (parts_ok && calls({"cx_proc_"})) parts_ok = part("calx_proc.c");
+    if (parts_ok && calls({"cx_signal_"})) parts_ok = part("calx_signal.c");
     if (parts_ok && calls({"cx_queue_", "cx_thread_", "cx_Sender", "cx_Receiver", "cx_Thread"})) parts_ok = part("calx_thread.c");
     if (parts_ok && calls({"cx_sort_i8(", "cx_sort_i16(", "cx_sort_i32(", "cx_sort_i64(", "cx_sort_u8(", "cx_sort_u16(",
                            "cx_sort_u32(", "cx_sort_u64(", "cx_sort_usize(", "cx_sort_char(", "cx_sort_rune(", "cx_sort_bool(",
@@ -1904,7 +1910,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         link_flags.push_back("-Wl,--gc-sections");
         // The system libraries the runtime's parts use, which Visual Studio's linker takes from the
         // `#pragma comment(lib)` in each. A program imports from one only what it calls.
-        for (const char* lib : {"-lws2_32", "-lwinhttp", "-lbcrypt", "-lsynchronization"}) link_flags.push_back(lib);
+        for (const char* lib : {"-lws2_32", "-lwinhttp", "-lbcrypt", "-lsynchronization", "-ladvapi32"}) link_flags.push_back(lib);
     } else {
         // The PDB makes lld-link keep every section by default; a section nothing reads, such as
         // an `embed` table a program never looks at, is dropped as it would be without one.
@@ -1934,7 +1940,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         if (tc.mingw) {
             // mingw's lld takes ld.lld's options, and the optimization level from the driver.
             link_flags.push_back("-O3");
-            link_flags.push_back(release_cpu_flag(kTarget));
+            link_flags.push_back(march);
             for (const std::string& f : {std::string("--thinlto-cache-policy=cache_size_bytes=512m"),
                                          "--thinlto-cache-dir=" + lto_cache}) {
                 link_flags.push_back("-Xlinker");
@@ -1952,7 +1958,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
 #elif defined(__APPLE__)
         // ld64.lld takes ld64's name for the cache's folder, and lld's for its policy.
         link_flags.push_back("-O3");
-        link_flags.push_back(release_cpu_flag(kTarget));
+        link_flags.push_back(march);
         for (const std::string& f : {std::string("--thinlto-cache-policy=cache_size_bytes=512m"), std::string("-cache_path_lto"),
                                      lto_cache}) {
             link_flags.push_back("-Xlinker");
@@ -1960,7 +1966,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         }
 #else
         link_flags.push_back("-O3");
-        link_flags.push_back(release_cpu_flag(kTarget));
+        link_flags.push_back(march);
         for (const std::string& f : {std::string("--thinlto-cache-policy=cache_size_bytes=512m"),
                                      "--thinlto-cache-dir=" + lto_cache}) {
             link_flags.push_back("-Xlinker");

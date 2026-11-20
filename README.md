@@ -18,7 +18,7 @@ What sets it apart:
 
 Status: Calcite's Phases 0 to 5 have passed their gates, the compiler's core, the protocol, and chunks, storage, regions and world generation among them, and Phase 6, simulation, is under way. The compiler builds integers, floats, arrays, structs, enums, tuples, optionals, `match`, generics, interfaces, modules, `String`, `List`, `Map` and `Set`, error values (`T ! E`, `fail`, `try`), closures, `unsafe` code with C functions, `parallel for`, libraries a program opens while it runs, for plugins, and attributes that libraries define in Calx, which generate code while the program compiles. They give Java's results on every platform. The standard library has:
 
-- **Files, processes and the terminal:** `std.fs`, `std.path`, `std.process`, `std.env`, `std.io`, `std.term`, `std.cli`, `std.shell` and `std.log`.
+- **Files, processes and the terminal:** `std.fs`, `std.path`, `std.process`, `std.signal`, `std.env`, `std.io`, `std.term`, `std.cli`, `std.shell` and `std.log`.
 - **Text and data:** `std.json`, `std.yaml`, `std.toml`, `std.ini`, `std.csv`, `std.xml`, `std.html`, `std.sqlite`, `std.regex`, `std.textwrap`, `std.diff`, `std.unicode`, `std.url` and `std.uuid`.
 - **Compression and archives:** `std.zlib`, `std.zstd`, `std.xz`, `std.lz4`, `std.zip` and `std.tar`.
 - **Numbers:** `std.math`, `std.bigint`, `std.decimal`, `std.stats`, `std.random` and `std.java.math`.

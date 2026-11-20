@@ -64,6 +64,8 @@ fn main() ! Error {
 | `server.next(timeout_ms: i64 = -1) -> Request?` | The next request, from whichever connection has one, waiting up to `timeout_ms` milliseconds for it, or forever if it's negative. `none` if none came in that time |
 | `server.respond(req: Request, res: Response)` | Sends `res` as the answer to `req` |
 | `server.serve(dir: String)` | The folder `dir` served on this server until the program is stopped, as `serve_dir` serves it, with its files opened on worker threads and big ones sent by the system from the file ([below](#serving-a-folder)) |
+| `server.wake_on_signal() ! NetError` | Stops `next`, `next_event` and `serve` at each signal the program handles with [`std.signal`](signal.md): the first two give `none` while one is pending, and `serve` returns ([below](#stopping-cleanly)) |
+| `server.shutdown(timeout_ms: i64 = 5000)` | Closes every connection cleanly, for a server that's stopping, waiting up to `timeout_ms` for what each was sent to go, WebSockets to close with 1001 and files to finish ([below](#stopping-cleanly)) |
 | `Request` | `method`, `GET` or `POST` or another, as it was sent. `target`, the path and query still percent-encoded: `/find?q=a%20b`. `path`, decoded, without the query: `/find`. `query`, what's after the `?`, as it was sent. `version`, `HTTP/1.1` or `HTTP/1.0`. `headers: List<Header>`, in the order they came. `body: List<u8>`. And `client`, the address it came from |
 | `req.header(name: String) -> String?` | The first header named `name`, in any case |
 | `req.text() -> String?` | The body as text, or `none` if it isn't UTF-8 |
@@ -249,6 +251,36 @@ They print a first line saying where, and log each request to standard error as 
 Serving HTTP on 127.0.0.1 port 8000 (http://127.0.0.1:8000/) ...
 127.0.0.1 - - [08/Nov/2026 12:55:25] "GET / HTTP/1.1" 200 -
 ```
+
+## Stopping cleanly
+
+A server that's asked to stop, by Ctrl+C, by systemd's SIGTERM or by Windows shutting down, should stop taking requests, answer the ones it has, and close its connections, rather than die halfway through an answer. [`std.signal`](signal.md)'s `handle` says the program handles those signals. After `wake_on_signal`, a signal wakes the server's poll, and `next` and `next_event` give `none` while one is pending, so the loop ends. `shutdown` then closes every connection cleanly, as Python's `server_close()` does after `shutdown()`:
+
+```calx
+import std.http.{Header, get}
+import std.http.server.{Response, Server}
+import std.signal.{Signal, handle, raise, take}
+
+fn main() ! Error {
+    handle()
+    var server = try Server.listen(0)
+    try server.wake_on_signal()
+    var r = get("{server.url()}hi", List<Header>(), 5000, 1024)
+    while let req = server.next() {
+        server.respond(req, Response.text("hello"))
+        // As if Ctrl+C had been pressed once it had answered.
+        _ = raise(Signal.Interrupt)
+    }
+    println("stopping on {take() ?? Signal.Hangup}")    // out: stopping on interrupt
+    server.shutdown()
+    let resp = try r.wait()
+    println("{resp.status}")    // out: 200
+}
+```
+
+- **`shutdown(timeout_ms: i64 = 5000)`.** Each connection sends what it was sent before it closes, and a file being sent finishes. A WebSocket is closed with 1001, going away, and waits for the client's close, and an event stream ends. A request handed out and not answered gets no answer, and a connection that comes meanwhile is closed at once. It waits up to `timeout_ms` milliseconds for all of that, or forever if it's negative, then closes what's left, and waits for it to have closed, with [`Net.drain`](net.md#stopping-at-a-signal). The sockets' `Closed` and the streams' `Ended` wait for `next_event`, which gives them once the signal's taken.
+- **`serve` and `serve_dir`.** After `wake_on_signal`, a signal stops `serve`: it takes no more requests, waits for its workers to answer those they have, calls `shutdown`, and returns. `serve_dir` doesn't handle signals, so Ctrl+C ends it at once, as it ends `python -m http.server`.
+- **Without a signal.** `shutdown` works at any time, for a server a program stops for its own reasons.
 
 ## Where it differs from Python
 

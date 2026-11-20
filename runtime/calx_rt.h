@@ -86,6 +86,8 @@ typedef struct {
 /* Startup and exit, called by the generated `main`. */
 CX_FN(void, cx_start, (int argc, char** argv));
 CX_FN(int, cx_finish, (void));
+/* The status a `main` that failed ends with, 1, for what runs as the program ends (std.signal). */
+CX_FN(void, cx_exit_status, (int code));
 /* A test program's start, for `calx test`: `cx_start`, then the test it's asked to run, or -1. */
 CX_FN(cx_i64, cx_test_start, (int argc, char** argv));
 
@@ -934,6 +936,26 @@ CX_FN(void, cx_digest_start, (cx_u8* ctx, cx_u32 kind));
 CX_FN(void, cx_digest_add, (cx_u8* ctx, const cx_u8* p, cx_usize n));
 CX_FN(cx_usize, cx_digest_finish, (cx_u8* ctx, cx_u8* out));
 CX_FN(void, cx_digest_hmac_sha256, (const cx_u8* key, cx_usize key_len, const cx_u8* msg, cx_usize msg_len, cx_u8* out));
+/* BLAKE2b, in calx_digest.c too (CLX-384): a digest of `outlen` bytes, 1 to 64, under a key of up
+ * to 64 bytes, in a context of CX_DIGEST_CTX bytes. */
+CX_FN(void, cx_digest_blake2b_start, (cx_u8* ctx, cx_usize outlen, const cx_u8* key, cx_usize keylen));
+CX_FN(void, cx_digest_blake2b_add, (cx_u8* ctx, const cx_u8* p, cx_usize n));
+CX_FN(cx_usize, cx_digest_blake2b_finish, (cx_u8* ctx, cx_u8* out));
+
+/* argon2d, argon2i and argon2id (type 0, 1 and 2), version 0x13, in calx_argon2.c (CLX-384).
+ * Writes `outlen` bytes of tag, and returns false if the parameters are out of RFC 9106's range
+ * or the memory couldn't be had. */
+CX_FN(cx_bool, cx_argon2_hash, (cx_u32 type, cx_u32 memory, cx_u32 passes, cx_u32 lanes, const cx_u8* pwd, cx_usize pwdlen,
+                                const cx_u8* salt, cx_usize saltlen, const cx_u8* secret, cx_usize secretlen, const cx_u8* ad,
+                                cx_usize adlen, cx_u8* out, cx_usize outlen));
+
+/* Ed25519, RFC 8032, in calx_ed25519.c (CLX-379). A private key is its 32-byte seed, a public key
+ * 32 bytes, a signature 64. `cx_ed25519_check` says whether 32 bytes are a public key: a point
+ * on the curve in its one encoding. */
+CX_FN(void, cx_ed25519_public, (const cx_u8* seed, cx_u8* out));
+CX_FN(void, cx_ed25519_sign, (const cx_u8* seed, const cx_u8* pub, const cx_u8* msg, cx_usize len, cx_u8* out));
+CX_FN(cx_bool, cx_ed25519_check, (const cx_u8* pub));
+CX_FN(cx_bool, cx_ed25519_verify, (const cx_u8* pub, const cx_u8* msg, cx_usize len, const cx_u8* sig));
 
 /* Random bytes from the system, AES-128-CFB8 and RSA, in calx_crypto.c (D118). The contexts are
  * CX_CFB8_CTX, CX_RSA_CTX and CX_RSA_PUBLIC_CTX bytes, with no alignment needed. */
@@ -986,16 +1008,24 @@ CX_FN(void, cx_net_close, (cx_u64 h, cx_u32 id));
 CX_FN(void, cx_net_flush, (cx_u64 h));
 CX_FN(cx_bool, cx_net_waker, (cx_u64 h));
 CX_FN(void, cx_net_wake, (cx_u64 h));
+CX_FN(cx_bool, cx_net_wake_on_signal, (cx_u64 h));
+CX_FN(cx_bool, cx_net_drain, (cx_u64 h, cx_i64 timeout_ms));
 CX_FN(cx_u32, cx_net_peer, (cx_u64 h, cx_u32 id, cx_u8* out));
 CX_FN(cx_u32, cx_net_error_kind, (void));
 CX_FN(cx_i32, cx_net_error_code, (void));
 
-/* HTTP and HTTPS requests, each on a thread of its own, in calx_http.c (D118). A request is a
- * handle that's never 0. `cx_http_done` and `cx_http_wait` give -1 for one that was freed, and
- * `cx_http_wait` gives what went wrong as std.http's Error numbers it, or 0. The getters are for a
- * request that was waited for. */
+/* HTTP and HTTPS requests, in calx_http.c (D118): each on a thread of its own on Windows, and
+ * together on one on Linux and macOS. A request is a handle that's never 0. `version` is the HTTP
+ * it asks for, as std.http's Version numbers it. `cx_http_done` and `cx_http_wait` give -1 for
+ * one that was freed, and `cx_http_wait` gives what went wrong as std.http's Error numbers it, or
+ * 0. The getters are for a request that was waited for. */
 CX_FN(cx_u64, cx_http_start, (cx_bool post, const cx_u8* url, cx_usize url_len, const cx_u8* head, cx_usize head_len, const cx_u8* body,
-                              cx_usize body_len, cx_u32 timeout_ms, cx_usize limit));
+                              cx_usize body_len, cx_u32 timeout_ms, cx_usize limit, cx_u32 version));
+/* The HTTP the response came in: 10, 11 or 20. */
+CX_FN(cx_u32, cx_http_version, (cx_u64 h));
+/* Its times in nanoseconds, resolve, connect, TLS, first byte and total, then 1 if it went over a
+ * connection that was open already, into `out`, 6 of them. */
+CX_FN(void, cx_http_times, (cx_u64 h, cx_u64* out));
 CX_FN(cx_i32, cx_http_done, (cx_u64 h));
 CX_FN(cx_i32, cx_http_wait, (cx_u64 h));
 CX_FN(cx_i32, cx_http_code, (cx_u64 h));
@@ -1274,20 +1304,24 @@ CX_FN(cx_i64, cx_proc_group, (void));
 CX_FN(void, cx_proc_group_free, (cx_i64 g));
 CX_FN(cx_u32, cx_proc_id, (cx_i64 h));
 CX_FN(void, cx_proc_kill, (cx_i64 h));
+CX_FN(void, cx_proc_kill_tree, (cx_i64 h));
 CX_FN(cx_i64, cx_proc_line, (cx_i64 h, cx_u64 until));
 CX_FN(void, cx_proc_machine_cpu, (cx_u64* out));
 CX_FN(cx_i32, cx_proc_poll, (cx_i64 h));
 CX_FN(void, cx_proc_result_copy, (cx_u8* to));
 CX_FN(cx_usize, cx_proc_result_len, (void));
+CX_FN(cx_i32, cx_proc_send_signal, (cx_i64 h, cx_i32 sig));
 CX_FN(cx_i32, cx_proc_set_affinity, (const cx_u32* cpus, cx_usize n));
 CX_FN(cx_i32, cx_proc_signal, (cx_i64 h));
 CX_FN(void, cx_proc_usage, (cx_i64 h, cx_u64* out));
 CX_FN(cx_i64, cx_proc_some, (cx_i64 h, cx_u64 until));
 CX_FN(cx_i64, cx_proc_spawn, (const cx_u8* spec_p, cx_usize spec_n, const cx_u8* input, cx_usize input_n, cx_i64 g));
 CX_FN(cx_u32, cx_proc_state, (cx_i64 h));
+CX_FN(void, cx_proc_stop, (cx_i64 h));
 CX_FN(void, cx_proc_take, (cx_i64 h, cx_u32 i, cx_u8* to, cx_usize n));
 CX_FN(void, cx_proc_wait, (cx_i64 h));
 CX_FN(cx_usize, cx_proc_wait_any, (const cx_i64* hs, cx_usize n));
+CX_FN(cx_i32, cx_proc_wait_exit, (cx_i64 h, cx_u64 until));
 CX_FN(cx_i32, cx_proc_which, (const cx_u8* name, cx_usize n));
 CX_FN(cx_i32, cx_proc_write, (cx_i64 h, const cx_u8* d, cx_usize n));
 
@@ -1305,6 +1339,14 @@ CX_FN(void, cx_term_cooked, (void));
 CX_FN(cx_u32, cx_term_raw, (void));
 CX_FN(cx_usize, cx_term_read, (cx_u8* p, cx_usize n));
 CX_FN(cx_u64, cx_term_size, (void));
+
+/* Signals the program handles, in calx_signal.c, behind std.signal (CLX-377). */
+CX_FN(void, cx_signal_handle, (cx_u32 kinds));
+CX_FN(cx_u32, cx_signal_take, (void));
+CX_FN(cx_bool, cx_signal_pending, (void));
+CX_FN(cx_u32, cx_signal_wait, (cx_i64 timeout_ms));
+CX_FN(cx_bool, cx_signal_raise, (cx_u32 kind));
+CX_FN(cx_bool, cx_signal_service, (void));
 CX_FN(void, cx_thread_sleep, (cx_u64 ns));
 
 /* Hashing, for `Map` and `Set` (D94). The same value hashes the same on every platform and in

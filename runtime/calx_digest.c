@@ -846,3 +846,113 @@ void cx_digest_hmac_sha256(const cx_u8* key, cx_usize key_len, const cx_u8* msg,
     add(&d, inner, 32);
     finish(&d, out);
 }
+
+/* --- BLAKE2b ------------------------------------------------------------------------------- */
+
+/* RFC 7693: a digest of 1 to 64 bytes, under a key of up to 64 bytes or none. Its starting values
+ * are SHA-512's, and its rounds ChaCha's quarter-round on 64-bit words, with the message words
+ * taken in the order `blake2b_sigma` gives. argon2 (calx_argon2.c) hashes its first and last
+ * blocks with it. Its context is CX_DIGEST_CTX bytes too. */
+typedef struct {
+    cx_u64 h[8];
+    cx_u64 t;      // bytes compressed, which is all a 64-bit count needs
+    cx_u8 buf[128];
+    cx_u32 used;   // bytes waiting in `buf`, all 128 of them kept until more come, since the last
+                   // block is compressed differently
+    cx_u32 outlen;
+} blake2b;
+
+_Static_assert(sizeof(blake2b) <= CX_DIGEST_CTX, "BLAKE2b's context fits what std.hash makes room for");
+
+static const cx_u8 blake2b_sigma[12][16] = {
+    {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}, {14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3},
+    {11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4}, {7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8},
+    {9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13}, {2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9},
+    {12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11}, {13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10},
+    {6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5}, {10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0},
+    {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}, {14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3},
+};
+
+#define B2B_G(a, b, c, d, x, y)        \
+    do {                               \
+        a = a + b + (x);               \
+        d = rotr64(d ^ a, 32);         \
+        c = c + d;                     \
+        b = rotr64(b ^ c, 24);         \
+        a = a + b + (y);               \
+        d = rotr64(d ^ a, 16);         \
+        c = c + d;                     \
+        b = rotr64(b ^ c, 63);         \
+    } while (0)
+
+static void blake2b_compress(blake2b* s, const cx_u8* block, int last) {
+    cx_u64 m[16], v[16];
+    memcpy(m, block, 128);  // little-endian words, as every target the runtime builds for is
+    for (int i = 0; i < 8; i++) {
+        v[i] = s->h[i];
+        v[i + 8] = sha512_h[i];
+    }
+    v[12] ^= s->t;
+    if (last) v[14] = ~v[14];
+    for (int r = 0; r < 12; r++) {
+        const cx_u8* z = blake2b_sigma[r];
+        B2B_G(v[0], v[4], v[8], v[12], m[z[0]], m[z[1]]);
+        B2B_G(v[1], v[5], v[9], v[13], m[z[2]], m[z[3]]);
+        B2B_G(v[2], v[6], v[10], v[14], m[z[4]], m[z[5]]);
+        B2B_G(v[3], v[7], v[11], v[15], m[z[6]], m[z[7]]);
+        B2B_G(v[0], v[5], v[10], v[15], m[z[8]], m[z[9]]);
+        B2B_G(v[1], v[6], v[11], v[12], m[z[10]], m[z[11]]);
+        B2B_G(v[2], v[7], v[8], v[13], m[z[12]], m[z[13]]);
+        B2B_G(v[3], v[4], v[9], v[14], m[z[14]], m[z[15]]);
+    }
+    for (int i = 0; i < 8; i++) s->h[i] ^= v[i] ^ v[i + 8];
+}
+
+/* The parameter block's first word holds the digest's length, the key's, and a fanout and depth
+ * of 1, for a hash that isn't a tree. A key is padded to a block of its own, hashed first. */
+void cx_digest_blake2b_start(cx_u8* ctx, cx_usize outlen, const cx_u8* key, cx_usize keylen) {
+    blake2b s;
+    memset(&s, 0, sizeof s);
+    memcpy(s.h, sha512_h, sizeof s.h);
+    s.h[0] ^= 0x01010000u ^ ((cx_u64)keylen << 8) ^ (cx_u64)outlen;
+    s.outlen = (cx_u32)outlen;
+    if (keylen) {
+        memcpy(s.buf, key, keylen);
+        s.used = 128;
+    }
+    memcpy(ctx, &s, sizeof s);
+}
+
+void cx_digest_blake2b_add(cx_u8* ctx, const cx_u8* p, cx_usize n) {
+    if (!n) return;
+    blake2b s;
+    memcpy(&s, ctx, sizeof s);
+    cx_usize fill = 128 - s.used;
+    if (n > fill) {
+        memcpy(s.buf + s.used, p, fill);
+        s.t += 128;
+        blake2b_compress(&s, s.buf, 0);
+        s.used = 0;
+        p += fill;
+        n -= fill;
+        while (n > 128) {
+            s.t += 128;
+            blake2b_compress(&s, p, 0);
+            p += 128;
+            n -= 128;
+        }
+    }
+    memcpy(s.buf + s.used, p, n);
+    s.used += (cx_u32)n;
+    memcpy(ctx, &s, sizeof s);
+}
+
+cx_usize cx_digest_blake2b_finish(cx_u8* ctx, cx_u8* out) {
+    blake2b s;
+    memcpy(&s, ctx, sizeof s);
+    s.t += s.used;
+    memset(s.buf + s.used, 0, 128 - s.used);
+    blake2b_compress(&s, s.buf, 1);
+    memcpy(out, s.h, s.outlen);
+    return s.outlen;
+}

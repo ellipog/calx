@@ -80,8 +80,8 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 8. [std.hint](std/hint.md): `black_box`, which hides a value from the optimizer, for benchmarks
 9. [std.text.mutf8](std/text-mutf8.md): Java's Modified UTF-8, as `DataOutputStream.writeUTF` writes it
 10. [std.mail](std/mail.md): messages between actors, delivered at the barrier in order of sender, then of sending
-11. [std.hash](std/hash.md): MD5, SHA-1, SHA-256, SHA-384, SHA-512 and HMAC with any of them, as Java's `MessageDigest` and `Mac` and Python's `hashlib` give them, with SHA-1 and SHA-256 on the processor's SHA instructions
-12. [std.crypto](std/crypto.md): random bytes from the system, AES-CFB8 and RSA
+11. [std.hash](std/hash.md): MD5, SHA-1, SHA-256, SHA-384, SHA-512 and HMAC with any of them, as Java's `MessageDigest` and `Mac` and Python's `hashlib` give them, with SHA-1 and SHA-256 on the processor's SHA instructions, and BLAKE2b
+12. [std.crypto](std/crypto.md): random bytes from the system, AES-CFB8, RSA, argon2id password hashing in PHC strings, and Ed25519 signatures
 13. [std.zlib](std/zlib.md): zlib, gzip and raw deflate, as Java's `Deflater`, `Inflater` and GZIP streams write and read them
 14. [std.http](std/http.md): HTTP and HTTPS requests on the system's own client, each on a thread of its own, `fetch`, which waits for one, for scripts, and `multipart/form-data` forms for uploads
 15. [std.lz4](std/lz4.md): LZ4 block streams, as lz4-java's `LZ4BlockOutputStream` and `LZ4BlockInputStream` write and read them
@@ -133,7 +133,8 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 61. [std.nbt](std/nbt.md): Minecraft's NBT read and written as vanilla 26.3's `NbtIo` does it, files gzipped, zlib-compressed or plain, tags changed in place, SNBT read, shown and laid out, and NBT paths, as vanilla does, and FTB's SNBT as FTB Library does
 62. [std.nbt.region](std/nbt-region.md): Minecraft's region files read and written as vanilla 26.3's `RegionFile` reads and writes them, chunks in each compression, chunks in files of their own, and broken chunks, read as vanilla reads them
 63. [std.http.websocket](std/http-websocket.md): a WebSocket client, `ws://` and `wss://` on the system's own HTTP client, text and binary messages sent and received, with pings and closes answered on a thread of its own, as Python's `websockets` connects
-64. [std.keyring](std/keyring.md): passwords and tokens kept in the system's own credential store, Credential Manager, the Keychain or the Secret Service, by service and account, as Python's `keyring` keeps them, with `Unavailable` where there's none, as on a headless server
+64. [std.signal](std/signal.md): Ctrl+C, SIGTERM, SIGHUP, Windows' console close and shutdown, and a service's stop, handled by the program as Python's `signal.signal` handles them, with a server's event loop woken to stop cleanly, and a program run as a Windows service
+65. [std.keyring](std/keyring.md): passwords and tokens kept in the system's own credential store, Credential Manager, the Keychain or the Secret Service, by service and account, as Python's `keyring` keeps them, with `Unavailable` where there's none, as on a headless server
 
 ### Java compatibility
 

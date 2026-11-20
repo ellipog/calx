@@ -1,0 +1,127 @@
+/// Signals a program handles: a request to stop from outside, as Python's `signal.signal` sets a
+/// handler for SIGTERM.
+///
+/// A program that's asked to stop, by Ctrl+C at the terminal, by systemd or launchd stopping its
+/// unit, by Windows shutting down or by the Service Control Manager stopping its service, ends at
+/// once unless it says it handles that. `handle` says so. From then on a signal that arrives only
+/// records itself, and the program learns of it when it's ready: `take` says whether one came,
+/// `wait` waits for one, and a `Net` that `wake_on_signal` was called on wakes from its poll, so
+/// a server stops taking requests, finishes what it's doing and closes its connections before it
+/// ends. And `service` lets a program run as a Windows service.
+module std.signal
+
+extern "C" {
+    fn cx_signal_handle(kinds: u32)
+    fn cx_signal_take() -> u32
+    fn cx_signal_pending() -> bool
+    fn cx_signal_wait(timeout_ms: i64) -> u32
+    fn cx_signal_raise(kind: u32) -> bool
+    fn cx_signal_service() -> bool
+}
+
+/// A signal, the same on every system. Each is a request to stop, which a program that doesn't
+/// handle it ends at.
+pub enum Signal {
+    /// SIGINT: Ctrl+C at the terminal, on Windows too.
+    Interrupt
+    /// SIGTERM, what `kill`, systemd and launchd stop a program with. On Windows: Ctrl+Break,
+    /// which is how `Child.stop` asks a program there, the user logging off, the system shutting
+    /// down, and the Service Control Manager stopping a service.
+    Terminate
+    /// SIGHUP: the terminal went away. On Windows: the console window closed.
+    Hangup
+}
+
+/// The signal's name in words: `interrupt`, `terminate` or `hangup`.
+impl Display for Signal {
+    fn show(self) {
+        match self {
+            Interrupt => print("interrupt"),
+            Terminate => print("terminate"),
+            Hangup => print("hangup"),
+        }
+    }
+}
+
+fn bit(s: Signal) -> u32 {
+    return match s {
+        Signal.Interrupt => 1,
+        Signal.Terminate => 2,
+        Signal.Hangup => 4,
+    }
+}
+
+fn number(s: Signal) -> u32 {
+    return match s {
+        Signal.Interrupt => 0,
+        Signal.Terminate => 1,
+        Signal.Hangup => 2,
+    }
+}
+
+fn from_runtime(k: u32) -> Signal? {
+    return match k {
+        1 => some(Signal.Interrupt),
+        2 => some(Signal.Terminate),
+        3 => some(Signal.Hangup),
+        _ => none,
+    }
+}
+
+/// Handles each of `signals`, or all three if it's empty or left out, from now until the program
+/// ends: one that arrives no longer ends the program, but waits for `take` or `wait`, and wakes
+/// each `Net` whose `wake_on_signal` was called. A program that's handling them stops when it's
+/// ready, by returning from `main` or with `exit`, and the terminal is put back then as it always
+/// is.
+///
+/// On POSIX, SIGINT or SIGHUP that the program was started ignoring stays ignored, as `nohup`
+/// ignores SIGHUP and a shell SIGINT for a program it runs in the background.
+pub fn handle(signals: List<Signal> = []) {
+    var kinds: u32 = if signals.is_empty() { 7 } else { 0 }
+    for s in signals {
+        kinds = kinds | bit(s)
+    }
+    unsafe {
+        cx_signal_handle(kinds)
+    }
+}
+
+/// The signal that arrived and hasn't been taken, if one has, taken. If more than one kind has,
+/// `Interrupt` comes first, then `Terminate`, then `Hangup`, and a kind that arrives again before
+/// it's taken comes as one.
+pub fn take() -> Signal? {
+    return from_runtime(unsafe { cx_signal_take() })
+}
+
+/// Whether a signal has arrived that `take` hasn't taken, leaving it for `take`.
+pub fn pending() -> bool {
+    return unsafe { cx_signal_pending() }
+}
+
+/// As `take`, but waiting up to `timeout_ms` milliseconds for a signal, or forever if it's
+/// negative. `none` once the time is up. Waiting forever panics if no signal is handled, since
+/// none would come. It panics inside a `parallel for`, since what each iteration saw would
+/// depend on timing.
+@track_caller
+pub fn wait(timeout_ms: i64 = -1) -> Signal? {
+    return from_runtime(unsafe { cx_signal_wait(timeout_ms) })
+}
+
+/// Sends `s` to this program, as Python's `signal.raise_signal` does: if it's handled, it's
+/// recorded as one from outside is. If it isn't, it ends the program as it would, with what was
+/// printed written first: on POSIX by the signal, and on Windows with the status the system gives
+/// a program Ctrl+C ends, `0xC000013A`. `false` if the system wouldn't send it.
+pub fn raise(s: Signal) -> bool {
+    return unsafe { cx_signal_raise(number(s)) }
+}
+
+/// Whether Windows' Service Control Manager started this program as a service, `false` when it
+/// was started any other way and on other systems, whose service managers stop a program with
+/// SIGTERM. A service is told it's running, and the manager's request to stop it, or the
+/// system's shutdown, comes as `Terminate`, which it handles from then on. The program says it's
+/// stopping, and has 30 seconds to end before the manager thinks it stuck; it says it has stopped
+/// as the program ends, with the status `exit` gives, or 101 after a panic. A program asks once,
+/// as it starts: the manager waits 30 seconds for it to.
+pub fn service() -> bool {
+    return unsafe { cx_signal_service() }
+}
