@@ -41,7 +41,8 @@ pub enum Error {
     Tls
     /// The response didn't come within the time.
     Timeout
-    /// The server closed the connection early, or what it sent isn't HTTP.
+    /// The server closed the connection early, or what it sent isn't HTTP/1.1: a server that
+    /// speaks only HTTP/2, or something that isn't HTTP at all.
     Protocol
     /// The body is longer than the limit.
     TooLong
@@ -61,7 +62,7 @@ impl Display for Error {
             Connect => print("can't connect: nothing answered at the host and port"),
             Tls => print("the TLS handshake failed"),
             Timeout => print("timed out"),
-            Protocol => print("the response ended early, or isn't HTTP"),
+            Protocol => print("the response ended early, or the server didn't answer in HTTP/1.1"),
             TooLong => print("the body is longer than the limit"),
             Unavailable => print("there's no HTTP client on this system; on Linux, install libcurl"),
             Os(code) => print("system error {code}"),

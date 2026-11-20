@@ -133,7 +133,7 @@ Why a request got no response, as `Error`:
 | `Connect` | Nothing answered at the host and port | can't connect: nothing answered at the host and port |
 | `Tls` | The TLS handshake failed, or the system doesn't trust the server's certificate | the TLS handshake failed |
 | `Timeout` | The response didn't come within the time | timed out |
-| `Protocol` | The server closed the connection early, or what it sent isn't HTTP | the response ended early, or isn't HTTP |
+| `Protocol` | The server closed the connection early, or what it sent isn't HTTP/1.1: a server that speaks only HTTP/2, or something that isn't HTTP at all, such as an SSH server on the port | the response ended early, or the server didn't answer in HTTP/1.1 |
 | `TooLong` | The body is longer than the limit | the body is longer than the limit |
 | `Unavailable` | There's no HTTP client on the system: on Linux, libcurl isn't installed | there's no HTTP client on this system; on Linux, install libcurl |
 | `Os(code)` | Something else, with the system's error code | system error 7 |

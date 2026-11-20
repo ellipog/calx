@@ -67,6 +67,10 @@ fn answer(text: String) -> List<u8> {
         }
         return reply("200 OK", "", big)
     }
+    if line.starts_with("GET /ssh ") {
+        // Not HTTP at all, as an SSH server on the port would answer.
+        return "SSH-2.0-OpenSSH_9.6\r\n".to_bytes()
+    }
     return List<u8>()
 }
 
@@ -174,6 +178,14 @@ fn main() {
     match big.wait() {
         ok(_) => println("ok"),
         err(e) => println("{e}"),    // out: the body is longer than the limit
+    }
+
+    // An answer that isn't HTTP/1.1 is the server's fault, not the URL's (CLX-385).
+    var ssh = get("{base}/ssh", [], 5000, 1000)
+    serve(net, mut bufs, ssh)
+    match ssh.wait() {
+        ok(_) => println("ok"),
+        err(e) => println("{e}"),    // out: the response ended early, or the server didn't answer in HTTP/1.1
     }
 
     // The server never answers this one.

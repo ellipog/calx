@@ -526,8 +526,12 @@ static void curl_load(void) {
 
 static int curl_error(int e) {
     switch (e) {
-    case 1:
     case 3: return E_BAD_URL;
+    /* CURLE_UNSUPPORTED_PROTOCOL: the URLs that get here are http:// or https://, so it's the
+     * server's answer that isn't HTTP/1.x ("Received HTTP/0.9 when not allowed"), as an
+     * HTTP/2-only server's is, or a redirect to another scheme. WinHTTP calls both
+     * ERROR_WINHTTP_INVALID_SERVER_RESPONSE and ERROR_WINHTTP_REDIRECT_FAILED. */
+    case 1: return E_PROTOCOL;
     case 6: return E_RESOLVE;
     case 7: return E_CONNECT;
     case 28: return E_TIMEOUT;
