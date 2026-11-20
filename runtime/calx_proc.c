@@ -1453,7 +1453,7 @@ static void children_at_exit(int normal) {
     pthread_mutex_lock(&live_lock);
     for (proc* p = live; p; p = p->live_next) {
         /* One in a group of its own goes with what it started. */
-        if (p->own_group) killpg(p->pgid, SIGKILL);
+        if (p->own_group && p->pgid > 1) killpg(p->pgid, SIGKILL);
         kill((pid_t)p->pid, SIGKILL);
     }
     pthread_mutex_unlock(&live_lock);
@@ -1504,13 +1504,15 @@ static void kill_proc(proc* p) {
  * while anyone is in it. 0, or -1 for a signal that isn't one. One that has gone is left alone. */
 static int signal_os(proc* p, cx_i32 sig) {
     int r;
-    if (p->own_group) r = killpg(p->pgid, sig);
+    if (p->own_group && p->pgid > 1) r = killpg(p->pgid, sig);
     else if (!p->exited) r = kill((pid_t)p->pid, sig);
     else return 0;
     return r != 0 && errno == EINVAL ? -1 : 0;
 }
 
 static void kill_tree_os(proc* p) {
+    /* Never 0 or 1, which killpg reads as this program's own group or init's. */
+    if (!p->own_group || p->pgid <= 1) return;
     if (killpg(p->pgid, SIGKILL) == 0 && !p->exited) p->killed = 1;
 }
 
