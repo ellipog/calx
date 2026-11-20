@@ -62,6 +62,24 @@ fn main() {
             fail "it went wrong"
         }
 
+        fn half(n: i32) -> i32 ! Error {
+            if n % 2 != 0 {
+                fail "{n} is odd"
+            }
+            return n / 2
+        }
+
+        // CLX-393: a test can fail with `Error`, as a `main` can.
+        @test
+        fn halves() ! Error {
+            assert(try half(4) == 2)
+        }
+
+        @test
+        fn halves_an_odd_number() ! Error {
+            assert(try half(3).context("halving 3") == 1)
+        }
+
         fn main() {
             println("main: {double(4)}")
         }
@@ -76,7 +94,10 @@ fn main() {
     // out:     panic at DIR/tool.calx:20:5: assertion failed: 2 doubled is 4
     // out: FAIL  errors: exit status 1
     // out:     error: it went wrong
-    // out: 2 passed, 2 failed
+    // out: ok    halves
+    // out: FAIL  halves_an_odd_number: exit status 1
+    // out:     error: halving 3: 3 is odd
+    // out: 3 passed, 3 failed
     // out: [exited with status 1]
     println(calx(["test", file.copy(), "doub", "argu"]))
     // out: ok    doubles
