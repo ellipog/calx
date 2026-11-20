@@ -1,6 +1,6 @@
 ---
 title: The calx command
-description: Starting, checking, building, running, testing and formatting Calx programs, running code from the command line, serving a folder, the build modes, and the object cache.
+description: Starting, checking, building, running, testing and formatting Calx programs, running code from the command line, serving a folder, the build modes, packages and calx.lock, and the object cache.
 ---
 
 # The `calx` command
@@ -15,6 +15,7 @@ calx build hello.calx -o hello # build an executable
 calx build --release hello.calx
 calx build --release --cpu x86-64-v2 hello.calx   # for a processor without AVX2
 calx build --lib plugin.calx   # build a library, which a program opens while it runs
+calx build --staticlib core.calx  # build a static library, which a C, C++, Rust or Swift program links
 calx test tool.calx           # run its @test functions, each in a process of its own
 calx eval "1 << 20"           # run code given on the command line, and print its value
 calx fmt                       # format the .calx files here, in Calx's one format
@@ -29,7 +30,7 @@ calx uninstall                 # remove Calx, its cache and its PATH entry
 calx completions bash          # print completions for bash, zsh, fish or powershell
 ```
 
-A program is its main file and the [modules](modules.md) it imports. The command takes the main file. A [library](libraries.md) is the same, without a `main`.
+A program is its main file and the [modules](modules.md) it imports, its own and those of the [packages](#packages) its calx.toml lists. The command takes the main file. A [library](libraries.md) is the same, without a `main`.
 
 Before it checks a program, each command runs the [attributes](attributes.md) the program's libraries define, and adds the code they generate. Their answers are cached, so they run again only when a declaration with an attribute on it, or an attribute's code, changes. `calx expand` prints that code, without checking the program.
 
@@ -41,6 +42,7 @@ Before it checks a program, each command runs the [attributes](attributes.md) th
 | `--cpu LEVEL` | The processor a release build counts on: `x86-64-v2` for one without AVX2, and the others [below](#processor-levels). `--cpu=LEVEL` is the same |
 | `-o PATH` | Where `build` writes the executable, or `emit-c` the C: a file for one module, a folder for several. Folders on the way are made if they aren't there. `build` defaults to the file's name in the current folder |
 | `--lib` | Build or check a [library](libraries.md): a `.dll` or `.so` with the functions marked `@export`, which a program opens while it runs. `calx run` doesn't take it |
+| `--staticlib` | Build or check a [static library](embedding.md): a `.lib` on Windows or a `.a` elsewhere, with the runtime and the functions marked `@export_c`, which a program in another language links, and a C header for them beside it. Only `build`, `check` and `emit-c` take it |
 | `--timings` | Print how long the front end, the C emitter, clang and the linker took, or that nothing had changed, so none of them ran ([fast builds](#fast-builds)) |
 | `--verbose` | Print the clang and linker commands |
 | `--no-line` | Leave `#line` directives out of the C |
@@ -322,13 +324,24 @@ Measured on the reference machine (an i9-13900K) with a small program, in debug 
 
 Windows Defender scans every new executable the first time it starts, which costs about 70 ms and comes after the build. An exclusion for the cache folder removes that, at the cost of Defender no longer scanning what's built there.
 
+## Packages
+
+`check`, `build`, `run`, `test`, `emit-c` and `expand` look for the `calx.toml` nearest the main file, in its folder and then each folder above it, and load the [packages](../guide/packages.md) it lists, as Cargo finds `Cargo.toml`. With none, a program is its own modules, as it always was. `calx eval` and `calx serve` use no packages.
+
+- **Path dependencies** are read where they are, so an edit to one is in the next build, as `pip install -e` does.
+- **Git dependencies** are fetched with `git`, which has to be on `PATH` for that. Each repository is cloned once into the cache, at `git/NAME-HASH/db`, a bare clone, and each commit a build uses is checked out beside it, at `git/NAME-HASH/checkouts/COMMIT`, with its files exactly as they were committed, whatever git's line-end settings are. While it fetches, calx says `Fetching NAME from URL` on standard error. calx turns off git's prompts for a name and a password, which would wait for an answer nobody sees, so a private repository is reached as git reaches one without asking: by SSH keys or a credential helper.
+- **calx.lock**, beside the main package's calx.toml, pins each git dependency to a commit. calx writes it when a dependency isn't pinned yet, or its tag, branch or rev changed, and leaves it as it is otherwise, `\r\n` line ends too. A build of pinned commits that are in the cache runs no git, so it works offline, and so does one of a tag the cached clone already has. A branch, or a repository's default branch, is fetched to find its newest commit, so pinning one for the first time needs the network.
+- A build's [record](#fast-builds) includes each calx.toml and calx.lock it read, and each folder it looked for a calx.toml in, so adding one above a program, or changing one, means a full build.
+
+`calx clean` removes the fetched repositories with the rest of the cache. The next build fetches the commits calx.lock pins again, which needs the network.
+
 ## Environment
 
 | Variable | Meaning |
 | --- | --- |
 | `CALX_CC` | The clang to use. Otherwise the one the installation carries in `toolchain/bin`, or else `clang` on `PATH` |
 | `CALX_HOME` | Where the runtime and the [standard library](modules.md#the-standard-library) are. Otherwise, the installation `calx` is in: the folder above its `bin`, which holds `runtime` and `std`. A compiler built from source that isn't in one uses the checkout it was built from |
-| `CALX_CACHE` | The object cache. Otherwise `%LOCALAPPDATA%\calx\cache` on Windows, `$XDG_CACHE_HOME/calx`, or else `~/.cache/calx` on Linux and `~/Library/Caches/calx` on macOS. On Windows it can be at any length: past 100 characters, calx names what's under it in the `\\?\` form, which Windows, clang and lld take past the usual 260 |
+| `CALX_CACHE` | The object cache, which holds the git [packages](#packages) fetched too. Otherwise `%LOCALAPPDATA%\calx\cache` on Windows, `$XDG_CACHE_HOME/calx`, or else `~/.cache/calx` on Linux and `~/Library/Caches/calx` on macOS. On Windows it can be at any length: past 100 characters, calx names what's under it in the `\\?\` form, which Windows, clang and lld take past the usual 260 |
 | `CALX_CACHE_MB` | How many megabytes the cache keeps of compiled files, and of programs, however many files that is. Otherwise the limits below hold. For a CI job that builds more than they hold and keeps the cache for its next run |
 | `CALX_CPU` | The [processor level](#processor-levels) a release build counts on when `--cpu` doesn't say, such as `x86-64-v2`. Otherwise x86-64-v3 on x86, the M1's on macOS and ARMv8.2 on Arm Linux and Windows |
 | `CALX_LEAKS` | Set to `1`, a program built in debug keeps where each block of memory was allocated, so if it ends with blocks still allocated, it says where each came from ([build modes](#build-modes)). The program reads it, not `calx` |
@@ -398,7 +411,7 @@ calx uninstall --yes       # the same, without asking, for a script
 calx completions bash      # print the completions for a shell
 ```
 
-- **`calx clean`** removes the [cache](#fast-builds): every compiled object and program, what attributes answered, and what the daily check found. The next build makes what it needs again, so it's always safe, though a build running at the same time may fail and need running again. On Windows a program that's running holds its file, which is kept, and `calx clean` says how many were.
+- **`calx clean`** removes the [cache](#fast-builds): every compiled object and program, what attributes answered, the git [packages](#packages) fetched, and what the daily check found. The next build makes what it needs again, so it's always safe, though a build running at the same time may fail and need running again. On Windows a program that's running holds its file, which is kept, and `calx clean` says how many were.
 - **`calx uninstall`** removes what the install script made: the installation folder, its build cache, and its `bin` from your PATH. On Windows that's your user Path in the registry, and on Linux the `# Calx` lines the script added to `~/.profile`, `~/.bashrc` and `~/.zshrc`. It says what it will remove and asks first, unless given `--yes`; without a terminal to ask in, it needs `--yes`. `CALX_NO_MODIFY_PATH=1` leaves PATH alone, as it does for the install script. On Windows the folder is removed just after the command ends, since a running `calx.exe` can't remove itself. If something still holds a file in it, such as a virus scanner, it tries again each second for 30 seconds. A Calx built from source has nothing to uninstall, and says so.
 - **`calx completions SHELL`** prints a completion script for `bash`, `zsh`, `fish` or `powershell`: the commands with what each does, their options, and `.calx` files. The script's first line says where it goes:
 

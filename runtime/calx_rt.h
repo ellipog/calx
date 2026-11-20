@@ -90,6 +90,19 @@ CX_FN(int, cx_finish, (void));
 CX_FN(void, cx_exit_status, (int code));
 /* A test program's start, for `calx test`: `cx_start`, then the test it's asked to run, or -1. */
 CX_FN(cx_i64, cx_test_start, (int argc, char** argv));
+/* What every `@export_c` function starts with: a check that the runtime is running, which ends
+ * the process, saying so, when it isn't (CLX-333). And what a program whose functions C can call
+ * does as it starts, since C can call them on threads of its own. */
+CX_FN(void, cx_export_enter, (const char* name));
+CX_FN(void, cx_foreign_threads, (void));
+/* An `@export_c` function's C name is for the linker to find, outside a static library too: a
+ * DLL's or a shared library's export when it's built as one (CX_CDYLIB), and otherwise just
+ * visible where everything else is hidden. */
+#if defined(_WIN32) && defined(CX_CDYLIB)
+#define CX_EXPORT_C __declspec(dllexport)
+#else
+#define CX_EXPORT_C __attribute__((visibility("default")))
+#endif
 
 /* The command line, in UTF-8, behind std.env. */
 CX_FN(cx_usize, cx_arg_count, (void));
@@ -1056,6 +1069,20 @@ CX_FN(cx_i32, cx_http_ws_code, (cx_u64 h));
 CX_FN(cx_usize, cx_http_ws_text_len, (cx_u64 h, cx_u32 which));
 CX_FN(void, cx_http_ws_text, (cx_u64 h, cx_u32 which, cx_u8* out));
 CX_FN(void, cx_http_ws_close, (cx_u64 h, cx_u32 code, const cx_u8* reason, cx_usize reason_len));
+
+/* The system's credential store, behind std.keyring (CLX-380), in calx_keyring.c: Credential
+ * Manager, the Keychain, or the Secret Service through libsecret. Each call gives std.keyring's
+ * Error number or 0, and leaves the secret it read, or the words for what went wrong, for
+ * `cx_keyring_result_len` and `cx_keyring_result_copy`, which wipes it, and the system's code for
+ * `cx_keyring_error_code`, per thread. `text` keeps a secret as the system's tools keep text:
+ * UTF-16 on Windows. */
+CX_FN(cx_i32, cx_keyring_set, (const cx_u8* service, cx_usize service_len, const cx_u8* account, cx_usize account_len,
+                               const cx_u8* secret, cx_usize secret_len, cx_u32 text));
+CX_FN(cx_i32, cx_keyring_get, (const cx_u8* service, cx_usize service_len, const cx_u8* account, cx_usize account_len, cx_u32 text));
+CX_FN(cx_i32, cx_keyring_delete, (const cx_u8* service, cx_usize service_len, const cx_u8* account, cx_usize account_len));
+CX_FN(cx_usize, cx_keyring_result_len, (void));
+CX_FN(void, cx_keyring_result_copy, (cx_u8* out));
+CX_FN(cx_i32, cx_keyring_error_code, (void));
 
 /* LZ4 as lz4-java's block streams write it, in calx_lz4.c (D118). `cx_lz4_decode` carries on from
  * `state`, four numbers: where the next header is, the output's length, what the rest decompresses

@@ -176,6 +176,20 @@ test('grammar: a raw string block spans lines', () => {
     assert.ok(!lines[3].flatMap(([, s]) => s).some((s) => s.startsWith('string')));
 });
 
+// A test's text with the files in it that aren't Calx, after a `// file: NAME` line with another
+// ending, such as a C host or a text file it embeds, blanked out, so its lines keep their numbers.
+function calxParts(source) {
+    let calx = true;
+    return source
+        .split('\n')
+        .map((line) => {
+            const m = /^\/\/ file: (\S+)\s*$/.exec(line);
+            if (m) calx = m[1].endsWith('.calx');
+            return calx || m ? line : '';
+        })
+        .join('\n');
+}
+
 // Every example in the repo tokenizes without an `invalid` scope, except on lines whose test
 // expects an error.
 function* calxSources() {
@@ -187,7 +201,7 @@ function* calxSources() {
         }
     }
     for (const file of walk(path.join(ROOT, 'tests'))) {
-        if (file.endsWith('.calx')) yield [path.relative(ROOT, file), fs.readFileSync(file, 'utf8')];
+        if (file.endsWith('.calx')) yield [path.relative(ROOT, file), calxParts(fs.readFileSync(file, 'utf8'))];
     }
     for (const dir of ['reference', 'guide']) {
         const docs = path.join(ROOT, 'docs', dir);

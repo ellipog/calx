@@ -1,0 +1,180 @@
+// The system's credential store (CLX-380), under a service of the test's own, calx-test- and a
+// random number, which it deletes before it ends. The round trip runs in a copy of the program
+// with a time limit, so a store that asks someone, or never answers, can't hold the tests up.
+//
+// - On Windows Credential Manager is always there, and the round trip must work.
+// - On Linux CI has no Secret Service, and often no libsecret: it must say `Unavailable`, or
+//   `Denied` for a collection nobody can unlock, within the limit. A desktop with one must do the
+//   round trip.
+// - On macOS a CI runner's login keychain may be locked, or there may be nobody to unlock it: then
+//   it's skipped, and the round trip must work where it runs.
+
+import std.env.{args, os}
+import std.keyring
+import std.keyring.{Error}
+import std.process.{Command, current_exe}
+import std.random.{Random}
+
+fn shown(x: String?) -> String {
+    return match x {
+        some(s) => "some({s})",
+        none => String("none"),
+    }
+}
+
+fn shown_bytes(x: List<u8>?) -> String {
+    return match x {
+        some(b) => "some({b})",
+        none => String("none"),
+    }
+}
+
+// Each thing the store got wrong, in words.
+fn trip(service: String, wrong: mut List<String>) ! Error {
+    let me = "player"
+    let key = "key"
+    let first = try keyring.get(service, me)
+    if shown(first.copy()) != "none" {
+        wrong.push("a new service had a secret: {shown(first)}")
+    }
+    if try keyring.delete(service, me) {
+        wrong.push("deleted a secret that wasn't there")
+    }
+
+    // Text past ASCII and past the BMP, then replaced.
+    let pw = String("hunter2 é ✓ 日本 🔑")
+    try keyring.set(service, me, pw.copy())
+    let got = shown(try keyring.get(service, me))
+    if got != shown(some(pw)) {
+        wrong.push("set then get gave {got}")
+    }
+    try keyring.set(service, me, "second")
+    let again = shown(try keyring.get(service, me))
+    if again != "some(second)" {
+        wrong.push("set again then get gave {again}")
+    }
+    try keyring.set(service, me, "")
+    let empty = shown(try keyring.get(service, me))
+    if empty != "some()" {
+        wrong.push("an empty secret came back as {empty}")
+    }
+
+    // Bytes that aren't text in any form: odd in length for UTF-16, and 255 for UTF-8.
+    let raw: List<u8> = [0, 255, 7]
+    try keyring.set_bytes(service, key, raw.copy())
+    let bytes = shown_bytes(try keyring.get_bytes(service, key))
+    if bytes != shown_bytes(some(raw)) {
+        wrong.push("set_bytes then get_bytes gave {bytes}")
+    }
+    match keyring.get(service, key) {
+        ok(x) => wrong.push("get of bytes gave {shown(x)}"),
+        err(e) => match e {
+            Error.NotText => {},
+            _ => wrong.push("get of bytes failed with {e}"),
+        },
+    }
+
+    // Credential Manager takes 2560 bytes: 1280 UTF-16 units.
+    if os() == "windows" {
+        try keyring.set(service, me, "x".repeat(1280))
+        match keyring.set(service, me, "x".repeat(1281)) {
+            ok => wrong.push("kept a secret longer than Credential Manager takes"),
+            err(e) => match e {
+                Error.TooLong => {},
+                _ => wrong.push("a long secret failed with {e}"),
+            },
+        }
+    }
+
+    // Deleted once, then not there.
+    if not try keyring.delete(service, me) {
+        wrong.push("delete found nothing to delete")
+    }
+    let gone = shown(try keyring.get(service, me))
+    if gone != "none" {
+        wrong.push("after delete, get gave {gone}")
+    }
+    if try keyring.delete(service, me) {
+        wrong.push("deleted the same secret twice")
+    }
+}
+
+// Deletes what the test kept, whatever the store says.
+fn tidy(service: String, account: String) {
+    match keyring.delete(service, account) {
+        ok(_) => {},
+        err(_) => {},
+    }
+}
+
+// The copy: the round trip, saying `ok`, `unavailable` or `denied`, or what went wrong.
+fn child(service: String) {
+    var wrong = List<String>()
+    let stopped = match trip(service, mut wrong) {
+        ok => String(),
+        err(e) => match e {
+            Error.Unavailable(why) => "unavailable: {why}",
+            Error.Denied(why) => "denied: {why}",
+            _ => "failed: {e}",
+        },
+    }
+    // Whatever happened, nothing of the test's is left behind.
+    tidy(service, "player")
+    tidy(service, "key")
+    if not stopped.is_empty() {
+        println(stopped)
+        return
+    }
+    if wrong.is_empty() {
+        println("ok")
+    }
+    for w in wrong {
+        println(w)
+    }
+}
+
+fn main() {
+    let a = args()
+    if a.len() == 2 {
+        child(a[1].copy())
+        return
+    }
+
+    // Names are checked before the store is asked, the same on every system.
+    match keyring.get("", "player") {
+        ok(x) => println("got {shown(x)}"),
+        err(e) => println("{e}"),    // out: not a name for a secret: the service is empty
+    }
+    match keyring.set("calx-test", "pla\0yer", "x") {
+        ok => println("kept it"),
+        err(e) => println("{e}"),    // out: not a name for a secret: a name holds a NUL
+    }
+    println("{Error.Unavailable("libsecret isn't installed")}")    // out: no credential store: libsecret isn't installed
+    println("{Error.Os(5, "Access is denied")}")    // out: the credential store failed: Access is denied (error 5)
+
+    var rng = Random.system()
+    let service = "calx-test-{rng.next_u64()}"
+    let out = match Command.new(current_exe()).arg("child").arg(service).timeout(60000).output() {
+        ok(o) => o,
+        err(e) => panic("can't start the copy: {e}"),
+    }
+    let said = (String.from_utf8(out.stdout) ?? String()).trim()
+    let system = os()
+    let fine = if said == "ok" {
+        true
+    } else if out.status.timed_out {
+        // Only a Keychain that waits for someone to unlock it.
+        system == "macos"
+    } else if said.starts_with("unavailable: ") {
+        system != "windows"
+    } else if said.starts_with("denied: ") {
+        // A keychain or collection that's locked, with nobody to unlock it.
+        system != "windows"
+    } else {
+        false
+    }
+    if not fine {
+        panic("the round trip on {system} said: {said} ({out.status})")
+    }
+    println("done")    // out: done
+}

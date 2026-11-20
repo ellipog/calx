@@ -82,6 +82,9 @@ struct Type {
     Slice<Type*> elems;      // tuple; fn_: the parameters; dyn: its table's functions, as `fn` types without the receiver
     Slice<std::uint8_t> modes; // fn_: each parameter's mode, a ParamMode; dyn: each function's receiver's
     bool unsafe_fn = false;  // fn_: `unsafe fn`, which only `unsafe` code can call
+    // fn_: `extern "C" fn(A) -> R`, a C function's address, which takes and gives C types and is
+    // called with the C ABI (CLX-333). It's an `unsafe fn` too.
+    bool c_abi = false;
     Item* item = nullptr;    // struct_, enum_
     Type* repr = nullptr;    // enum_: the integer type of its tag
     bool has_data = false;   // enum_: some variant holds data, so it's a tagged union in C
@@ -187,7 +190,8 @@ public:
     Type* tuple_of(const std::vector<Type*>& elems);
     Type* make_param(std::string_view name);
     Type* pointer_of(Type* elem, bool is_const);
-    Type* fn_of(const std::vector<Type*>& params, const std::vector<std::uint8_t>& modes, Type* result, bool is_unsafe);
+    Type* fn_of(const std::vector<Type*>& params, const std::vector<std::uint8_t>& modes, Type* result, bool is_unsafe,
+                bool c_abi = false);
     // A new closure's type, for the function `item`, called as `call`.
     Type* closure_of(Item* item, Type* call, std::string_view name);
     // `dyn I`, for the interface `iface`, or an instance of a generic one such as `Into<i64>`.
@@ -222,7 +226,7 @@ private:
     std::map<std::pair<Type*, TableKind>, Type*> set_map_;
     std::map<std::vector<Type*>, Type*> tuple_map_;
     std::map<std::pair<Type*, bool>, Type*> pointer_map_;
-    std::map<std::tuple<std::vector<Type*>, std::vector<std::uint8_t>, Type*, bool>, Type*> fn_map_;
+    std::map<std::tuple<std::vector<Type*>, std::vector<std::uint8_t>, Type*, bool, bool>, Type*> fn_map_;
     std::map<Item*, Type*> dyn_map_;
     std::vector<Type*> compounds_;
     std::vector<Type*> fns_;

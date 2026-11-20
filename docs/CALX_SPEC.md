@@ -311,9 +311,10 @@ So nothing one region can name belongs to another. WASM plugins get the same rul
 
 ## Modules and builds
 
-Built: see [Modules](reference/modules.md), with [a module's items through its name](reference/modules.md#a-modules-name), `import std.path`, then `path.join(a, b)` (CLX-138), and [the calx command](reference/command.md). A [library](reference/libraries.md), built with `calx build --lib`, exports functions marked `@export`, which a program opens while it runs and finds by name and type: the type is checked down to every struct's fields, and the library uses the program's runtime, so its memory, output and panics are the program's (D123). That's what a native plugin is. On Windows, sources, outputs and a cache at paths past the 260 characters Windows' file functions take build as any others, and `std.fs` reads and writes them (CLX-209). Still to build:
+Built: see [Modules](reference/modules.md), with [a module's items through its name](reference/modules.md#a-modules-name), `import std.path`, then `path.join(a, b)` (CLX-138), and [the calx command](reference/command.md). A [library](reference/libraries.md), built with `calx build --lib`, exports functions marked `@export`, which a program opens while it runs and finds by name and type: the type is checked down to every struct's fields, and the library uses the program's runtime, so its memory, output and panics are the program's (D123). That's what a native plugin is. On Windows, sources, outputs and a cache at paths past the 260 characters Windows' file functions take build as any others, and `std.fs` reads and writes them (CLX-209). [Packages](guide/packages.md) are built (CLX-370): a package is a folder with a `calx.toml` giving its name, version and dependencies, by `path` or by `git` URL with a `tag`, `branch` or `rev`, and `calx.lock` pins each git one to a commit, so builds after the first use the same code, offline too. A package's modules are found under its own root, and a program imports them under the package's name: `spar.window` is spar's `window.calx`, and `spar` its `spar.calx` ([modules](reference/modules.md#packages)). The program's package is the one whose calx.toml is nearest its main file. Still to build:
 
-- **A package** is a folder with a `calx.toml` giving its name, version and dependencies. Calcite, each plugin and the standard library are packages, and a package's modules are found under its own root.
+- **The registry**, Quarry (CLX-75), for dependencies by name and version range rather than by path or URL.
+- **The standard library as a package**, as Calcite and each plugin can be now. It's still `std`, found under the Calx home ([modules](reference/modules.md#the-standard-library)).
 - **Merging instances.** Each module's file has its own copy of the generic instances it uses. Release builds can have the linker fold identical copies (`-ffunction-sections` with identical code folding).
 - **Targets:** `x86_64-windows`, `x86_64-linux`, `aarch64-linux`, `aarch64-windows` and `aarch64-macos`, on Apple Silicon from macOS 14, are built, each released and tested on GitHub's runners (D612, superseding D7), and `wasm32` comes with Phase 7. Release builds use x86-64-v3 on x86, `apple-m1` on macOS and `armv8.2-a` on Arm Linux and Windows, unless `--cpu` or `CALX_CPU` picks an older level: `x86-64` or `x86-64-v2` on x86 and `armv8-a` on Arm (CLX-381). On macOS the SDK comes from Apple's Command Line Tools.
 
@@ -334,10 +335,18 @@ Build time is tracked like run time (D34): [`bench/build.calx`](../bench/build.c
 
 ## FFI
 
-Built: `extern "C"` declarations and calls, with integers, floats, `bool` and pointers ([C functions](reference/unsafe.md#c-functions)). Still to build:
+Built:
+
+- `extern "C"` declarations and calls, with integers, floats, `bool` and pointers ([C functions](reference/unsafe.md#c-functions)).
+- Pointers in struct fields, and in the parameters and results of `unsafe fn`s and `@export_c` functions, with `cast`, `addr` and `*T` going where `*const T` is wanted (CLX-332). A `@handle` struct's `drop` gives back what C gave it ([owning what C gave](reference/unsafe.md#owning-what-c-gave)).
+- `extern "C" fn(...) -> T`, the type of a C function's address, which Calx calls, passes to C, and makes from an address C gave with `p.to_fn<F>()` ([C function values](reference/unsafe.md#c-function-values), CLX-333).
+- `@export_c("name")` exports a Calx function with the C ABI, for C code to call, on any thread, the runtime's or not; one called before the runtime starts is refused ([calling Calx from C](reference/unsafe.md#calling-calx-from-c), CLX-333). A Calx plugin doesn't need it: [`@export`](reference/libraries.md) exports a function with Calx's own ABI, whose type the host checks when it finds it (D123). `Box.into_ptr` and `to_box` give C a Calx value to hold, and `unsafe impl Send` vouches for a struct's pointers going to another thread.
+- `calx build --staticlib`: a `.lib` or `.a` with the runtime and the `@export_c` functions, a C header for them, and `calx_init` and `calx_shutdown`, which a C, C++, Rust or Swift program links ([static libraries](reference/embedding.md), CLX-334).
+
+Still to build:
 
 - C's own type names are in `std.c`: `c.int`, `c.size_t`, and `CStr` for C strings.
-- `@export_c("name")` exports a Calx function with the C ABI, for C code to call. A Calx plugin doesn't need it: [`@export`](reference/libraries.md) exports a function with Calx's own ABI, whose type the host checks when it finds it (D123).
+- `--cdylib`: the same C as a shared library.
 - `extern` is allowed only in trusted modules, the same rule as `unsafe`. A WASM build has no `extern` except the host's imports.
 - Struct layout follows C's rules for `@repr(c)` structs. Other structs' layout is the compiler's choice.
 

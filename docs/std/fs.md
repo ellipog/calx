@@ -49,7 +49,7 @@ fn main() {
 | `make_dir(path: String) ! FsError` | Makes a directory. `Exists` if something's there |
 | `make_dir_all(path: String) ! FsError` | Makes a directory and each one missing on the way to it. Fine if it's there already |
 | `remove_dir(path: String) ! FsError` | Removes an empty directory |
-| `remove_dir_all(path: String) ! FsError` | Removes a directory and everything in it, never following a link out of it |
+| `remove_dir_all(path: String) ! FsError` | Removes a directory and everything in it, never following a link out of it, read-only files too, as `rm -rf` does, on Windows as elsewhere |
 | `copy_dir_all(from: String, to: String) ! FsError` | Copies a directory and everything in it, making `to` and the directories inside as needed, each file with `copy` and each link as a link, never followed. See [Trees](#trees) |
 | `walk(dir: String) -> List<Entry> ! FsError` | Everything in a directory and in the directories inside it, each directory just before what's in it, the names in each sorted, links listed and not followed. See [Trees](#trees) |
 | `glob(pattern: String) -> List<String> ! FsError` | The paths that match a glob, such as `src/**/*.calx`, sorted, as Python's `glob.glob` finds them with `recursive=True`. See [Trees](#trees) |

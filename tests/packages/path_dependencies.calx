@@ -1,0 +1,147 @@
+// Packages by path (CLX-370): a calx.toml names a package and lists the packages it depends on,
+// and a program imports a dependency's modules under its name, `spar.window` for spar's
+// window.calx, and its module of its own name, spar.calx, as `spar`. A package's own modules
+// import each other by their own names, and two packages that depend on one package share it.
+// Each mistake in a calx.toml, or in what imports a package, is an error that says what to write.
+import std.env.{variable}
+import std.fs.{make_dir_all, remove_dir_all, remove_file, temp_dir, write_text}
+import std.process.{Command}
+
+// What `calx ARGS` in `dir` printed, or its first error, with the test's folder as `<tmp>` and
+// `/` between folders.
+fn calx(exe: String, args: List<String>, dir: String, tmp: String) -> String {
+    match Command.new(exe).args(args).dir(dir).output() {
+        ok(o) => {
+            if o.status.success() {
+                return o.text().trim().replace("\r\n", " | ").replace("\n", " | ")
+            }
+            let said = o.error_text().replace("\\", "/").replace(tmp.replace("\\", "/"), "<tmp>")
+            for line in said.lines() {
+                if line.contains("error: ") {
+                    return line.copy()
+                }
+            }
+            return said
+        },
+        err(e) => return "{e}",
+    }
+}
+
+fn put(path: String, text: String) {
+    write_text(path, text)!
+}
+
+fn main() {
+    let exe = variable("CALX") ?? String("calx")
+    let tmp = temp_dir()!
+    let app = "{tmp}/app"
+    make_dir_all("{app}/game")!
+    make_dir_all("{tmp}/util/math")!
+    make_dir_all("{tmp}/spar")!
+    make_dir_all("{tmp}/other/util")!
+    make_dir_all("{tmp}/loose")!
+    let toml = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nutil = \{ path = \"../util\" \}\nspar = \{ path = \"../spar\" \}\n"
+    put("{app}/calx.toml", toml)
+    put("{app}/main.calx", "import util.\{double\}\nimport util.math.ops\nimport spar\nimport game.world.\{greet\}\n\nfn main() \{\n    println(\"\{double(4)\} \{ops.triple(2)\} \{spar.version()\} \{greet()\}\")\n\}\n")
+    put("{app}/game/world.calx", "module game.world\n\nimport spar.window.\{open\}\n\npub fn greet() -> String \{\n    return \"window \{open()\}\"\n\}\n")
+    put("{tmp}/util/calx.toml", "[package]\nname = \"util\"\nversion = \"1.0.0\"\n")
+    put("{tmp}/util/util.calx", "import math.ops.\{triple\}\n\npub fn double(n: i32) -> i32 \{\n    return triple(n) - n\n\}\n")
+    put("{tmp}/util/math/ops.calx", "module math.ops\n\npub fn triple(n: i32) -> i32 \{\n    return n * 3\n\}\n")
+    // spar depends on util too, as a table of its own.
+    let spar_toml = "[package]\nname = \"spar\"\nversion = \"0.2.0\"\n\n[dependencies.util]\npath = \"../util\"\n"
+    put("{tmp}/spar/calx.toml", spar_toml)
+    put("{tmp}/spar/spar.calx", "pub fn version() -> String \{\n    return String(\"0.2.0\")\n\}\n")
+    put("{tmp}/spar/window.calx", "import util.\{double\}\n\npub fn open() -> i32 \{\n    return double(10)\n\}\n")
+
+    // util is spar's and the program's, the same package once: 4 * 2, 2 * 3, then spar's.
+    println(calx(exe.copy(), ["run", "main.calx"], app.copy(), tmp.copy()))    // out: 8 6 0.2.0 window 20
+    // From another folder, as from an editor, which finds the calx.toml nearest the file.
+    println(calx(exe.copy(), ["check", "app/main.calx"], tmp.copy(), tmp.copy()))    // out:
+    // A module of the program's own in a folder finds calx.toml above it too.
+    println(calx(exe.copy(), ["check", "app/game/world.calx"], tmp.copy(), tmp.copy()))    // out:
+
+    // A dependency's module that isn't there, and a package with no module of its own name.
+    put("{app}/main.calx", "import spar.nope\n\nfn main() \{\n    nope.go()\n\}\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: main.calx:1:8: error: the package `spar` has no module `nope`; it would be the file `<tmp>/spar/nope.calx`
+    put("{app}/main.calx", "import util\n\nfn main() \{\n    println(\"\{util.double(1)\}\")\n\}\n")
+    println(calx(exe.copy(), ["run", "main.calx"], app.copy(), tmp.copy()))    // out: 2
+    remove_file("{tmp}/util/util.calx")!
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: main.calx:1:8: error: the package `util` has no module of its own name, the file `<tmp>/util/util.calx`; import one of its modules, as `import util.NAME`
+    put("{tmp}/util/util.calx", "import math.ops.\{triple\}\n\npub fn double(n: i32) -> i32 \{\n    return triple(n) - n\n\}\n")
+
+    // A package the program has, through spar, that the program's calx.toml doesn't list.
+    put("{tmp}/spar/calx.toml", "{spar_toml}\n[dependencies.extra]\npath = \"../other/extra\"\n")
+    make_dir_all("{tmp}/other/extra")!
+    put("{tmp}/other/extra/calx.toml", "[package]\nname = \"extra\"\nversion = \"0.1.0\"\n")
+    put("{tmp}/other/extra/extra.calx", "pub fn one() -> i32 \{\n    return 1\n\}\n")
+    put("{app}/main.calx", "import extra\n\nfn main() \{\n    println(\"\{extra.one()\}\")\n\}\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: main.calx:1:8: error: `extra` is a package this program uses, but this package's calx.toml doesn't list it; add it under [dependencies] to import it here
+    // And a module of the program's own with that name.
+    put("{app}/extra.calx", "pub fn one() -> i32 \{\n    return 1\n\}\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: main.calx:1:8: error: `extra` is the name of a package this program uses, so this package's modules can't use it; rename the module
+    remove_file("{app}/extra.calx")!
+    put("{tmp}/spar/calx.toml", spar_toml)
+
+    // A module of the program's own named as a package its calx.toml lists.
+    put("{app}/util.calx", "pub fn x() \{\}\n")
+    put("{app}/main.calx", "import util.\{double\}\n\nfn main() \{\n    println(\"\{double(1)\}\")\n\}\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: main.calx:1:8: error: `util` is both a package this package's calx.toml lists and a module of this package; rename the module
+    remove_file("{app}/util.calx")!
+
+    // Two packages of one name: spar's util is another folder.
+    put("{tmp}/other/util/calx.toml", "[package]\nname = \"util\"\nversion = \"2.0.0\"\n")
+    put("{tmp}/spar/calx.toml", "[package]\nname = \"spar\"\nversion = \"0.2.0\"\n\n[dependencies]\nutil = \{ path = \"../other/util\" \}\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: <tmp>/spar/calx.toml:6:1: error: two packages are named `util`: `<tmp>/other/util`, from `spar`'s calx.toml, and `<tmp>/util`, from `app`'s calx.toml, version 1.0.0; a program has one package of each name, so point both at the same one
+    put("{tmp}/spar/calx.toml", spar_toml)
+
+    // Packages that depend on each other.
+    put("{tmp}/util/calx.toml", "[package]\nname = \"util\"\nversion = \"1.0.0\"\n\n[dependencies]\nspar = \{ path = \"../spar\" \}\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: <tmp>/spar/calx.toml:5:15: error: packages can't depend on each other in a cycle: `util` depends on `spar`, which depends on `util`
+    put("{tmp}/util/calx.toml", "[package]\nname = \"util\"\nversion = \"1.0.0\"\n\n[dependencies]\napp = \{ path = \"../app\" \}\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: <tmp>/util/calx.toml:6:1: error: packages can't depend on each other in a cycle: `app` depends on `util`, which depends on `app`
+    put("{tmp}/util/calx.toml", "[package]\nname = \"util\"\nversion = \"1.0.0\"\n")
+
+    // What a calx.toml can get wrong.
+    let deps = "\n[dependencies]\nutil = \{ path = \"../util\" \}\n"
+    put("{app}/calx.toml", "[package]\nname = \"app\"\n{deps}")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:1:1: error: [package] has no `version`: version = "0.1.0"
+    put("{app}/calx.toml", "[package]\nversion = \"0.1.0\"\n{deps}")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:1:1: error: [package] has no `name`: name = "app"
+    put("{app}/calx.toml", "[dependencies]\nutil = \{ path = \"../util\" \}\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:1:1: error: calx.toml needs a [package] table with the package's name and version:
+    put("{app}/calx.toml", "[package]\nname = app\nversion = \"0.1.0\"\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:2:8: error: expected a value: a string in quotes, a number, true or false, an array or an inline table
+    put("{app}/calx.toml", "[package]\nname = \"My App\"\nversion = \"0.1\"\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:2:8: error: `My App` can't be a package's name: a package's name is how programs import it, so it's lowercase letters, digits and `_`, starting with a letter, and not a keyword: "spar", "game_util"
+    put("{app}/calx.toml", "[package]\nname = \"app\"\nversion = 0.1\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:3:11: error: `0.1` isn't read here: calx.toml has whole numbers, and a version is a string, as "1.2.0"
+    put("{app}/calx.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nauthor = \"me\"\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:4:1: error: [package] has no `author`; it has `name` and `version`
+    put("{app}/calx.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nname = \"twice\"\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:4:1: error: the key `name` is given twice
+    put("{app}/calx.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nutil = \{ path = \"../util\", version = \"1.0.0\" \}\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:6:28: error: a dependency has no `version`: versions come with the registry, Quarry; a dependency here is found by its `path` or `git` URL
+    put("{app}/calx.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nutil = \{\}\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:6:1: error: `util` needs a `path` or a `git` URL, to say where it is: util = { path = "../util" }, or util = { git = "https://...", tag = "v1.0.0" }
+    put("{app}/calx.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nutil = \{ path = \"../util\", tag = \"v1\" \}\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:6:28: error: `tag` is for a git dependency, and `util` is found by its path
+    put("{app}/calx.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nnope = \{ path = \"../nope\" \}\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:6:17: error: `../nope`, the path given for `nope`, isn't a folder: it's `<tmp>/nope`
+    put("{app}/calx.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nloose = \{ path = \"../loose\" \}\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:6:18: error: `<tmp>/loose` has no calx.toml, so it isn't a package
+    put("{app}/calx.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nutils = \{ path = \"../util\" \}\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:6:1: error: `<tmp>/util` is the package `util`, so its name here is `util`: a package is imported by its own name
+    put("{app}/calx.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\napp = \{ path = \".\" \}\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:6:1: error: a package can't depend on itself
+    put("{app}/calx.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nutil = \{ path = \"../util\" \n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:6:8: error: an inline table is on one line, and this one isn't closed with `}` on it
+    put("{app}/calx.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[package]\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:5:1: error: the table `[package]` is written twice; give each of its keys in one place
+    put("{app}/calx.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[bin]\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:4:2: error: calx.toml has no `bin`; it has the tables [package] and [dependencies]
+
+    // A file with no calx.toml above it imports as it always has.
+    put("{tmp}/loose/main.calx", "import spar.window\n\nfn main() \{\n    window.open()\n\}\n")
+    println(calx(exe.copy(), ["check", "main.calx"], "{tmp}/loose", tmp.copy()))    // out: main.calx:1:8: error: there's no module `spar.window`; it would be the file `spar/window.calx`
+    remove_dir_all(tmp)!
+}

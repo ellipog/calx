@@ -105,6 +105,7 @@ const std::vector<HelpGroup>& help_groups() {
          {{"--release", "", "optimize; the default, a debug build, builds fastest"},
           {"--cpu", "LEVEL", "the processor a release build counts on: `x86-64-v2` for one without AVX2"},
           {"--lib", "", "build a library, which a program opens while it runs"},
+          {"--staticlib", "", "build a static library and its C header, for a C, C++ or Rust program to link"},
           {"-o", "PATH", "where build and emit-c write"},
           {"--timings", "", "print how long each step took"},
           {"--verbose", "", "print the clang commands"},
@@ -192,6 +193,7 @@ int usage(bool asked = false) {
         "            default) or x86-64-v4 on x86; armv8-a or armv8.2-a (the default) on Arm\n"
         "            Linux and Windows. CALX_CPU says the same\n"
         "  --lib       build a library, which a program opens while it runs\n"
+        "  --staticlib build a static library, and its C header, for a C, C++ or Rust program to link\n"
         "  -o PATH     where build and emit-c write\n"
         "  --timings   print how long each step took\n"
         "  --verbose   print the clang commands\n"
@@ -211,6 +213,7 @@ struct Options {
     std::string cpu;    // `--cpu`: the processor level a release build counts on, or "" (CLX-381)
     bool cpu_given = false;
     bool library = false;
+    bool staticlib = false;  // `--staticlib`, for a host that isn't Calx (CLX-334)
     bool timings = false;
     bool verbose = false;
     bool line_directives = true;
@@ -424,8 +427,13 @@ struct Front {
 
     // Reads `file` and the modules it imports, runs their attributes, since what they generate is
     // checked with the rest (D124), and checks the program.
-    void check(std::uint32_t file, const Options& opt, bool color) {
+    // A file's imports can name the packages its calx.toml lists; `calx eval`'s code and `calx
+    // serve`'s program have none.
+    void check(std::uint32_t file, const Options& opt, bool color, bool packages = false) {
         loader = std::make_unique<ModuleLoader>(pc, sources, home, home_error);
+        PackageOptions po;
+        po.enabled = packages;
+        loader->use_packages(po);
         loader->load(file);
         if (!diags.has_errors()) {
             ExpandOptions xo;
@@ -440,7 +448,7 @@ struct Front {
         std::vector<Module*> modules = loader->modules();
         if (!diags.has_errors() && expanded && opt.command != "expand") {
             check_program(CheckContext{sources, names, arena, diags, types}, modules, program,
-                          opt.command != "check" && opt.command != "test", opt.library);
+                          opt.command != "check" && opt.command != "test", opt.library, opt.staticlib);
         }
     }
 
@@ -747,7 +755,7 @@ std::string record_for(const Options& opt) {
                                     cwd,
                                     opt.input,
                                     opt.command == "test" ? "test" : "program",
-                                    opt.library ? "library" : "",
+                                    opt.library ? "library" : opt.staticlib ? "staticlib" : "",
                                     opt.line_directives ? "lines" : "",
                                     opt.mode == BuildMode::release ? "release" : "debug",
                                     opt.cpu,
@@ -761,6 +769,17 @@ std::string record_for(const Options& opt) {
     return record_path(cache_dir(), parts);
 }
 
+// CLX-334: a static library's name, which names its header and the header's guard: the output's
+// file name without its suffix, or without `lib` too for a `.a`, or else the input's stem.
+std::string staticlib_stem(const Options& opt) {
+    namespace fs = std::filesystem;
+    if (opt.output.empty()) return fs::path(opt.input).stem().string();
+    fs::path name = fs::path(opt.output).filename();
+    std::string stem = name.stem().string();
+    if (name.extension() == ".a" && stem.size() > 3 && stem.compare(0, 3, "lib") == 0) stem = stem.substr(3);
+    return stem;
+}
+
 // What `run`, `build` and `test` do with the program they built, or found unchanged in the cache,
 // `reused` saying which, the build having started at `t0`.
 int finish(const Options& opt, bool serve, const std::string& exe, const std::vector<std::string>& tests,
@@ -771,6 +790,8 @@ int finish(const Options& opt, bool serve, const std::string& exe, const std::ve
             out = std::filesystem::path(opt.input).stem().string();
             if (opt.library) {
                 out += library_suffix();
+            } else if (opt.staticlib) {
+                out = staticlib_name(out);
             } else {
 #ifdef _WIN32
                 out += ".exe";
@@ -782,10 +803,26 @@ int finish(const Options& opt, bool serve, const std::string& exe, const std::ve
             std::fprintf(stderr, "calx: %s\n", why.c_str());
             return 1;
         }
+        // A static library's header goes beside it, named for it: `app.h` for `app.lib` or
+        // `libapp.a` (CLX-334).
+        std::string header;
+        if (opt.staticlib) {
+            header = (std::filesystem::path(out).parent_path() / (staticlib_stem(opt) + ".h")).string();
+            std::string text, there;
+            if (!read_file(exe + ".h", text)) {
+                std::fprintf(stderr, "calx: can't read %s.h\n", exe.c_str());
+                return 1;
+            }
+            if ((!read_file(header, there) || there != text) && !write_file_atomic(header, text)) {
+                std::fprintf(stderr, "calx: can't write %s\n", header.c_str());
+                return 1;
+            }
+        }
         // In a terminal, what it built and how long that took; nothing otherwise, as before.
         const term::Caps& c = term::err();
         if (c.color) {
-            std::string what = std::string(opt.mode == BuildMode::release ? "release" : "debug") + (opt.library ? " library" : "");
+            std::string what = std::string(opt.mode == BuildMode::release ? "release" : "debug") +
+                               (opt.library ? " library" : opt.staticlib ? " static library, with " + header : "");
             std::string how = (reused ? "unchanged, " : "in ") + term::duration(ms(t0) / 1000.0);
             std::error_code size_ec;
             double bytes = static_cast<double>(std::filesystem::file_size(out, size_ec));
@@ -869,6 +906,8 @@ int main(int argc, char** argv) {
             opt.mode = BuildMode::release;
         } else if (a == "--lib") {
             opt.library = true;
+        } else if (a == "--staticlib") {
+            opt.staticlib = true;
         } else if (a == "--timings") {
             opt.timings = true;
         } else if (a == "--verbose") {
@@ -919,6 +958,15 @@ int main(int argc, char** argv) {
     if (!opt.json) update_notice();
     if (opt.library && opt.command == "run") {
         std::fprintf(stderr, "calx: a library doesn't run by itself; build it with `calx build --lib`, and open it from a program\n");
+        return 2;
+    }
+    if (opt.staticlib && opt.library) {
+        std::fprintf(stderr, "calx: --lib builds a library Calx programs open, and --staticlib one other programs link; pick one\n");
+        return 2;
+    }
+    if (opt.staticlib && opt.command != "build" && opt.command != "check" && opt.command != "emit-c") {
+        std::fprintf(stderr, "calx: a static library doesn't run by itself; build it with `calx build --staticlib`, and link it "
+                             "into a program\n");
         return 2;
     }
 
@@ -972,7 +1020,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "calx: can't read %s\n", opt.input.c_str());
             return 1;
         }
-        front->check(file, opt, color);
+        front->check(file, opt, color, true);
     }
     Sources& sources = front->sources;
     Diagnostics& diags = front->diags;
@@ -1067,6 +1115,9 @@ int main(int argc, char** argv) {
     }
     std::vector<std::string> c_sources;
     for (CFile& f : files) c_sources.push_back(std::move(f.text));
+    // CLX-334: a static library's C header, kept beside it in the cache, which `finish` puts
+    // beside the library, as a build found unchanged does too.
+    std::string header = opt.staticlib ? c_header(program, names, staticlib_stem(opt)) : std::string();
     // What the build read, for its record: each source file, each folder an import looked
     // through, and each file a constant embeds. Code an attribute generated comes from a program
     // the build ran, so a build with any keeps no record.
@@ -1074,6 +1125,12 @@ int main(int argc, char** argv) {
     if (!record.empty() && !sources.any_generated() && diags.all().empty()) {
         for (const std::string& f : sources.loaded()) made.files.push_back(absolute_path(f));
         for (const std::string& d : front->loader->folders()) made.folders.push_back(absolute_path(d));
+        // Each place a calx.toml was looked for and wasn't, since one added there would be the
+        // program's, and calx.lock if this build wrote it (CLX-370).
+        const PackageSet& packages = front->loader->packages();
+        for (const std::string& f : packages.missing) made.missing.push_back(absolute_path(f));
+        for (const std::string& f : packages.written) made.files.push_back(absolute_path(f));
+        if (packages.any() && !file_exists(packages.lock)) made.missing.push_back(absolute_path(packages.lock));
         // Every constant's, used or not, since the checker checks each one's size.
         for (const Module* m : program.modules) {
             for (const Item* c : m->items) {
@@ -1088,9 +1145,17 @@ int main(int argc, char** argv) {
     // process ends: freeing its many small pieces one at a time took a cached build of a program
     // that uses std.regex half a millisecond (CLX-240).
     (void)front.release();
-    BuildResult b = build_program(tc, c_sources, opt.mode, opt.library ? BuildKind::library : BuildKind::program, opt.verbose, march);
+    BuildKind kind = opt.library ? BuildKind::library : opt.staticlib ? BuildKind::staticlib : BuildKind::program;
+    BuildResult b = build_program(tc, c_sources, opt.mode, kind, opt.verbose, march);
     building.reset();
     if (!b.ok) return 1;
+    if (opt.staticlib) {
+        std::string kept;
+        if ((!read_file(b.exe + ".h", kept) || kept != header) && !write_file_atomic(b.exe + ".h", header)) {
+            std::fprintf(stderr, "calx: can't write %s.h\n", b.exe.c_str());
+            return 1;
+        }
+    }
     if (opt.timings) {
         std::fprintf(stderr, "front end: %.1f ms, emit: %.1f ms, clang: %.1f ms, link: %.1f ms%s\n", front_ms, emit_ms,
                      b.compile_ms, b.link_ms, b.reused ? " (reused the cached program)" : "");
