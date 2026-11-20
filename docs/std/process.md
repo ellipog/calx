@@ -46,6 +46,7 @@ Each method gives the command back with one more thing said, so they chain. A co
 | `c.affinity(cpus: List<u32>)` | Runs it only on these processors, numbered from 0 as the system numbers them, pinned before it runs anything. Panics if the list is empty: see [Pinning](#pinning-and-the-machines-load) |
 | `c.full_speed()` | Takes it out of Windows' power throttling, so Windows doesn't move it to the efficiency cores or slow it down to save power. Other systems have none, so it does nothing there |
 | `c.measured()` | Starts it so its peak memory is its own on Linux, not at least this program's: see [What it used](#what-it-used). Elsewhere it's its own already, so it does nothing there |
+| `c.own_group()` | Starts it in a process group of its own, with the programs it starts, so they can be stopped together: see [Stopping it and what it started](#stopping-it-and-what-it-started) |
 
 `Stdio` is where a stream goes:
 
@@ -115,17 +116,68 @@ fn main() {
 | --- | --- |
 | `child.write(bytes: List<u8>) ! ProcessError`, `child.write_text(text: String) ! ProcessError` | Writes to its input, waiting until it has taken it, and reading what it writes meanwhile. Fails with `InputClosed` if it stops reading first |
 | `child.close_input()` | Ends its input once what was written has gone, so a program that reads to the end goes on |
-| `child.read_line(ms: u64) -> String?` | The next line of its output, without `\n` or `\r\n`, waiting at most `ms` milliseconds. `none` if it doesn't come in time, or the output has ended. The last line needn't end with a line break |
+| `child.read_line(ms: u64) -> String?` | The next line of its output, without `\n` or `\r\n`, waiting at most `ms` milliseconds. `none` if it doesn't come in time, or the output has ended. The last line needn't end with a line break. With 0 it doesn't wait, but takes what's in the pipe already, as a read of a nonblocking pipe in Python does |
 | `child.wait_for_line(text: String, ms: u64) -> String?` | Reads lines until one has `text` in it, and gives it, waiting at most `ms` milliseconds in all: a server's "Done" line, say. The lines before it are dropped |
-| `child.read(ms: u64) -> List<u8>` | What has come from its output since the last read, waiting at most `ms` milliseconds if nothing has. Empty at the end, or if nothing comes in time |
+| `child.read(ms: u64) -> List<u8>` | What has come from its output since the last read, waiting at most `ms` milliseconds if nothing has. Empty at the end, or if nothing comes in time. With 0, what's in the pipe already, without waiting |
 | `child.ended() -> bool` | Whether its output has ended and all of it has been read |
 | `child.try_wait() -> Status?` | How it ended, if it has, without waiting |
+| `child.wait_timeout(ms: u64) -> Status?` | How it ended, waiting at most `ms` milliseconds for it to, reading its output meanwhile: Python's `p.wait(timeout=...)`. `none` if it's still running |
 | `child.kill()` | Kills it, if it's running, without letting it clean up |
+| `child.stop()`, `child.kill_tree()`, `child.signal(sig: i32) ! ProcessError` | Ask it and what it started to end, end them all, or send a signal: see [Stopping it and what it started](#stopping-it-and-what-it-started) |
 | `child.id() -> u32` | Its process ID |
 | `unsafe child.usage() -> Usage` | What it has used so far, as the system says while it runs: see [What it used](#what-it-used) |
 | `child.wait() -> Output` | Ends its input, waits for it, and gives how it ended with what it wrote that wasn't read. Panics if it was waited for already |
 
 Reading its output panics if the output isn't `Stdio.Pipe`, and writing panics if the input isn't.
+
+A loop that watches many programs at once reads each with `read_line(0)` or `read(0)`, which take what each has written without waiting for more, so none of them stops on a full pipe while the loop is busy with the others.
+
+## Stopping it and what it started
+
+A server is often started by a launcher, a script that starts the real server and helpers. `kill()` ends only the launcher, and leaves the server running. Started with `own_group()`, the launcher leads a process group of its own, which every program it starts is in too, so it can be asked to stop, and then ended, with all of them:
+
+```calx
+import std.env.{args}
+import std.io.{flush}
+import std.process.{Command, Stdio, current_exe}
+import std.thread.{sleep}
+
+fn main() {
+    // Started by the code below: a launcher, which starts the server, this program again, and waits.
+    let a = args()
+    if a.len() > 0 {
+        if a[0] == "launcher" {
+            _ = Command.new(current_exe()).arg("server").stdout(Stdio.Null).spawn()!
+            println("ready")
+            flush()
+        }
+        unsafe { sleep(60000000000) }
+        return
+    }
+    var server = Command.new(current_exe()).arg("launcher").stdout(Stdio.Pipe).own_group().spawn()!
+    _ = server.wait_for_line("ready", 30000)
+    // Ask them to stop, give them 10 seconds to, and end what's left.
+    server.stop()
+    if server.wait_timeout(10000) == none {
+        server.kill_tree()
+    }
+    println("{server.wait().status.success()}")    // out: false
+}
+```
+
+| Method | Does |
+| --- | --- |
+| `c.own_group()` | Starts it in a process group of its own, which the programs it starts are in too. On Linux and macOS it's a session of its own, as Python's `start_new_session=True` starts. On Windows it's a console process group, as `CREATE_NEW_PROCESS_GROUP` makes, and a job of its own |
+| `child.stop()` | Asks it and every program in its group to end, letting them clean up: `SIGTERM` to the group on Linux and macOS, as `os.killpg(p.pid, signal.SIGTERM)` sends it, and Ctrl+Break on Windows, as `p.send_signal(signal.CTRL_BREAK_EVENT)` does. It doesn't wait |
+| `child.kill_tree()` | Ends it and every program in its group at once: `SIGKILL` to the group on Linux and macOS, and on Windows the end of its job, which `psutil`'s loop over `children(recursive=True)` does in Python |
+| `child.signal(sig: i32) ! ProcessError` | Sends it a signal, such as 1 for `SIGHUP`, as `p.send_signal(sig)` does: to its whole group if it was started with `own_group`, as `os.killpg` does. Fails with `BadArgument` for a number that isn't a signal, and on Windows, which has none |
+
+- **`stop` and `kill_tree` panic** unless it was started with `own_group`, on every system, so a program that works on Linux works on Windows. Ctrl+Break reaches only a group, and ending what it started needs one.
+- **What it started is ended even once it has exited itself**, as a launcher does once it has started the server. On Linux and macOS the group's ID stays its own while anything is in the group, and on Windows the job holds what's in it.
+- **The terminal's Ctrl+C doesn't reach it**, on any system: it isn't in the terminal's group, so this program decides when it ends. A panic in this program still ends it and its group, as [When this program ends](#when-this-program-ends) says.
+- **On Windows, Ctrl+Break** ends a program that doesn't handle it with the status `-1073741510`, `0xC000013A`. It's sent through the console the program runs in, so one that has no console of its own, such as a service, joins the child's console for as long as it takes. A program that can't be sent it keeps running, which is why `kill_tree` comes after.
+- **Signal numbers** are the system's. 1 `SIGHUP`, 2 `SIGINT`, 9 `SIGKILL` and 15 `SIGTERM` are the same everywhere, but others differ: `SIGUSR1` is 10 on Linux and 30 on macOS.
+- **On Windows, a program it starts may leave the job**, as one that starts something in the background with `CREATE_BREAKAWAY_FROM_JOB` does, and `kill_tree` doesn't reach that one. A program that starts one in a group of its own, a `setsid` on Linux, leaves the group the same way.
 
 ## How it ended
 
@@ -238,7 +290,7 @@ The program is found the same way on each system, by Calx, not by the system's o
 A program that ends without meaning to takes the programs it started with it, so a bug can't leave them running:
 
 - **On Windows**, every program a Calx program starts goes into a job, with every program those start in turn. If the Calx program panics, crashes or is killed, the job kills all of them, however deep they go. A program they start may still leave the job, as one that starts something in the background does.
-- **On Linux**, a panic kills the programs the Calx program started. What those started runs on, since Linux has no job to hold them, but stopping the process group, as a terminal's Ctrl+C or a test runner does, reaches them all.
+- **On Linux**, a panic kills the programs the Calx program started, and the whole group of each started with [`own_group`](#stopping-it-and-what-it-started). What the others started runs on, since Linux has no job to hold them, but stopping the process group, as a terminal's Ctrl+C or a test runner does, reaches them all.
 - **A program that ends as it means to**, by returning from `main` or calling `exit`, leaves what it started running, as in other languages. A `Child` that's never waited for keeps running until it ends.
 
 `calx run` stands for the program the same way:

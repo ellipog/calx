@@ -28,6 +28,11 @@
  * program they started; on Linux a panic kills the children this program started. One that ends
  * as it means to, by returning from `main` or calling `exit`, leaves them running.
  *
+ * A child started in a group of its own leads a process group, which the programs it starts are
+ * in too, so it can be asked to stop, or ended, with all of them: on Linux and macOS a session of
+ * its own, which SIGTERM or any signal goes to with killpg, and on Windows a console process group,
+ * which Ctrl+Break goes to, and a job of its own inside the one above, which ends them all.
+ *
  * This file is compiled into a program only when it starts other programs. */
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -181,12 +186,15 @@ struct proc {
     cx_u64 started_ns, ended_ns;  /* on cx_clock_ns's clock: just before it started, and once it was seen to exit */
     cx_u32 pid;
     group* g;
+    int own_group;      /* started in a group of its own, with what it starts */
 #ifdef _WIN32
+    HANDLE job;         /* with own_group, the job it and what it starts are in */
     HANDLE process, wait;
     volatile LONG exit_posted;
     int exit_seen;
 #else
     int pidfd;
+    pid_t pgid;         /* with own_group, its process group: its own ID, or a measured one's helper's */
     unsigned backoff;   /* without a pidfd, how many ms to wait before looking again */
     proc *live_prev, *live_next;   /* in `live` while it hasn't been seen to exit */
     int listed;
@@ -234,8 +242,9 @@ typedef struct {
  * of them; whether there's a folder, a byte, and the folder; then a u32 count of changes to the
  * environment, each a byte that's 1 to set the variable and 0 to remove it, its name, and its
  * value if it's set; then the processors it may run on, a u32 count and a u32 each, none for any;
- * a byte that's 1 to take it out of power throttling; and a byte that's 1 to start it from a
- * helper, so its peak memory is its own. Integers are little-endian, and each text is a u32
+ * a byte that's 1 to take it out of power throttling; a byte that's 1 to start it from a
+ * helper, so its peak memory is its own; and a byte that's 1 to start it in a group of its own,
+ * so it can be stopped with what it starts. Integers are little-endian, and each text is a u32
  * length and its bytes. */
 typedef struct {
     cx_u32 io[3];
@@ -252,6 +261,7 @@ typedef struct {
     size_t ncpus;
     int full_speed;
     int measured;
+    int own_group;
 } spec;
 
 typedef struct {
@@ -319,6 +329,7 @@ static int spec_read(spec* sp, const cx_u8* p, size_t n) {
     for (size_t i = 0; i < sp->ncpus; i++) sp->cpus[i] = (cx_u32)rd_int(&r, 4);
     sp->full_speed = (int)rd_int(&r, 1);
     sp->measured = (int)rd_int(&r, 1);
+    sp->own_group = (int)rd_int(&r, 1);
     return !r.bad;
 }
 
@@ -916,6 +927,41 @@ static void kill_proc(proc* p) {
     if (!p->exited && TerminateProcess(p->process, 1)) p->killed = 1;
 }
 
+/* Ends the child's job: it, and every program it started that's still in it. */
+static void kill_tree_os(proc* p) {
+    if (!p->exited && WaitForSingleObject(p->process, 0) == WAIT_TIMEOUT) p->killed = 1;
+    TerminateJobObject(p->job, 1);
+}
+
+/* Sends Ctrl+Break to the child's console process group, which is the child and what it started
+ * that hasn't a group of its own. Only a program on the same console can send it, so one with no
+ * console of its own, whose children each have one, joins the child's for as long as it takes,
+ * keeping its own streams. One thread at a time does, since a program has one console. */
+static SRWLOCK console_lock = SRWLOCK_INIT;
+
+static void stop_os(proc* p) {
+    if (GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, p->pid)) return;
+    DWORD console;
+    if (p->exited || GetConsoleProcessList(&console, 1) != 0) return;
+    AcquireSRWLockExclusive(&console_lock);
+    static const DWORD STD[3] = {STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE};
+    HANDLE kept[3];
+    for (int i = 0; i < 3; i++) kept[i] = GetStdHandle(STD[i]);
+    if (AttachConsole(p->pid)) {
+        GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, p->pid);
+        FreeConsole();
+    }
+    for (int i = 0; i < 3; i++) SetStdHandle(STD[i], kept[i]);
+    ReleaseSRWLockExclusive(&console_lock);
+}
+
+/* Windows has no signals: only Ctrl+Break, which stop_os sends. */
+static int signal_os(proc* p, cx_i32 sig) {
+    (void)p;
+    (void)sig;
+    return -2;
+}
+
 /* Waits until something happens to the children `ps`, which share a group, or until `until`
  * (0 for no limit), and handles all that happened. A child whose timeout runs out is killed. */
 static void pump(proc** ps, size_t n, cx_u64 until) {
@@ -970,6 +1016,7 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
     HANDLE child[3] = {NULL, NULL, NULL};
     HANDLE ours[3] = {NULL, NULL, NULL};
     LPPROC_THREAD_ATTRIBUTE_LIST attrs = NULL;
+    HANDLE tree = NULL;
     int changes = sp->clear_env || sp->envc;
     if (sp->has_dir) {
         wbuf rel = {0};
@@ -1095,8 +1142,23 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
      * an editor or a service often has, shares it: making each child one costs 15 ms. */
     DWORD console;
     if (GetConsoleProcessList(&console, 1) == 0) flags |= CREATE_NO_WINDOW;
-    /* A child to pin, or to run at full speed, starts suspended, so it runs no instruction before. */
-    if (pin || sp->full_speed) flags |= CREATE_SUSPENDED;
+    /* A child to pin, to run at full speed, or to put in a job of its own, starts suspended, so it
+     * runs no instruction before. */
+    if (pin || sp->full_speed || sp->own_group) flags |= CREATE_SUSPENDED;
+    /* A group of its own: a console process group, which Ctrl+Break is sent to, and a job, inside
+     * the one every child is in, which holds it and every program it starts, to end them all. It
+     * lets them leave, as that one does. */
+    if (sp->own_group) {
+        flags |= CREATE_NEW_PROCESS_GROUP;
+        tree = CreateJobObjectW(NULL, NULL);
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION info;
+        memset(&info, 0, sizeof info);
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+        if (!tree || !SetInformationJobObject(tree, JobObjectExtendedLimitInformation, &info, sizeof info)) {
+            fail_win(GetLastError());
+            goto done;
+        }
+    }
     PROCESS_INFORMATION pi;
     p->started_ns = cx_clock_ns();
     BOOL made = CreateProcessW(exe.p, line.p, NULL, NULL, count > 0, flags, changes ? env.p : NULL, sp->has_dir ? dir.p : NULL,
@@ -1116,7 +1178,8 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
         goto done;
     }
     if (flags & CREATE_SUSPENDED) {
-        if (pin && !SetProcessAffinityMask(pi.hProcess, pin)) {
+        /* Its job goes inside the one it's in, which Windows 8 allows. */
+        if ((pin && !SetProcessAffinityMask(pi.hProcess, pin)) || (tree && !AssignProcessToJobObject(tree, pi.hProcess))) {
             DWORD e = GetLastError();
             TerminateProcess(pi.hProcess, 1);
             CloseHandle(pi.hThread);
@@ -1130,6 +1193,9 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
     CloseHandle(pi.hThread);
     p->process = pi.hProcess;
     p->pid = pi.dwProcessId;
+    p->job = tree;
+    p->own_group = tree != NULL;
+    tree = NULL;
     for (int i = 0; i < 3; i++) {
         stream* s = &p->s[i];
         if (!ours[i]) continue;
@@ -1147,6 +1213,8 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
             p->s[i].open = 0;
         }
         CloseHandle(p->process);
+        if (p->job) CloseHandle(p->job);
+        p->job = NULL;
         goto done;
     }
     if (p->s[0].open) bytes_add(&p->s[0].more, input, input_n);
@@ -1159,6 +1227,7 @@ done:
         if (ours[i]) CloseHandle(ours[i]);
         if (child[i] && !(i == 2 && child[2] == child[1])) CloseHandle(child[i]);
     }
+    if (tree) CloseHandle(tree);
     free_attrs(attrs);
     w_free(&name);
     w_free(&path);
@@ -1181,6 +1250,8 @@ static void free_os(proc* p) {
      * both point at `p`, so they're taken before it's freed. */
     while (p->s[0].pending || p->s[1].pending || p->s[2].pending || (p->exit_posted && !p->exit_seen)) pump(&p, 1, 0);
     CloseHandle(p->process);
+    /* What's in its job runs on, in the job every child is in. */
+    if (p->job) CloseHandle(p->job);
     free(p->s[0].more.p);
 }
 
@@ -1370,16 +1441,21 @@ static void child_exited(proc* p, int status, const struct rusage* used) {
 }
 
 /* The children that haven't been seen to exit, which a panic kills, since a program that went
- * wrong shouldn't leave them running. Only these: what they started runs on, as Linux has no job
- * to hold them all, though stopping this program's process group, as a terminal's Ctrl+C or a
- * test runner does, reaches them too. */
+ * wrong shouldn't leave them running. Only these, and the process groups of those started in one
+ * of their own: what the others started runs on, as Linux has no job to hold them all, though
+ * stopping this program's process group, as a terminal's Ctrl+C or a test runner does, reaches
+ * them too. */
 static pthread_mutex_t live_lock = PTHREAD_MUTEX_INITIALIZER;
 static proc* live;
 
 static void children_at_exit(int normal) {
     if (normal) return;
     pthread_mutex_lock(&live_lock);
-    for (proc* p = live; p; p = p->live_next) kill((pid_t)p->pid, SIGKILL);
+    for (proc* p = live; p; p = p->live_next) {
+        /* One in a group of its own goes with what it started. */
+        if (p->own_group) killpg(p->pgid, SIGKILL);
+        kill((pid_t)p->pid, SIGKILL);
+    }
     pthread_mutex_unlock(&live_lock);
 }
 
@@ -1422,6 +1498,23 @@ static void reap(proc* p) {
 static void kill_proc(proc* p) {
     if (!p->exited && kill((pid_t)p->pid, SIGKILL) == 0) p->killed = 1;
 }
+
+/* Sends `sig` to the child, or with own_group to its whole process group, as Python's os.killpg
+ * does: to what it started as well, even once it has exited itself, since the group's ID is kept
+ * while anyone is in it. 0, or -1 for a signal that isn't one. One that has gone is left alone. */
+static int signal_os(proc* p, cx_i32 sig) {
+    int r;
+    if (p->own_group) r = killpg(p->pgid, sig);
+    else if (!p->exited) r = kill((pid_t)p->pid, sig);
+    else return 0;
+    return r != 0 && errno == EINVAL ? -1 : 0;
+}
+
+static void kill_tree_os(proc* p) {
+    if (killpg(p->pgid, SIGKILL) == 0 && !p->exited) p->killed = 1;
+}
+
+static void stop_os(proc* p) { signal_os(p, SIGTERM); }
 
 typedef struct {
     proc* p;
@@ -1772,12 +1865,23 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
     sigemptyset(&mask);
     posix_spawnattr_setsigdefault(&at, &def);
     posix_spawnattr_setsigmask(&at, &mask);
+    short spawn_flags = POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK;
 #ifdef __APPLE__
     /* Only the three streams reach the child, whatever else is open and not yet close-on-exec. */
-    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT);
-#else
-    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK);
+    spawn_flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
 #endif
+    /* A group of its own: a session of its own, as Python's `start_new_session` starts it, whose
+     * process group the programs it starts are in too, and which the terminal's Ctrl+C and
+     * job control don't reach. Without POSIX_SPAWN_SETSID, a process group of its own. */
+    if (sp->own_group) {
+#ifdef POSIX_SPAWN_SETSID
+        spawn_flags |= POSIX_SPAWN_SETSID;
+#else
+        spawn_flags |= POSIX_SPAWN_SETPGROUP;
+        posix_spawnattr_setpgroup(&at, 0);
+#endif
+    }
+    posix_spawnattr_setflags(&at, spawn_flags);
 #ifdef __APPLE__
     /* macOS has no affinity a program can set: its scheduler places threads itself. */
     if (sp->ncpus) {
@@ -1839,11 +1943,15 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
     p->started_ns = cx_clock_ns();
 #ifdef __APPLE__
     int e = posix_spawn(&pid, exe.p, &fa, &at, argv, envp);
+    p->pgid = pid;
 #else
     int e;
     if (hargv) {
+        /* The helper is the one that leads the child's group, and its ID is the group's as long as
+         * the group has anyone in it, though the helper has gone. */
         pid_t hpid;
         e = posix_spawn(&hpid, "/proc/self/exe", &fa, &at, hargv, envp);
+        p->pgid = hpid;
         close(report[1]);
         close(slot);
         if (!e) e = helper_said(report[0], hpid, &pid, &p->started_ns);
@@ -1851,6 +1959,7 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
         free(hargv);
     } else {
         e = posix_spawn(&pid, exe.p, &fa, &at, argv, envp);
+        p->pgid = pid;
     }
     if (pinned) sched_setaffinity(0, sizeof was, &was);
 #endif
@@ -1859,6 +1968,7 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
         goto done;
     }
     p->pid = (cx_u32)pid;
+    p->own_group = sp->own_group;
 #ifdef __APPLE__
     /* A kqueue that's ready once the child exits; one that has exited already is looked for. */
     p->pidfd = kqueue();
@@ -2078,7 +2188,16 @@ cx_i64 cx_proc_line(cx_i64 h, cx_u64 until) {
         if (nl) return (cx_i64)(nl - (b->p + b->start)) + 1;
         s->scan = b->len;
         if (ended(s)) return b->len > b->start ? (cx_i64)(b->len - b->start) : -2;
-        if (until && cx_clock_ns() >= until) return -1;
+        if (until && cx_clock_ns() >= until) {
+            /* Out of time, but what's in the pipe already has come, so it's taken without waiting,
+             * as a read of 0 ms needs (CLX-358): again while more comes, as a line may come in
+             * pieces, each read starting once the one before is taken. */
+            size_t had = b->len;
+            pump(&p, 1, 1);
+            if (b->len == had && !ended(s)) return -1;
+            until = 1;
+            continue;
+        }
         pump(&p, 1, until);
     }
 }
@@ -2090,9 +2209,28 @@ cx_i64 cx_proc_some(cx_i64 h, cx_u64 until) {
     for (;;) {
         if (s->b.len > s->b.start) return (cx_i64)(s->b.len - s->b.start);
         if (ended(s)) return -2;
-        if (until && cx_clock_ns() >= until) return -1;
+        if (until && cx_clock_ns() >= until) {
+            /* What's in the pipe already is taken without waiting, as in cx_proc_line. */
+            pump(&p, 1, 1);
+            if (s->b.len > s->b.start) return (cx_i64)(s->b.len - s->b.start);
+            return ended(s) ? -2 : -1;
+        }
         pump(&p, 1, until);
     }
+}
+
+/* Waits until the child exits, or until `until` (0 for no limit), reading its streams meanwhile:
+ * 1 if it has exited, 0 if `until` came first. */
+cx_i32 cx_proc_wait_exit(cx_i64 h, cx_u64 until) {
+    proc* p = P(h);
+    while (!p->exited) {
+        if (until && cx_clock_ns() >= until) {
+            pump(&p, 1, 1);
+            break;
+        }
+        pump(&p, 1, until);
+    }
+    return p->exited;
 }
 
 /* The bytes of stream 1 or 2 that came and weren't taken. */
@@ -2109,6 +2247,14 @@ void cx_proc_take(cx_i64 h, cx_u32 i, cx_u8* to, cx_usize n) {
 }
 
 void cx_proc_kill(cx_i64 h) { kill_proc(P(h)); }
+
+/* For a child started in a group of its own, which std.process checked: ends it and every program
+ * in its group, or asks them to end, with SIGTERM or Ctrl+Break. */
+void cx_proc_kill_tree(cx_i64 h) { kill_tree_os(P(h)); }
+void cx_proc_stop(cx_i64 h) { stop_os(P(h)); }
+
+/* Sends the signal `sig`: 0, -1 where it isn't one, or -2 on Windows, which has none. */
+cx_i32 cx_proc_send_signal(cx_i64 h, cx_i32 sig) { return signal_os(P(h), sig); }
 
 cx_u32 cx_proc_id(cx_i64 h) { return proc_id_os(P(h)); }
 

@@ -170,6 +170,8 @@ fn main() ! Error {
 | `subprocess.run(["git", "status"], check=True)` | `Command.new("git").arg("status").run()` |
 | `subprocess.check_output(...)` | `Command.new(...).read()`, its output as text |
 | `subprocess.run(..., capture_output=True)` | `Command.new(...).output()`, with the status and both streams |
+| `Popen(cmd, start_new_session=True)`, `os.killpg(p.pid, signal.SIGTERM)`, `CREATE_NEW_PROCESS_GROUP` with `p.send_signal(signal.CTRL_BREAK_EVENT)` | `Command.new(...).own_group().spawn()` and `child.stop()`, the same call on every system, then `child.kill_tree()` for what's left, which Python needs `psutil` for ([stopping it](../std/process.md#stopping-it-and-what-it-started)) |
+| `p.wait(timeout=10)`, `p.send_signal(signal.SIGHUP)` | `child.wait_timeout(10000)`, `none` if it's still running, and `child.signal(1)` |
 | `shlex.split(line)`, `shlex.quote(w)`, `shlex.join(words)` | `split(line)`, `quote(w)` and `join(words)` from [`std.shell`](../std/shell.md) |
 | `os.wait4(pid, 0)`, `psutil.Process(pid).memory_info()` | `unsafe { status.usage() }`, `unsafe { child.usage() }`: CPU time and memory, the same on both systems, without `ctypes` |
 | `os.sched_setaffinity(0, cpus)`, `psutil.cpu_times()` | `set_affinity(cpus)`, or `c.affinity(cpus)` for a program it starts, and `unsafe { machine_cpu() }`, on Windows too, from [`std.process`](../std/process.md#pinning-and-the-machines-load) |
