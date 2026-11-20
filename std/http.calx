@@ -1,13 +1,14 @@
 /// HTTP and HTTPS requests, on the system's own client, so certificates are checked as the system
-/// checks them: WinHTTP on Windows, and libcurl on Linux (D118).
+/// checks them: WinHTTP on Windows, and libcurl on Linux and macOS (D118).
 ///
-/// A request runs on a thread of its own, and `done` says when it has finished, so a server's loop
-/// goes on while it waits, as vanilla's login waits for Mojang's session server on a thread of its
-/// own.
+/// A request runs off the program's thread, and `done` says when it has finished, so a server's
+/// loop goes on while it waits, as vanilla's login waits for Mojang's session server on a thread of
+/// its own. A connection is kept for the requests after it to the same host, and HTTP/2 ones,
+/// which `Version.Http2` asks for, go over one connection at once (CLX-383).
 module std.http
 
 extern "C" {
-    fn cx_http_start(post: bool, url: *const u8, url_len: usize, head: *const u8, head_len: usize, body: *const u8, body_len: usize, timeout_ms: u32, limit: usize) -> u64
+    fn cx_http_start(post: bool, url: *const u8, url_len: usize, head: *const u8, head_len: usize, body: *const u8, body_len: usize, timeout_ms: u32, limit: usize, version: u32) -> u64
     fn cx_http_done(h: u64) -> i32
     fn cx_http_wait(h: u64) -> i32
     fn cx_http_code(h: u64) -> i32
@@ -19,6 +20,8 @@ extern "C" {
     fn cx_http_free(h: u64)
     fn cx_http_received(h: u64) -> u64
     fn cx_http_expected(h: u64) -> u64
+    fn cx_http_version(h: u64) -> u32
+    fn cx_http_times(h: u64, out: *u64)
     fn cx_crypto_random(p: *u8, n: usize)
 }
 
@@ -41,12 +44,15 @@ pub enum Error {
     Tls
     /// The response didn't come within the time.
     Timeout
-    /// The server closed the connection early, or what it sent isn't HTTP/1.1: a server that
-    /// speaks only HTTP/2, or something that isn't HTTP at all.
+    /// The server closed the connection early, or what it sent isn't HTTP/1.1 or HTTP/2: an
+    /// HTTP/2-only server's answer to HTTP/1.1, or something that isn't HTTP at all. With
+    /// `Version.Http2Only`, a server that doesn't speak HTTP/2.
     Protocol
     /// The body is longer than the limit.
     TooLong
-    /// There's no HTTP client on the system: on Linux, libcurl isn't installed.
+    /// There's no HTTP client on the system that can make the request: on Linux, libcurl isn't
+    /// installed, or for `Version.Http2Only`, the system's client has no HTTP/2 (a libcurl built
+    /// without nghttp2), or no HTTP/2 without TLS (WinHTTP).
     Unavailable
     /// Something else, with the system's error code: libcurl's on Linux.
     Os(i32)
@@ -62,12 +68,42 @@ impl Display for Error {
             Connect => print("can't connect: nothing answered at the host and port"),
             Tls => print("the TLS handshake failed"),
             Timeout => print("timed out"),
-            Protocol => print("the response ended early, or the server didn't answer in HTTP/1.1"),
+            Protocol => print("the response ended early, or the server didn't answer in HTTP/1.1 or HTTP/2"),
             TooLong => print("the body is longer than the limit"),
-            Unavailable => print("there's no HTTP client on this system; on Linux, install libcurl"),
+            Unavailable => print("there's no HTTP client on this system for the request; on Linux, install libcurl"),
             Os(code) => print("system error {code}"),
         }
     }
+}
+
+/// The HTTP a request asks for (CLX-383).
+pub enum Version {
+    /// HTTP/1.1, as every request was before HTTP/2 came to std.http.
+    Http1
+    /// HTTP/2 if the server takes it in the TLS handshake (ALPN), and HTTP/1.1 if it doesn't, or
+    /// the URL is `http://`, or the system's client has no HTTP/2: as Python's
+    /// `httpx.Client(http2=True)`.
+    Http2
+    /// HTTP/2 and nothing else: over `http://`, h2c, with no Upgrade first, and over `https://`,
+    /// a server that doesn't take HTTP/2 is a `Protocol` error. As httpx's `http1=False,
+    /// http2=True`. `Unavailable` where the system's client can't: WinHTTP has no h2c.
+    Http2Only
+}
+
+/// How long a request's steps took, each in nanoseconds from its start to the step's end, as
+/// curl's `-w '%{time_connect}'` gives them. A step the request didn't take is 0: resolving,
+/// connecting and TLS on a connection that was open already, TLS on `http://`.
+pub struct Timings {
+    /// Until the host's address was known. 0 too when the system had it already (on Windows).
+    pub resolve_ns: u64,
+    /// Until the TCP connection was made.
+    pub connect_ns: u64,
+    /// Until the TLS handshake was done.
+    pub tls_ns: u64,
+    /// Until the response's first byte came (on Windows, its headers).
+    pub first_byte_ns: u64,
+    /// Until the whole body had come.
+    pub total_ns: u64,
 }
 
 /// What the server answered.
@@ -75,9 +111,17 @@ pub struct Response {
     /// The status code, such as 200, or 204 when Mojang's session server says a player hasn't
     /// joined.
     pub status: u32,
-    /// The header lines, in the order they came, their values trimmed.
+    /// The header lines, in the order they came, their values trimmed. Over HTTP/2 their names
+    /// are in lower case, as HTTP/2 sends them.
     pub headers: List<Header>,
     pub body: List<u8>,
+    /// The HTTP it came in: `HTTP/1.1`, `HTTP/2` or `HTTP/1.0`, as httpx's `r.http_version`.
+    pub version: String,
+    /// Whether it came over a connection that was open already, kept from a request before it or
+    /// shared with one running beside it.
+    pub reused: bool,
+    /// How long its steps took. Only the total, on a Windows whose WinHTTP doesn't give the rest.
+    pub timings: Timings,
 }
 
 impl Response {
@@ -163,6 +207,8 @@ impl Request {
         var head = List<u8>()
         var body = List<u8>()
         var status: u32 = 0
+        var used: u32 = 0
+        var t: List<u64> = [0; 6]
         unsafe {
             let hn = cx_http_head_len(h)
             head.reserve(hn)
@@ -173,9 +219,23 @@ impl Request {
             cx_http_body(h, body.as_mut_ptr())
             body.set_len(bn)
             status = cx_http_status(h)
+            used = cx_http_version(h)
+            cx_http_times(h, t.as_mut_ptr())
             cx_http_free(h)
         }
-        return Response { status: status, headers: header_list(String.from_utf8(head) ?? String()), body: body }
+        let version = match used {
+            10 => "HTTP/1.0",
+            20 => "HTTP/2",
+            _ => "HTTP/1.1",
+        }
+        return Response {
+            status: status,
+            headers: header_list(String.from_utf8(head) ?? String()),
+            body: body,
+            version: String(version),
+            reused: t[5] != 0,
+            timings: Timings { resolve_ns: t[0], connect_ns: t[1], tls_ns: t[2], first_byte_ns: t[3], total_ns: t[4] },
+        }
     }
 }
 
@@ -239,28 +299,33 @@ fn header_lines(headers: List<Header>) -> String {
 }
 
 @track_caller
-fn start(is_post: bool, url: String, headers: List<Header>, body: List<u8>, timeout_ms: u32, limit: usize) -> Request {
+fn start(is_post: bool, url: String, headers: List<Header>, body: List<u8>, timeout_ms: u32, limit: usize, version: Version) -> Request {
     if timeout_ms == 0 {
         panic("a request's timeout is at least 1 ms")
     }
     let head = header_lines(headers)
-    let h = unsafe { cx_http_start(is_post, url.as_ptr(), url.len(), head.as_ptr(), head.len(), body.as_ptr(), body.len(), timeout_ms, limit) }
+    let v: u32 = match version {
+        Http1 => 0,
+        Http2 => 1,
+        Http2Only => 2,
+    }
+    let h = unsafe { cx_http_start(is_post, url.as_ptr(), url.len(), head.as_ptr(), head.len(), body.as_ptr(), body.len(), timeout_ms, limit, v) }
     return Request { handle: h }
 }
 
 /// Starts a GET of `url` with the header lines, which may take `timeout_ms` milliseconds in all
-/// and give a body of at most `limit` bytes. Panics if the timeout is 0, or a header's name isn't
-/// a token, its value has a line break, or it's one std.http sets itself: Host, Content-Length,
-/// Transfer-Encoding or Connection.
+/// and give a body of at most `limit` bytes, in the HTTP `version` asks for. Panics if the timeout
+/// is 0, or a header's name isn't a token, its value has a line break, or it's one std.http sets
+/// itself: Host, Content-Length, Transfer-Encoding or Connection.
 @track_caller
-pub fn get(url: String, headers: List<Header>, timeout_ms: u32, limit: usize) -> Request {
-    return start(false, url, headers, List<u8>(), timeout_ms, limit)
+pub fn get(url: String, headers: List<Header>, timeout_ms: u32, limit: usize, version: Version = Version.Http1) -> Request {
+    return start(false, url, headers, List<u8>(), timeout_ms, limit, version)
 }
 
 /// Starts a POST of `body` to `url`, as `get` does. Give a Content-Type header for the body.
 @track_caller
-pub fn post(url: String, headers: List<Header>, body: List<u8>, timeout_ms: u32, limit: usize) -> Request {
-    return start(true, url, headers, body, timeout_ms, limit)
+pub fn post(url: String, headers: List<Header>, body: List<u8>, timeout_ms: u32, limit: usize, version: Version = Version.Http1) -> Request {
+    return start(true, url, headers, body, timeout_ms, limit, version)
 }
 
 /// A `multipart/form-data` body (RFC 7578): text fields and files, as an HTML form with a file
@@ -379,7 +444,7 @@ impl Form {
 /// Starts a POST of the form to `url`, with its Content-Type, as `post` does. Panics if the
 /// header lines have a Content-Type of their own, or as `get` does.
 @track_caller
-pub fn post_form(url: String, headers: List<Header>, form: Form, timeout_ms: u32, limit: usize) -> Request {
+pub fn post_form(url: String, headers: List<Header>, form: Form, timeout_ms: u32, limit: usize, version: Version = Version.Http1) -> Request {
     var all = List<Header>()
     for h in headers {
         if h.name.to_lower_root() == "content-type" {
@@ -388,14 +453,14 @@ pub fn post_form(url: String, headers: List<Header>, form: Form, timeout_ms: u32
         all.push(Header { name: h.name.copy(), value: h.value.copy() })
     }
     all.push(Header { name: "Content-Type", value: form.content_type() })
-    return start(true, url, all, form.body(), timeout_ms, limit)
+    return start(true, url, all, form.body(), timeout_ms, limit, version)
 }
 
 /// GETs `url` and waits for what the server answers, as a script wants it, as Python's
 /// `requests.get(url)` does: no headers of its own, 60 seconds in all, and a body of up to 1 GiB.
 /// Any status is an answer, so a 404 comes back as a `Response` with that status; only no answer
 /// is an error.
-pub fn fetch(url: String, timeout_ms: u32 = 60000) -> Response ! Error {
-    var r = start(false, url, List<Header>(), List<u8>(), timeout_ms, 1 << 30)
+pub fn fetch(url: String, timeout_ms: u32 = 60000, version: Version = Version.Http1) -> Response ! Error {
+    var r = start(false, url, List<Header>(), List<u8>(), timeout_ms, 1 << 30, version)
     return try r.wait()
 }

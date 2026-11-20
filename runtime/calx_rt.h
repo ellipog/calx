@@ -990,12 +990,18 @@ CX_FN(cx_u32, cx_net_peer, (cx_u64 h, cx_u32 id, cx_u8* out));
 CX_FN(cx_u32, cx_net_error_kind, (void));
 CX_FN(cx_i32, cx_net_error_code, (void));
 
-/* HTTP and HTTPS requests, each on a thread of its own, in calx_http.c (D118). A request is a
- * handle that's never 0. `cx_http_done` and `cx_http_wait` give -1 for one that was freed, and
- * `cx_http_wait` gives what went wrong as std.http's Error numbers it, or 0. The getters are for a
- * request that was waited for. */
+/* HTTP and HTTPS requests, in calx_http.c (D118): each on a thread of its own on Windows, and
+ * together on one on Linux and macOS. A request is a handle that's never 0. `version` is the HTTP
+ * it asks for, as std.http's Version numbers it. `cx_http_done` and `cx_http_wait` give -1 for
+ * one that was freed, and `cx_http_wait` gives what went wrong as std.http's Error numbers it, or
+ * 0. The getters are for a request that was waited for. */
 CX_FN(cx_u64, cx_http_start, (cx_bool post, const cx_u8* url, cx_usize url_len, const cx_u8* head, cx_usize head_len, const cx_u8* body,
-                              cx_usize body_len, cx_u32 timeout_ms, cx_usize limit));
+                              cx_usize body_len, cx_u32 timeout_ms, cx_usize limit, cx_u32 version));
+/* The HTTP the response came in: 10, 11 or 20. */
+CX_FN(cx_u32, cx_http_version, (cx_u64 h));
+/* Its times in nanoseconds, resolve, connect, TLS, first byte and total, then 1 if it went over a
+ * connection that was open already, into `out`, 6 of them. */
+CX_FN(void, cx_http_times, (cx_u64 h, cx_u64* out));
 CX_FN(cx_i32, cx_http_done, (cx_u64 h));
 CX_FN(cx_i32, cx_http_wait, (cx_u64 h));
 CX_FN(cx_i32, cx_http_code, (cx_u64 h));

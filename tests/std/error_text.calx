@@ -22,8 +22,8 @@ fn main() {
     // out: is a directory
     // out: directory not empty
     // out: system error 32
-    println("{http.Error.Resolve} | {http.Error.Connect} | {http.Error.Tls} | {http.Error.Protocol}")    // out: can't find the host | can't connect: nothing answered at the host and port | the TLS handshake failed | the response ended early, or the server didn't answer in HTTP/1.1
-    println("{http.Error.Unavailable} | {http.Error.Os(7)}")    // out: there's no HTTP client on this system; on Linux, install libcurl | system error 7
+    println("{http.Error.Resolve} | {http.Error.Connect} | {http.Error.Tls} | {http.Error.Protocol}")    // out: can't find the host | can't connect: nothing answered at the host and port | the TLS handshake failed | the response ended early, or the server didn't answer in HTTP/1.1 or HTTP/2
+    println("{http.Error.Unavailable} | {http.Error.Os(7)}")    // out: there's no HTTP client on this system for the request; on Linux, install libcurl | system error 7
     println("{NetError.AddressInUse} | {NetError.BadAddress} | {NetError.Refused} | {NetError.Os(10060)}")    // out: address already in use | not an address, or no name server knows the host | connection refused | system error 10060
     println("{zlib.Error.Corrupt} | {zlib.Error.Dictionary} | {zlib.Error.TooLong} | {lz4.Error.TooLong}")    // out: corrupt data | the data needs a preset dictionary | longer than the limit when inflated | longer than the limit when decompressed
     match load("no/such/config.toml") {

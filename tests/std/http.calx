@@ -185,7 +185,7 @@ fn main() {
     serve(net, mut bufs, ssh)
     match ssh.wait() {
         ok(_) => println("ok"),
-        err(e) => println("{e}"),    // out: the response ended early, or the server didn't answer in HTTP/1.1
+        err(e) => println("{e}"),    // out: the response ended early, or the server didn't answer in HTTP/1.1 or HTTP/2
     }
 
     // The server never answers this one.

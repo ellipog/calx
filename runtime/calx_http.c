@@ -4,16 +4,23 @@
  * installed. Every macOS has it; on Linux it's a package.
  * Linked only into programs that call them.
  *
- * Each request runs on a thread of its own, the way vanilla asks Mojang's session server on an
+ * Each request runs off the program's thread, the way vanilla asks Mojang's session server on an
  * authenticator thread, so the program's loop goes on while it waits and asks `cx_http_done` when
- * to take the response. Requests are slots in a table, named by an index and a generation, so a
- * request whose response was taken can't be taken again: the Calx side panics instead.
+ * to take the response: on Windows each on a thread of its own, and on Linux and macOS together on
+ * one, on a libcurl multi handle, so they share connections as WinHTTP's session shares them.
+ * Requests are slots in a table, named by an index and a generation, so a request whose response
+ * was taken can't be taken again: the Calx side panics instead.
  *
- * Both clients are set up to send the same request: HTTP/1.1, no proxy (as vanilla's dedicated
- * server uses none), redirects followed up to 10 but never from HTTPS to HTTP, no Accept or
- * Accept-Encoding unless the caller adds them, and a User-Agent of "Calx" unless the caller gives
- * one. The timeout is for the whole request. The response's header lines come back as UTF-8
- * "name:value\r\n", the value trimmed, its bytes read as Latin-1 as Java reads them.
+ * Both clients are set up to send the same request: HTTP/1.1 unless HTTP/2 is asked for, no proxy
+ * (as vanilla's dedicated server uses none), redirects followed up to 10 but never from HTTPS to
+ * HTTP, no Accept or Accept-Encoding unless the caller adds them, and a User-Agent of "Calx"
+ * unless the caller gives one. The timeout is for the whole request. The response's header lines
+ * come back as UTF-8 "name:value\r\n", the value trimmed, its bytes read as Latin-1 as Java reads
+ * them.
+ *
+ * HTTP/2 (CLX-383) is WinHTTP's on Windows 10 1607 and later, over TLS alone, and libcurl's where
+ * it's built with nghttp2, as Debian's, Ubuntu's, Fedora's and macOS's are, over TLS or as h2c. A
+ * connection is kept for the requests after it, and HTTP/2 ones to a host go over one at once.
  *
  * WebSockets, behind std.http.websocket, are at the end of the file, on the same clients. */
 #include "calx_rt.h"
@@ -63,6 +70,14 @@ static void once(cx_u32* state, void (*init)(void)) {
 /* What went wrong, as std.http's Error numbers it. */
 enum { E_OK, E_BAD_URL, E_RESOLVE, E_CONNECT, E_TLS, E_TIMEOUT, E_PROTOCOL, E_TOO_LONG, E_UNAVAILABLE, E_OS };
 
+/* The HTTP a request asks for, as std.http's Version numbers it (CLX-383): HTTP/1.1; HTTP/2 if the
+ * server offers it in the TLS handshake's ALPN, else HTTP/1.1; or HTTP/2 and nothing else, with
+ * prior knowledge on http://, h2c. */
+enum { V_HTTP1, V_HTTP2, V_HTTP2_ONLY };
+
+/* A request's times, each in nanoseconds from its start, as `cx_http_times` gives them. */
+enum { T_RESOLVE, T_CONNECT, T_TLS, T_FIRST_BYTE, T_TOTAL, T_COUNT };
+
 typedef struct {
     char* p;
     size_t len, cap;
@@ -86,7 +101,7 @@ static int add(bytes* b, const void* p, size_t n) {
     return 1;
 }
 
-typedef struct {
+typedef struct request {
     cx_u32 state; /* 0 running, 1 finished */
     int post, https;
     char *url, *host, *target, *head;
@@ -105,12 +120,19 @@ typedef struct {
      * none. */
     cx_u64 received, expected;
     int sized;
+    int version;  /* asked for, V_ */
+    cx_u32 used;  /* the HTTP the response came in: 10, 11 or 20, for 1.0, 1.1 and 2 */
+    int reused;   /* whether it went over a connection a request before it had opened */
+    cx_u64 times[T_COUNT];
 #ifdef _WIN32
     HANDLE thread;
 #else
     pthread_t thread;
+    void* easy;              /* on the transfer thread, libcurl's handle */
+    struct curl_slist* list; /* and the header lines it sends */
+    struct request* queued;  /* the next request waiting for the transfer thread */
 #endif
-    int started;
+    int started; /* 1 on a thread of its own, 2 on the transfer thread */
 } request;
 
 static void request_free(request* r) {
@@ -329,15 +351,119 @@ static int tidy_headers(request* r, int latin1) {
     return 1;
 }
 
+/* The HTTP of a status line, "HTTP/1.1 200 OK" or "HTTP/2 200": 10, 11 or 20, or 0. */
+static cx_u32 line_version(const char* p, size_t n) {
+    if (n < 6 || memcmp(p, "HTTP/", 5) != 0 || p[5] < '0' || p[5] > '9') return 0;
+    cx_u32 v = (cx_u32)(p[5] - '0') * 10;
+    if (n >= 8 && p[6] == '.' && p[7] >= '0' && p[7] <= '9') v += (cx_u32)(p[7] - '0');
+    return v;
+}
+
 /* --- Windows: WinHTTP ---------------------------------------------------------------------- */
 
 #ifdef _WIN32
+
+/* HTTP/2 and the request's times, from Windows 10 1607's and later's WinHTTP, numbered here for
+ * SDKs older than them. */
+#ifndef WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL
+#define WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL 133
+#define WINHTTP_OPTION_HTTP_PROTOCOL_USED 134
+#define WINHTTP_PROTOCOL_FLAG_HTTP2 0x1
+#endif
+#ifndef WINHTTP_OPTION_REQUEST_TIMES
+#define WINHTTP_OPTION_REQUEST_TIMES 142
+#endif
+#ifndef WINHTTP_OPTION_HTTP_PROTOCOL_REQUIRED
+#define WINHTTP_OPTION_HTTP_PROTOCOL_REQUIRED 145
+#endif
+#ifndef ERROR_WINHTTP_HTTP_PROTOCOL_MISMATCH
+#define ERROR_WINHTTP_HTTP_PROTOCOL_MISMATCH (WINHTTP_ERROR_BASE + 190)
+#endif
+
+/* WINHTTP_REQUEST_TIMES: performance-counter ticks, at the points WINHTTP_REQUEST_TIME_ENTRY
+ * numbers, of which these are used. A step the request didn't take, as on a connection that was
+ * open already, keeps the time of the request that took it. */
+typedef struct {
+    ULONG count;
+    ULONGLONG at[64];
+} request_times;
+enum { W_ACQUIRE = 2, W_RESOLVED = 6, W_CONNECTED = 8, W_TLS_1 = 10, W_TLS_2 = 12, W_TLS_3 = 14, W_HEADERS = 25, W_ENTRIES = 36 };
 
 static HINTERNET session;
 static cx_u32 session_state;
 
 static void session_open(void) {
     session = WinHttpOpen(L"Calx", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+}
+
+/* Hosts that HTTP/2 requests go to over TLS. WinHTTP shares kept connections between all of a
+ * program's sessions, and a request that offers HTTP/2 goes over a kept HTTP/1.1 connection to
+ * the host if there is one, unless it requires HTTP/2. So it requires it, unless the host is
+ * known not to take it: a server that doesn't fails it with ERROR_WINHTTP_HTTP_PROTOCOL_MISMATCH,
+ * and it's made again in HTTP/1.1. And WinHTTP shares a connection between requests only once
+ * it's open, so while one request is opening an HTTP/2 connection to a host, the others wait to go
+ * over it, as libcurl's CURLOPT_PIPEWAIT has them wait, rather than each open their own. A host is
+ * free, with no request opening one; opening; or open, once a request to it has been answered,
+ * when the requests after go at once. */
+enum { HOST_FREE, HOST_OPENING, HOST_OPEN };
+typedef struct host_state {
+    struct host_state* next;
+    int state;
+    int h1; /* known not to take HTTP/2 */
+    unsigned port;
+    char name[];
+} host_state;
+static host_state* hosts;
+static SRWLOCK hosts_lock = SRWLOCK_INIT;
+static CONDITION_VARIABLE hosts_cond = CONDITION_VARIABLE_INIT;
+static DWORD left(ULONGLONG deadline);
+
+/* The request's host, kept for as long as the program runs. Waits, until the deadline, while
+ * another request is opening a connection to it, and says whether this one is to open it. */
+static host_state* host_wait(request* r, ULONGLONG deadline, int* opening) {
+    AcquireSRWLockExclusive(&hosts_lock);
+    host_state* h = hosts;
+    while (h && (h->port != r->port || strcmp(h->name, r->host) != 0)) h = h->next;
+    if (!h) {
+        size_t n = strlen(r->host);
+        h = calloc(1, sizeof(host_state) + n + 1);
+        if (!h) cx_panic_capacity();
+        memcpy(h->name, r->host, n + 1);
+        h->port = r->port;
+        h->next = hosts;
+        hosts = h;
+    }
+    while (!h->h1 && h->state == HOST_OPENING && GetTickCount64() < deadline) {
+        SleepConditionVariableSRW(&hosts_cond, &hosts_lock, left(deadline), 0);
+    }
+    *opening = !h->h1 && h->state == HOST_FREE;
+    if (*opening) h->state = HOST_OPENING;
+    ReleaseSRWLockExclusive(&hosts_lock);
+    return h;
+}
+
+static int host_h1(host_state* h) {
+    AcquireSRWLockShared(&hosts_lock);
+    int h1 = h->h1;
+    ReleaseSRWLockShared(&hosts_lock);
+    return h1;
+}
+
+/* Says the connection the request that's opening one to the host opened has answered, or that it
+ * failed, so another may open one. */
+static void host_release(host_state* h, int answered) {
+    AcquireSRWLockExclusive(&hosts_lock);
+    h->state = answered ? HOST_OPEN : HOST_FREE;
+    WakeAllConditionVariable(&hosts_cond);
+    ReleaseSRWLockExclusive(&hosts_lock);
+}
+
+/* Says the server doesn't take HTTP/2, so requests to it go at once, in HTTP/1.1. */
+static void host_mark_h1(host_state* h) {
+    AcquireSRWLockExclusive(&hosts_lock);
+    h->h1 = 1;
+    WakeAllConditionVariable(&hosts_cond);
+    ReleaseSRWLockExclusive(&hosts_lock);
 }
 
 static wchar_t* widen(const char* s) {
@@ -369,6 +495,7 @@ static int win_error(DWORD e) {
     case ERROR_WINHTTP_INVALID_SERVER_RESPONSE:
     case ERROR_WINHTTP_REDIRECT_FAILED:
     case ERROR_WINHTTP_HEADER_SIZE_OVERFLOW:
+    case ERROR_WINHTTP_HTTP_PROTOCOL_MISMATCH:
     case ERROR_WINHTTP_RESPONSE_DRAIN_OVERFLOW: return E_PROTOCOL;
     default: return E_OS;
     }
@@ -380,36 +507,102 @@ static DWORD left(ULONGLONG deadline) {
     return now + 1 >= deadline ? 1 : (DWORD)(deadline - now);
 }
 
-static void run(request* r) {
-    once(&session_state, session_open);
-    if (!session) {
-        r->error = E_OS, r->code = (cx_i32)GetLastError();
-        return;
+/* `d` performance-counter ticks, at `f` a second, in nanoseconds. */
+static cx_u64 tick_ns(LONGLONG d, LONGLONG f) {
+    if (d <= 0) return 0;
+    return (cx_u64)(d / f) * 1000000000u + (cx_u64)(d % f) * 1000000000u / (cx_u64)f;
+}
+
+/* The request's times from WinHTTP, from `t0`, when it started, and whether its connection was
+ * open already: then it was made before the request asked for one. A WinHTTP without them gives
+ * the total alone. */
+static void win_times(request* r, HINTERNET q, LONGLONG t0) {
+    LARGE_INTEGER now, f;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&f);
+    r->times[T_TOTAL] = tick_ns(now.QuadPart - t0, f.QuadPart);
+    request_times t;
+    memset(&t, 0, sizeof t);
+    t.count = W_ENTRIES;
+    DWORD n = sizeof t;
+    if (!WinHttpQueryOption(q, WINHTTP_OPTION_REQUEST_TIMES, &t, &n) || t.count <= W_HEADERS) return;
+    LONGLONG at[W_ENTRIES];
+    for (int i = 0; i < W_ENTRIES; i++) at[i] = (LONGLONG)t.at[i] - t0;
+    r->reused = at[W_CONNECTED] <= (at[W_ACQUIRE] > 0 ? at[W_ACQUIRE] : 0);
+    r->times[T_RESOLVE] = tick_ns(at[W_RESOLVED], f.QuadPart);
+    r->times[T_FIRST_BYTE] = tick_ns(at[W_HEADERS], f.QuadPart);
+    if (r->reused) return;
+    r->times[T_CONNECT] = tick_ns(at[W_CONNECTED], f.QuadPart);
+    if (r->https) {
+        LONGLONG tls = at[W_TLS_1];
+        if (at[W_TLS_2] > tls) tls = at[W_TLS_2];
+        if (at[W_TLS_3] > tls) tls = at[W_TLS_3];
+        r->times[T_TLS] = tick_ns(tls, f.QuadPart);
     }
-    ULONGLONG deadline = GetTickCount64() + r->timeout_ms;
+}
+
+/* One try at the request, from `t0`, its start, requiring HTTP/2 if `require_h2`. Gives 1 if the
+ * server doesn't take HTTP/2 and the request may have HTTP/1.1, to be made again. If `*opener`,
+ * this request is opening the connection to that host, and says so once it's answered. */
+static int attempt(request* r, ULONGLONG deadline, LONGLONG t0, int require_h2, host_state** opener) {
     wchar_t* host = widen(r->host);
     wchar_t* target = widen(r->target);
     wchar_t* head = widen(r->head);
     HINTERNET c = NULL, q = NULL;
     DWORD e = 0;
+    int again = 0;
     c = WinHttpConnect(session, host, (INTERNET_PORT)r->port, 0);
     if (!c) goto failed;
     q = WinHttpOpenRequest(c, r->post ? L"POST" : L"GET", target, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                            r->https ? WINHTTP_FLAG_SECURE : 0);
     if (!q) goto failed;
-    int t = (int)r->timeout_ms;
+    if (r->version != V_HTTP1) {
+        /* Offered in the TLS handshake, so it's HTTP/1.1 on http://. Windows 10 1607 and later
+         * have it. Where WinHTTP can't require it, HTTP/2 alone is checked when the response
+         * comes. */
+        DWORD flag = WINHTTP_PROTOCOL_FLAG_HTTP2, yes = TRUE;
+        if (!WinHttpSetOption(q, WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL, &flag, sizeof flag) && r->version == V_HTTP2_ONLY) {
+            r->error = E_UNAVAILABLE;
+            goto done;
+        }
+        if (require_h2) WinHttpSetOption(q, WINHTTP_OPTION_HTTP_PROTOCOL_REQUIRED, &yes, sizeof yes);
+    }
+    int t = (int)left(deadline);
     if (!WinHttpSetTimeouts(q, t, t, t, t)) goto failed;
-    DWORD response_timeout = r->timeout_ms;
-    if (!WinHttpSetOption(q, WINHTTP_OPTION_RECEIVE_RESPONSE_TIMEOUT, &response_timeout, sizeof response_timeout)) goto failed;
+    DWORD ms = left(deadline);
+    if (!WinHttpSetOption(q, WINHTTP_OPTION_RECEIVE_RESPONSE_TIMEOUT, &ms, sizeof ms)) goto failed;
     if (!WinHttpSendRequest(q, head[0] ? head : WINHTTP_NO_ADDITIONAL_HEADERS, head[0] ? (DWORD)-1L : 0, r->body,
                             (DWORD)r->body_len, (DWORD)r->body_len, 0)) {
         goto failed;
     }
-    DWORD ms = left(deadline);
+    ms = left(deadline);
     WinHttpSetOption(q, WINHTTP_OPTION_RECEIVE_RESPONSE_TIMEOUT, &ms, sizeof ms);
     WinHttpSetOption(q, WINHTTP_OPTION_RECEIVE_TIMEOUT, &ms, sizeof ms);
     if (!WinHttpReceiveResponse(q, NULL)) goto failed;
-    DWORD status = 0, size = sizeof status;
+    if (*opener) {
+        host_release(*opener, 1);
+        *opener = NULL;
+    }
+    /* WinHTTP writes an HTTP/2 response's status line as HTTP/1.1's, so the protocol it used
+     * says which it was. */
+    DWORD used = 0, size = sizeof used;
+    if (WinHttpQueryOption(q, WINHTTP_OPTION_HTTP_PROTOCOL_USED, &used, &size) && (used & WINHTTP_PROTOCOL_FLAG_HTTP2)) {
+        r->used = 20;
+    } else {
+        wchar_t version[16] = {0};
+        size = sizeof version - sizeof(wchar_t);
+        r->used = 11;
+        if (WinHttpQueryHeaders(q, WINHTTP_QUERY_VERSION, WINHTTP_HEADER_NAME_BY_INDEX, version, &size, WINHTTP_NO_HEADER_INDEX) &&
+            wcscmp(version, L"HTTP/1.0") == 0) {
+            r->used = 10;
+        }
+    }
+    if (r->version == V_HTTP2_ONLY && r->used != 20) {
+        r->error = E_PROTOCOL;
+        goto done;
+    }
+    DWORD status = 0;
+    size = sizeof status;
     if (!WinHttpQueryHeaders(q, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status,
                              &size, WINHTTP_NO_HEADER_INDEX)) {
         goto failed;
@@ -454,28 +647,86 @@ static void run(request* r) {
             break;
         }
     }
+    win_times(r, q, t0);
     goto done;
 failed:
     e = GetLastError();
-    r->error = win_error(e), r->code = (cx_i32)e;
+    if (e == ERROR_WINHTTP_HTTP_PROTOCOL_MISMATCH && r->version == V_HTTP2) {
+        again = 1;
+    } else {
+        r->error = win_error(e), r->code = (cx_i32)e;
+    }
 done:
     if (q) WinHttpCloseHandle(q);
     if (c) WinHttpCloseHandle(c);
     free(host), free(target), free(head);
+    return again;
+}
+
+static void run(request* r) {
+    once(&session_state, session_open);
+    if (!session) {
+        r->error = E_OS, r->code = (cx_i32)GetLastError();
+        return;
+    }
+    LARGE_INTEGER t0;
+    QueryPerformanceCounter(&t0);
+    ULONGLONG deadline = GetTickCount64() + r->timeout_ms;
+    /* Over http:// it's HTTP/1.1, with connections side by side. */
+    int opening = 0;
+    host_state* h = r->version != V_HTTP1 && r->https ? host_wait(r, deadline, &opening) : NULL;
+    host_state* opener = opening ? h : NULL;
+    int require = r->version == V_HTTP2_ONLY || (h && !host_h1(h));
+    if (attempt(r, deadline, t0.QuadPart, require, &opener)) {
+        host_mark_h1(h);
+        if (opener) host_release(opener, 0);
+        opener = NULL;
+        attempt(r, deadline, t0.QuadPart, 0, &opener);
+    }
+    if (opener) host_release(opener, 0);
 }
 
 #else
 
-/* --- Linux: libcurl, loaded at run time ---------------------------------------------------- */
+/* --- Linux and macOS: libcurl, loaded at run time ------------------------------------------ */
 
-/* libcurl's options and its one info, by the numbers its ABI gives them. */
+/* libcurl's options and infos, by the numbers its ABI gives them. */
 enum {
     O_WRITEDATA = 10001, O_URL = 10002, O_PROXY = 10004, O_POSTFIELDS = 10015, O_USERAGENT = 10018,
-    O_HTTPHEADER = 10023, O_HEADERDATA = 10029, O_WRITEFUNCTION = 20011, O_HEADERFUNCTION = 20079,
+    O_HTTPHEADER = 10023, O_HEADERDATA = 10029, O_PRIVATE = 10103, O_WRITEFUNCTION = 20011, O_HEADERFUNCTION = 20079,
     O_POST = 47, O_FOLLOWLOCATION = 52, O_MAXREDIRS = 68, O_HTTPGET = 80, O_HTTP_VERSION = 84,
-    O_NOSIGNAL = 99, O_TIMEOUT_MS = 155, O_PROTOCOLS = 181, O_REDIR_PROTOCOLS = 182,
-    O_POSTFIELDSIZE_LARGE = 30120, I_RESPONSE_CODE = 0x200002
+    O_NOSIGNAL = 99, O_TIMEOUT_MS = 155, O_PROTOCOLS = 181, O_REDIR_PROTOCOLS = 182, O_PIPEWAIT = 237,
+    O_POSTFIELDSIZE_LARGE = 30120, M_PIPELINING = 3,
+    I_RESPONSE_CODE = 0x200002, I_NUM_CONNECTS = 0x200000 + 26, I_PRIVATE = 0x100000 + 21,
+    /* In microseconds, from libcurl 7.61; before, in seconds, as doubles. */
+    I_NAMELOOKUP_T = 0x600000 + 51, I_CONNECT_T = 0x600000 + 52, I_STARTTRANSFER_T = 0x600000 + 54, I_TOTAL_T = 0x600000 + 50,
+    I_APPCONNECT_T = 0x600000 + 56, I_NAMELOOKUP = 0x300000 + 4, I_CONNECT = 0x300000 + 5, I_STARTTRANSFER = 0x300000 + 17,
+    I_TOTAL = 0x300000 + 3, I_APPCONNECT = 0x300000 + 33
 };
+/* CURL_HTTP_VERSION_1_1, _2TLS and _2_PRIOR_KNOWLEDGE; CURLPIPE_MULTIPLEX; CURL_VERSION_HTTP2. */
+enum { CV_1_1 = 2, CV_2TLS = 4, CV_2_PRIOR = 5, PIPE_MULTIPLEX = 2, F_HTTP2 = 1 << 16 };
+
+/* curl_waitfd and CURLMsg, as multi.h lays them out. */
+typedef struct {
+    int fd;
+    short events, revents;
+} curl_waitfd;
+typedef struct {
+    int msg; /* 1, CURLMSG_DONE: the transfer finished */
+    void* easy;
+    union {
+        void* whatever;
+        int result;
+    } data;
+} curl_msg;
+/* The start of curl_version_info_data, which every libcurl has. */
+typedef struct {
+    int age;
+    const char* version;
+    unsigned version_num;
+    const char* host;
+    int features;
+} curl_version;
 
 typedef struct curl_slist curl_slist;
 static struct {
@@ -491,8 +742,18 @@ static struct {
      * older than 7.18.2. */
     int (*easy_send)(void*, const void*, size_t, size_t*);
     int (*easy_recv)(void*, void*, size_t, size_t*);
+    /* For the transfer thread, which every libcurl since 7.28 has. */
+    void* (*multi_init)(void);
+    int (*multi_setopt)(void*, int, ...);
+    int (*multi_add_handle)(void*, void*);
+    int (*multi_remove_handle)(void*, void*);
+    int (*multi_perform)(void*, int*);
+    int (*multi_wait)(void*, curl_waitfd*, unsigned, int, int*);
+    curl_msg* (*multi_info_read)(void*, int*);
+    curl_version* (*version_info)(int);
 } curl;
 static int curl_loaded;
+static int curl_http2; /* whether it's built with HTTP/2, nghttp2 */
 static cx_u32 curl_state;
 
 static void curl_load(void) {
@@ -515,6 +776,22 @@ static void curl_load(void) {
     }
     *(void**)&curl.easy_send = dlsym(lib, "curl_easy_send");
     *(void**)&curl.easy_recv = dlsym(lib, "curl_easy_recv");
+    void** multi[] = {(void**)&curl.multi_init, (void**)&curl.multi_setopt, (void**)&curl.multi_add_handle,
+                      (void**)&curl.multi_remove_handle, (void**)&curl.multi_perform, (void**)&curl.multi_wait,
+                      (void**)&curl.multi_info_read};
+    const char* multi_syms[] = {"curl_multi_init", "curl_multi_setopt", "curl_multi_add_handle", "curl_multi_remove_handle",
+                                "curl_multi_perform", "curl_multi_wait", "curl_multi_info_read"};
+    int all = 1;
+    for (int i = 0; i < 7; i++) {
+        *multi[i] = dlsym(lib, multi_syms[i]);
+        all = all && *multi[i];
+    }
+    if (!all) curl.multi_init = NULL;
+    *(void**)&curl.version_info = dlsym(lib, "curl_version_info");
+    if (curl.version_info) {
+        curl_version* v = curl.version_info(0);
+        curl_http2 = v && (v->features & F_HTTP2) != 0;
+    }
     /* Not safe to call while another thread uses libcurl, so it's done here, once, before any
      * request's thread starts. A write to a closed TLS connection would raise SIGPIPE, which a
      * server never wants. */
@@ -581,16 +858,31 @@ static size_t on_header(char* p, size_t size, size_t n, void* user) {
     size_t k = size * n;
     /* Each response's status line starts its headers: a redirect's, or a 100 Continue's, are
      * dropped for the next. */
-    if (k >= 5 && memcmp(p, "HTTP/", 5) == 0) r->raw.len = 0;
+    if (k >= 5 && memcmp(p, "HTTP/", 5) == 0) {
+        r->raw.len = 0;
+        /* A server that took HTTP/1.1 in the TLS handshake, when the request wants HTTP/2 or
+         * nothing: libcurl has no way to offer HTTP/2 alone, as WinHTTP has. */
+        if (r->version == V_HTTP2_ONLY && line_version(p, k) != 20) {
+            r->error = E_PROTOCOL;
+            return 0;
+        }
+    }
     return add(&r->raw, p, k) ? k : 0;
 }
 
-static void run(request* r) {
+/* One of libcurl's times, in nanoseconds: in microseconds from 7.61, or else in seconds. */
+static cx_u64 curl_time(void* h, int us_info, int s_info) {
+    long long us = 0;
+    if (curl.easy_getinfo(h, us_info, &us) == 0) return us > 0 ? (cx_u64)us * 1000 : 0;
+    double s = 0;
+    if (curl.easy_getinfo(h, s_info, &s) == 0 && s > 0) return (cx_u64)(s * 1e9);
+    return 0;
+}
+
+/* A libcurl handle set up for the request, with its header lines in `r->list`, or NULL. */
+static void* curl_begin(request* r) {
     void* h = curl.easy_init();
-    if (!h) {
-        r->error = E_OS, r->code = ENOMEM;
-        return;
-    }
+    if (!h) return NULL;
     curl_slist* list = NULL;
     for (char* line = r->head; *line;) {
         char* next = strstr(line, "\r\n");
@@ -608,7 +900,13 @@ static void run(request* r) {
     curl.easy_setopt(h, O_URL, r->url);
     curl.easy_setopt(h, O_PROXY, "");
     curl.easy_setopt(h, O_USERAGENT, "Calx");
-    curl.easy_setopt(h, O_HTTP_VERSION, 2L);
+    /* HTTP/2 needs a libcurl built with nghttp2. Without it, a request that may have HTTP/1.1
+     * has it, and one that wants HTTP/2 alone never gets here. */
+    long version = r->version == V_HTTP1 || !curl_http2 ? CV_1_1 : r->version == V_HTTP2 ? CV_2TLS : CV_2_PRIOR;
+    curl.easy_setopt(h, O_HTTP_VERSION, version);
+    /* An HTTP/2 request to a host that a request before it is connecting to waits to go over
+     * that connection, rather than open another. */
+    if (version != CV_1_1) curl.easy_setopt(h, O_PIPEWAIT, 1L);
     curl.easy_setopt(h, O_PROTOCOLS, 3L);
     curl.easy_setopt(h, O_REDIR_PROTOCOLS, r->https ? 2L : 3L);
     curl.easy_setopt(h, O_FOLLOWLOCATION, 1L);
@@ -626,18 +924,161 @@ static void run(request* r) {
     } else {
         curl.easy_setopt(h, O_HTTPGET, 1L);
     }
-    int e = curl.easy_perform(h);
-    if (e != 0 && r->error != E_TOO_LONG) {
+    curl.easy_setopt(h, O_PRIVATE, r);
+    r->list = list;
+    return h;
+}
+
+/* Takes what the finished transfer gave, `e` its CURLcode, and lets the handle go. */
+static void curl_end(request* r, void* h, int e) {
+    if (r->error) {
+        /* on_body's or on_header's, which ended the transfer */
+    } else if (e != 0) {
         r->error = curl_error(e), r->code = e;
-    } else if (e == 0) {
+    } else {
         long status = 0;
         curl.easy_getinfo(h, I_RESPONSE_CODE, &status);
         r->status = (cx_u32)status;
+        r->used = line_version(r->raw.p, r->raw.len);
+        long connects = 1;
+        curl.easy_getinfo(h, I_NUM_CONNECTS, &connects);
+        r->reused = connects == 0;
+        if (!r->reused) {
+            r->times[T_RESOLVE] = curl_time(h, I_NAMELOOKUP_T, I_NAMELOOKUP);
+            r->times[T_CONNECT] = curl_time(h, I_CONNECT_T, I_CONNECT);
+            if (r->https) r->times[T_TLS] = curl_time(h, I_APPCONNECT_T, I_APPCONNECT);
+        }
+        r->times[T_FIRST_BYTE] = curl_time(h, I_STARTTRANSFER_T, I_STARTTRANSFER);
+        r->times[T_TOTAL] = curl_time(h, I_TOTAL_T, I_TOTAL);
         if (!tidy_headers(r, 1)) cx_panic_capacity();
     }
     curl.easy_cleanup(h);
-    curl.slist_free_all(list);
+    curl.slist_free_all(r->list);
+    r->list = NULL;
 }
+
+/* A request on a thread of its own, with a libcurl too old for the transfer thread. */
+static void run(request* r) {
+    void* h = curl_begin(r);
+    if (!h) {
+        r->error = E_OS, r->code = ENOMEM;
+        return;
+    }
+    curl_end(r, h, curl.easy_perform(h));
+}
+
+/* --- Linux and macOS: the transfer threads ------------------------------------------------- *
+ *
+ * Requests run together on a thread, on a libcurl multi handle, so a connection a request opens is
+ * kept for the next one to the same host, as WinHTTP's session keeps it, and HTTP/2 requests to a
+ * host go over one connection at once (CLX-383). There are two, each with its own connections:
+ * one for HTTP/1.1 requests, and one for those that ask for HTTP/2, so that one never goes over a
+ * kept HTTP/1.1 connection to a server that would have taken HTTP/2. A thread does every libcurl
+ * call on its requests' handles. `cx_http_start` puts a request in its queue, and a byte down a
+ * pipe wakes it; it says a request has finished by `done_cond`. */
+
+typedef struct {
+    void* multi;
+    int running;
+    cx_u32 state;
+    int wake[2];
+    request* head;
+    request** tail;
+    pthread_mutex_t lock;
+} pool;
+
+static pool pools[2] = {{NULL, 0, 0, {-1, -1}, NULL, &pools[0].head, PTHREAD_MUTEX_INITIALIZER},
+                        {NULL, 0, 0, {-1, -1}, NULL, &pools[1].head, PTHREAD_MUTEX_INITIALIZER}};
+static pthread_mutex_t done_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t done_cond = PTHREAD_COND_INITIALIZER;
+
+static void transfer_done(request* r) {
+    pthread_mutex_lock(&done_lock);
+    __atomic_store_n(&r->state, 1, __ATOMIC_RELEASE);
+    pthread_cond_broadcast(&done_cond);
+    pthread_mutex_unlock(&done_lock);
+}
+
+static void* transfers(void* arg) {
+    pool* p = arg;
+    for (;;) {
+        pthread_mutex_lock(&p->lock);
+        request* r = p->head;
+        p->head = NULL, p->tail = &p->head;
+        pthread_mutex_unlock(&p->lock);
+        while (r) {
+            request* next = r->queued;
+            r->easy = curl_begin(r);
+            int e = r->easy ? curl.multi_add_handle(p->multi, r->easy) : 0;
+            if (!r->easy || e != 0) {
+                if (r->easy) curl.easy_cleanup(r->easy);
+                curl.slist_free_all(r->list);
+                r->list = NULL;
+                r->error = E_OS, r->code = r->easy ? e : ENOMEM;
+                transfer_done(r);
+            }
+            r = next;
+        }
+        int running = 0, left = 0;
+        curl.multi_perform(p->multi, &running);
+        curl_msg* m;
+        while ((m = curl.multi_info_read(p->multi, &left))) {
+            if (m->msg != 1) continue;
+            void* h = m->easy;
+            int e = m->data.result;
+            request* q = NULL;
+            curl.easy_getinfo(h, I_PRIVATE, &q);
+            curl.multi_remove_handle(p->multi, h);
+            if (q) {
+                curl_end(q, h, e);
+                transfer_done(q);
+            }
+        }
+        curl_waitfd wake = {p->wake[0], POLLIN, 0};
+        curl.multi_wait(p->multi, &wake, 1, 1000, NULL);
+        char drain[64];
+        while (read(p->wake[0], drain, sizeof drain) > 0) {
+        }
+    }
+    return NULL;
+}
+
+static void pool_open(pool* p) {
+    if (!curl.multi_init || !(p->multi = curl.multi_init())) return;
+    /* Already so from libcurl 7.62, but not before. */
+    curl.multi_setopt(p->multi, M_PIPELINING, (long)PIPE_MULTIPLEX);
+    if (pipe(p->wake) != 0) return;
+    for (int i = 0; i < 2; i++) {
+        fcntl(p->wake[i], F_SETFD, FD_CLOEXEC);
+        fcntl(p->wake[i], F_SETFL, fcntl(p->wake[i], F_GETFL) | O_NONBLOCK);
+    }
+    pthread_t t;
+    if (cx_os_thread(&t, transfers, p) != 0) return;
+    pthread_detach(t);
+    p->running = 1;
+}
+
+static void pool_open_1(void) { pool_open(&pools[0]); }
+static void pool_open_2(void) { pool_open(&pools[1]); }
+
+/* Gives the request to its transfer thread, if there's one. */
+static int transfer(request* r) {
+    pool* p = &pools[r->version != V_HTTP1];
+    once(&p->state, r->version != V_HTTP1 ? pool_open_2 : pool_open_1);
+    if (!p->running) return 0;
+    r->started = 2;
+    pthread_mutex_lock(&p->lock);
+    r->queued = NULL;
+    *p->tail = r;
+    p->tail = &r->queued;
+    pthread_mutex_unlock(&p->lock);
+    char b = 1;
+    if (write(p->wake[1], &b, 1) < 0) {
+        /* The pipe is full, so the thread will wake anyway. */
+    }
+    return 1;
+}
+
 
 #endif
 
@@ -663,10 +1104,11 @@ static void* thread_main(void* p) {
 /* Starts a request: a GET, or a POST of the body. `head` is the caller's header lines, each
  * ending in "\r\n", which std.http has checked. */
 cx_u64 cx_http_start(cx_bool post, const cx_u8* url, cx_usize url_len, const cx_u8* head, cx_usize head_len, const cx_u8* body,
-                     cx_usize body_len, cx_u32 timeout_ms, cx_usize limit) {
+                     cx_usize body_len, cx_u32 timeout_ms, cx_usize limit, cx_u32 version) {
     request* r = calloc(1, sizeof(request));
     if (!r) cx_panic_capacity();
     r->post = post;
+    r->version = version <= V_HTTP2_ONLY ? (int)version : V_HTTP1;
     r->timeout_ms = timeout_ms;
     r->limit = limit;
     r->head = dup_text((const char*)head, head_len);
@@ -679,10 +1121,15 @@ cx_u64 cx_http_start(cx_bool post, const cx_u8* url, cx_usize url_len, const cx_
     if (!parse_url(r, (const char*)url, url_len)) {
         r->error = E_BAD_URL;
     }
-#ifndef _WIN32
+#ifdef _WIN32
+    /* WinHTTP speaks HTTP/2 over TLS alone, not h2c. */
+    else if (r->version == V_HTTP2_ONLY && !r->https) {
+        r->error = E_UNAVAILABLE;
+    }
+#else
     else {
         once(&curl_state, curl_load);
-        if (!curl_loaded) r->error = E_UNAVAILABLE;
+        if (!curl_loaded || (r->version == V_HTTP2_ONLY && !curl_http2)) r->error = E_UNAVAILABLE;
     }
 #endif
     if (r->error) {
@@ -697,6 +1144,7 @@ cx_u64 cx_http_start(cx_bool post, const cx_u8* url, cx_usize url_len, const cx_
         r->error = E_OS, r->code = (cx_i32)e, r->state = 1;
     }
 #else
+    if (transfer(r)) return table_add(&requests, r);
     int e = cx_os_thread(&r->thread, thread_main, r);
     if (e == 0) {
         r->started = 1;
@@ -724,11 +1172,28 @@ cx_i32 cx_http_wait(cx_u64 h) {
         WaitForSingleObject(r->thread, INFINITE);
         CloseHandle(r->thread);
 #else
-        pthread_join(r->thread, NULL);
+        if (r->started == 2) {
+            pthread_mutex_lock(&done_lock);
+            while (!__atomic_load_n(&r->state, __ATOMIC_ACQUIRE)) pthread_cond_wait(&done_cond, &done_lock);
+            pthread_mutex_unlock(&done_lock);
+        } else {
+            pthread_join(r->thread, NULL);
+        }
 #endif
         r->started = 0;
     }
     return r->error;
+}
+
+/* The HTTP the response came in, 10, 11 or 20 for 1.0, 1.1 and 2, or 0 if it isn't known. */
+cx_u32 cx_http_version(cx_u64 h) { return request_of(h)->used; }
+
+/* The request's times, as T_ numbers them, in nanoseconds from its start, then 1 if it went over
+ * a connection that was open already, else 0. */
+void cx_http_times(cx_u64 h, cx_u64* out) {
+    request* r = request_of(h);
+    for (int i = 0; i < T_COUNT; i++) out[i] = r->times[i];
+    out[T_COUNT] = (cx_u64)r->reused;
 }
 
 /* How much of the body has come so far, while the request runs or after, and its Content-Length
