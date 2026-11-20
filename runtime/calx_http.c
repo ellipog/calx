@@ -971,9 +971,11 @@ static void run(request* r) {
  *
  * Requests run together on a thread, on a libcurl multi handle, so a connection a request opens is
  * kept for the next one to the same host, as WinHTTP's session keeps it, and HTTP/2 requests to a
- * host go over one connection at once (CLX-383). There are two, each with its own connections:
- * one for HTTP/1.1 requests, and one for those that ask for HTTP/2, so that one never goes over a
- * kept HTTP/1.1 connection to a server that would have taken HTTP/2. A thread does every libcurl
+ * host go over one connection at once (CLX-383). There are three, each with its own connections:
+ * one for HTTP/1.1 requests (and `Http2` ones over http://, which ALPN can't offer h2 on), one for
+ * `Http2` over TLS, and one for `Http2Only`, so that an HTTP/2 request never goes over a kept
+ * HTTP/1.1 connection: to a server that would have taken HTTP/2, or, with libcurl 8.5, as h2c's
+ * prior knowledge sent down a connection that spoke HTTP/1.1. A thread does every libcurl
  * call on its requests' handles. `cx_http_start` puts a request in its queue, and a byte down a
  * pipe wakes it; it says a request has finished by `done_cond`. */
 
@@ -987,8 +989,9 @@ typedef struct {
     pthread_mutex_t lock;
 } pool;
 
-static pool pools[2] = {{NULL, 0, 0, {-1, -1}, NULL, &pools[0].head, PTHREAD_MUTEX_INITIALIZER},
-                        {NULL, 0, 0, {-1, -1}, NULL, &pools[1].head, PTHREAD_MUTEX_INITIALIZER}};
+static pool pools[3] = {{NULL, 0, 0, {-1, -1}, NULL, &pools[0].head, PTHREAD_MUTEX_INITIALIZER},
+                        {NULL, 0, 0, {-1, -1}, NULL, &pools[1].head, PTHREAD_MUTEX_INITIALIZER},
+                        {NULL, 0, 0, {-1, -1}, NULL, &pools[2].head, PTHREAD_MUTEX_INITIALIZER}};
 static pthread_mutex_t done_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t done_cond = PTHREAD_COND_INITIALIZER;
 
@@ -1060,11 +1063,13 @@ static void pool_open(pool* p) {
 
 static void pool_open_1(void) { pool_open(&pools[0]); }
 static void pool_open_2(void) { pool_open(&pools[1]); }
+static void pool_open_3(void) { pool_open(&pools[2]); }
 
 /* Gives the request to its transfer thread, if there's one. */
 static int transfer(request* r) {
-    pool* p = &pools[r->version != V_HTTP1];
-    once(&p->state, r->version != V_HTTP1 ? pool_open_2 : pool_open_1);
+    int which = r->version == V_HTTP2_ONLY ? 2 : r->version == V_HTTP2 && r->https ? 1 : 0;
+    pool* p = &pools[which];
+    once(&p->state, which == 2 ? pool_open_3 : which == 1 ? pool_open_2 : pool_open_1);
     if (!p->running) return 0;
     r->started = 2;
     pthread_mutex_lock(&p->lock);
