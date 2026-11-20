@@ -1,0 +1,276 @@
+// std.net's loops on threads inside a static library (CLX-386, CLX-334), as tests/library/
+// net_threads.calx runs them in a library a Calx program opens: `net_pair` runs a std.http.server
+// on one thread of the library's own and a std.http.websocket client to it on another, and tells
+// the host each one's line, while a thread the C host starts runs `net_echo`, a `Net` of its own
+// that echoes a burst at itself, at the same time. Built in debug and release, and linked with
+// clang as tests/library/staticlib.calx links its host.
+// file: main.calx
+import std.env.{arch, os, script, variable}
+import std.path.{join, parent_dir}
+import std.process.{Command}
+
+fn run(exe: String, args: List<String>, dir: String) -> String {
+    match Command.new(exe).args(args).dir(dir).output() {
+        ok(o) => {
+            let text = "{o.text()}{o.error_text()}".trim_end()
+            return if o.status.success() { text } else { "{text} [{o.status}]" }
+        },
+        err(e) => return "can't run {exe}: {e}",
+    }
+}
+
+fn main() {
+    let calx = variable("CALX") ?? String("calx")
+    let clang = variable("CALX_CC") ?? String("clang")
+    let dir = parent_dir(script()!)!
+    let windows = os() == "windows"
+    for mode in ["debug", "release"] {
+        var words: List<String> = ["build", "--staticlib"]
+        if mode == "release" {
+            words.push("--release")
+        }
+        let out = if windows { "out/{mode}/pair.lib" } else { "out/{mode}/libpair.a" }
+        words.push("pair.calx")
+        words.push("-o")
+        words.push(out.copy())
+        let built = run(calx.copy(), words, dir.copy())
+        if not built.is_empty() {
+            println("building the {mode} library: {built}")
+            continue
+        }
+        var cc: List<String> = ["host.c", "-I", "out/{mode}", out.copy(), "-o", "out/{mode}/host{if windows { ".exe" } else { "" }}"]
+        if windows {
+            cc.push("--target={if arch() == "aarch64" { "aarch64" } else { "x86_64" }}-pc-windows-msvc")
+            cc.push("-fms-runtime-lib=dll")
+            cc.push("-fuse-ld=link")
+            cc.push("-Wl,-nodefaultlib:libcmt")
+        } else if os() == "linux" {
+            for lib in ["-lm", "-lpthread", "-ldl"] {
+                cc.push(String(lib))
+            }
+        }
+        let compiled = run(clang.copy(), cc, dir.copy())
+        if not compiled.is_empty() {
+            println("linking the {mode} host: {compiled}")
+            continue
+        }
+        println(run(join(dir.copy(), "out/{mode}/host{if windows { ".exe" } else { "" }}"), [], dir.copy()))
+    }
+    // out: client: hello, 20 answers right, binary [3, 2, 1]
+    // out: server: 20 texts, 1 binary, closed 1000 bye
+    // out: the host's thread: 100 lines back
+    // out: calx_shutdown gave 0
+    // out: client: hello, 20 answers right, binary [3, 2, 1]
+    // out: server: 20 texts, 1 binary, closed 1000 bye
+    // out: the host's thread: 100 lines back
+    // out: calx_shutdown gave 0
+}
+
+// file: pair.calx
+import std.http.server.{Server}
+import std.http.websocket.{Message, connect}
+import std.net.{Event, Net}
+import std.thread.{Task}
+
+struct Serving {
+    port: Sender<u16>
+    log: Sender<String>
+}
+
+impl Task for Serving {
+    fn run(own self) {
+        var port = self.port
+        var log = self.log
+        var server = Server.listen(0)!
+        port.send(server.port)
+        var texts: usize = 0
+        var binaries: usize = 0
+        loop {
+            match server.next_event(20000) {
+                some(Request(req)) => {
+                    let s = server.upgrade(req)!
+                    _ = server.send_text(s, "hello")
+                },
+                some(Message(s, Text(t))) => {
+                    texts += 1
+                    _ = server.send_text(s, "{t} back")
+                },
+                some(Message(s, Binary(b))) => {
+                    binaries += 1
+                    var back = List<u8>()
+                    var i = b.len()
+                    while i > 0 {
+                        i -= 1
+                        back.push(b[i])
+                    }
+                    _ = server.send_binary(s, back)
+                },
+                some(Closed(_, code, why)) => {
+                    log.send("server: {texts} texts, {binaries} binary, closed {code} {why}")
+                    break
+                },
+                some(_) => {},
+                none => {
+                    log.send("server: nothing for 20 seconds")
+                    break
+                },
+            }
+        }
+        server.shutdown()
+    }
+}
+
+struct Client {
+    port: u16
+    log: Sender<String>
+}
+
+fn text_of(m: own Message?) -> String {
+    return match m {
+        some(Text(t)) => t,
+        some(Binary(_)) => String("<binary>"),
+        none => String("<nothing>"),
+    }
+}
+
+impl Task for Client {
+    fn run(own self) {
+        var log = self.log
+        let ws = connect("ws://127.0.0.1:{self.port}/")!
+        let hello = text_of(ws.receive(20000)!)
+        var right: usize = 0
+        for i in 0usize..10 {
+            ws.send_text("one {i}")!
+            if text_of(ws.receive(20000)!) == "one {i} back" {
+                right += 1
+            }
+        }
+        for i in 0usize..10 {
+            ws.send_text("many {i}")!
+        }
+        for i in 0usize..10 {
+            if text_of(ws.receive(20000)!) == "many {i} back" {
+                right += 1
+            }
+        }
+        let bytes: List<u8> = [1, 2, 3]
+        ws.send_binary(bytes)!
+        let reversed = match ws.receive(20000)! {
+            some(Binary(b)) => b,
+            _ => List<u8>(),
+        }
+        ws.close(1000, "bye")
+        log.send("client: {hello}, {right} answers right, binary {reversed}")
+    }
+}
+
+/// The server and the client, each on a thread of the library's own, joined, and their lines told
+/// to `on_line` in order, on the caller's thread.
+@export_c
+fn net_pair(on_line: extern "C" fn(*u8, *const u8, usize), ctx: *u8) {
+    var ports = Receiver<u16>()
+    var log = Receiver<String>()
+    let server = unsafe { Thread.spawn(Serving { port: ports.sender(), log: log.sender() }) }
+    let port = ports.wait() ?? 0
+    let client = unsafe { Thread.spawn(Client { port: port, log: log.sender() }) }
+    client.join()
+    server.join()
+    var lines = List<String>()
+    while let line = log.next() {
+        lines.push(line)
+    }
+    lines.sort()
+    for line in lines {
+        unsafe { on_line(ctx, line.as_ptr(), line.len()) }
+    }
+}
+
+/// 100 lines sent to a server of its own and echoed back, each before the next, on the thread
+/// that calls it: how many came back.
+@export_c
+fn net_echo() -> i32 {
+    let net = Net.new()!
+    let port = net.listen("127.0.0.1", 0)!
+    let client = net.connect("127.0.0.1", port)!
+    var events = List<Event>()
+    var back: i32 = 0
+    var got = List<u8>()
+    while back < 100 {
+        net.poll(10000, mut events)
+        if events.is_empty() {
+            break
+        }
+        for e in events {
+            match e {
+                Connected(c) => net.write(c, "line 0\n".to_bytes()),
+                Received(c) => {
+                    if c == client {
+                        _ = net.read(c, mut got)
+                        if got.len() > 0 and got[got.len() - 1] == 10 {
+                            back += 1
+                            got.clear()
+                            net.write(c, "line {back}\n".to_bytes())
+                        }
+                    } else {
+                        var bytes = List<u8>()
+                        _ = net.read(c, mut bytes)
+                        net.write(c, bytes)
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    return back
+}
+
+// file: host.c
+#include <stdio.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
+#include "pair.h"
+
+static int echoed = -1;
+
+#ifdef _WIN32
+static DWORD WINAPI echo_thread(LPVOID unused) {
+    (void)unused;
+    echoed = net_echo();
+    return 0;
+}
+#else
+static void* echo_thread(void* unused) {
+    (void)unused;
+    echoed = net_echo();
+    return NULL;
+}
+#endif
+
+static void on_line(uint8_t* ctx, const uint8_t* text, size_t len) {
+    (void)ctx;
+    printf("%.*s\n", (int)len, (const char*)text);
+    fflush(stdout);
+}
+
+int main(void) {
+    calx_init();
+#ifdef _WIN32
+    HANDLE t = CreateThread(NULL, 0, echo_thread, NULL, 0, NULL);
+#else
+    pthread_t t;
+    pthread_create(&t, NULL, echo_thread, NULL);
+#endif
+    net_pair(on_line, NULL);
+#ifdef _WIN32
+    WaitForSingleObject(t, INFINITE);
+    CloseHandle(t);
+#else
+    pthread_join(t, NULL);
+#endif
+    printf("the host's thread: %d lines back\n", echoed);
+    printf("calx_shutdown gave %d\n", calx_shutdown());
+    return 0;
+}

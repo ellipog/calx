@@ -22,7 +22,8 @@
 // - `// error: TEXT` expects an error on that line whose message contains TEXT. A test with any
 //   `error` lines must fail to compile, with exactly those errors and no others.
 // - `// panic: TEXT` expects the program to panic on that line, with TEXT in the message. A
-//   panic that isn't at a line, as a stack overflow's, is `// panic: <stack>: TEXT`, anywhere.
+//   panic that isn't at a line, as a stack overflow's, is `// panic: <stack>: TEXT`, anywhere, and
+//   so is one a std module's runtime gives without a line, as `// panic: std.net: TEXT`.
 // - `// trace: NAME:LINE` is one frame of the panic's stack trace, innermost first, like `out`:
 //   all of them together must be the trace's functions and lines, which leave out the file, since
 //   a module from the standard library is shown by its whole path. `// trace: repeated N` is the
@@ -110,8 +111,8 @@ fn patterns() -> Patterns {
         file: Regex.new("^// file: (\\S+)\\s*$")!,
         diag: Regex.new("^(.*?):(\\d+):(\\d+): error: (.*)$")!,
         panic_line: Regex.new("^panic at (.*?):(\\d+):(\\d+): (.*)$")!,
-        panic_at: Regex.new("^panic at (<[^>]+>): (.*)$")!,
-        place: Regex.new("^(<[^>]+>):\\s*(.*)$")!,
+        panic_at: Regex.new("^panic at (<[^>]+>|std\\.[a-z_.]+): (.*)$")!,
+        place: Regex.new("^(<[^>]+>|std\\.[a-z_.]+):\\s*(.*)$")!,
         frame: Regex.new("^\\tat (.*)\\((.*):(\\d+)\\)$")!,
         repeated: Regex.new("^\\t\\.\\.\\. repeated (\\d+) more times$")!,
         generated: Regex.new("^(.*?):(\\d+):(\\d+): note: in the code ")!,

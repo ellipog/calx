@@ -1,0 +1,122 @@
+// std.http.server on one thread and a std.http.websocket client to it on another, in one process
+// (CLX-386): the server's thread has the only `Net`, and the client's connection runs on the thread
+// std.http.websocket gives it. The client says hello back, trades 40 texts one at a time and 40
+// more all at once, sends a binary message the server reverses, and closes with a reason the
+// server sees. Both threads are joined, and each says what it saw.
+import std.http.server.{Server}
+import std.http.websocket.{Message, connect}
+import std.thread.{Task}
+
+const COUNT: usize = 40
+
+struct Serving {
+    port: Sender<u16>
+    log: Sender<String>
+}
+
+impl Task for Serving {
+    fn run(own self) {
+        var port = self.port
+        var log = self.log
+        var server = Server.listen(0)!
+        port.send(server.port)
+        var texts: usize = 0
+        var binaries: usize = 0
+        loop {
+            match server.next_event(20000) {
+                some(Request(req)) => {
+                    let s = server.upgrade(req)!
+                    _ = server.send_text(s, "hello")
+                },
+                some(Message(s, Text(t))) => {
+                    texts += 1
+                    _ = server.send_text(s, "{t} back")
+                },
+                some(Message(s, Binary(b))) => {
+                    binaries += 1
+                    var back = List<u8>()
+                    var i = b.len()
+                    while i > 0 {
+                        i -= 1
+                        back.push(b[i])
+                    }
+                    _ = server.send_binary(s, back)
+                },
+                some(Closed(_, code, why)) => {
+                    log.send("server: {texts} texts, {binaries} binary, closed {code} {why}")
+                    break
+                },
+                some(_) => {},
+                none => {
+                    log.send("server: nothing for 20 seconds")
+                    break
+                },
+            }
+        }
+        server.shutdown()
+    }
+}
+
+struct Client {
+    port: u16
+    log: Sender<String>
+}
+
+fn text_of(m: own Message?) -> String {
+    return match m {
+        some(Text(t)) => t,
+        some(Binary(_)) => String("<binary>"),
+        none => String("<nothing>"),
+    }
+}
+
+impl Task for Client {
+    fn run(own self) {
+        var log = self.log
+        let ws = connect("ws://127.0.0.1:{self.port}/live")!
+        let hello = text_of(ws.receive(20000)!)
+        var right: usize = 0
+        for i in 0..COUNT {
+            ws.send_text("one {i}")!
+            if text_of(ws.receive(20000)!) == "one {i} back" {
+                right += 1
+            }
+        }
+        for i in 0..COUNT {
+            ws.send_text("many {i}")!
+        }
+        for i in 0..COUNT {
+            if text_of(ws.receive(20000)!) == "many {i} back" {
+                right += 1
+            }
+        }
+        let bytes: List<u8> = [1, 2, 3, 4, 5]
+        ws.send_binary(bytes)!
+        let reversed = match ws.receive(20000)! {
+            some(Binary(b)) => b,
+            _ => List<u8>(),
+        }
+        ws.close(1000, "bye")
+        log.send("client: {hello}, {right} answers right, binary {reversed}")
+    }
+}
+
+fn main() {
+    var ports = Receiver<u16>()
+    var log = Receiver<String>()
+    let server = unsafe { Thread.spawn(Serving { port: ports.sender(), log: log.sender() }) }
+    let port = ports.wait() ?? 0
+    let client = unsafe { Thread.spawn(Client { port: port, log: log.sender() }) }
+    client.join()
+    server.join()
+    var lines = List<String>()
+    while let line = log.next() {
+        lines.push(line)
+    }
+    lines.sort()
+    for line in lines {
+        println(line)
+    }
+    // out: client: hello, 80 answers right, binary [5, 4, 3, 2, 1]
+    // out: server: 80 texts, 1 binary, closed 1000 bye
+}

@@ -25,6 +25,8 @@ extern "C" {
     fn cx_net_waker(net: u64) -> bool
     fn cx_net_wake(net: u64)
     fn cx_net_wake_on_signal(net: u64) -> bool
+    fn cx_net_signalled(net: u64) -> bool
+    fn cx_net_number(net: u64) -> u32
     fn cx_net_drain(net: u64, timeout_ms: i64) -> bool
     fn cx_net_peer(net: u64, conn: u32, out: *u8) -> u32
     fn cx_net_error_kind() -> u32
@@ -56,9 +58,25 @@ impl Display for NetError {
     }
 }
 
-/// A connection, as `Event`s name it and `read`, `write` and `close` take it.
+/// A connection, as `Event`s name it and `read`, `write` and `close` take it. It's the `Net`'s
+/// that made or accepted it, and another `Net` panics if it's given one (CLX-386). Two are equal
+/// when their `id`s are.
 pub struct Conn {
     number: u32,
+    // The number of the `Net` it's from, or 0 for one `from_id` made, which any `Net` takes.
+    net: u32,
+}
+
+impl Equal for Conn {
+    fn eq(self, other: Self) -> bool {
+        return self.number == other.number
+    }
+}
+
+impl Hash for Conn {
+    fn hash(self, h: mut Hasher) {
+        h.add(self.number)
+    }
 }
 
 impl Conn {
@@ -76,10 +94,11 @@ impl Conn {
         return self.number
     }
 
-    /// The connection whose `id` this is. One that no connection of a `Net` has names none: it
-    /// has nothing to read, and what's written to it or closes it does nothing.
+    /// The connection whose `id` this is, in whichever `Net` it's given to. One that no
+    /// connection of that `Net` has names none: it has nothing to read, and what's written to it
+    /// or closes it does nothing.
     pub fn from_id(id: u32) -> Conn {
-        return Conn { number: id }
+        return Conn { number: id, net: 0 }
     }
 }
 
@@ -219,10 +238,14 @@ impl Waker {
     }
 }
 
-/// Listening sockets and connections, and the events about them. Only the thread that made it
-/// can use it, and never inside a `parallel for`. It lasts until the program ends.
+/// Listening sockets and connections, and the events about them. It's one thread's at a time:
+/// each thread that polls makes its own, and they run at once without waiting on each other
+/// (CLX-386). One can move to another thread, but two threads using it at once panic, and so does
+/// one inside a `parallel for`. It lasts until the program ends.
 pub struct Net {
     handle: u64,
+    // Which of the program's `Net`s it is, which each `Conn` it gives holds.
+    number: u32,
 }
 
 fn last_error() -> NetError {
@@ -241,7 +264,7 @@ impl Net {
         if handle == 0 {
             fail last_error()
         }
-        return Net { handle: handle }
+        return Net { handle: handle, number: unsafe { cx_net_number(handle) } }
     }
 
     /// Listens for connections on `host` and `port`, and returns the port, which the system picks
@@ -262,7 +285,7 @@ impl Net {
         if id == 0xFFFFFFFF {
             fail last_error()
         }
-        return Conn { number: id }
+        return Conn { number: id, net: self.number }
     }
 
     /// Waits up to `timeout_ms` milliseconds for something to happen, or forever if it's
@@ -274,7 +297,7 @@ impl Net {
         unsafe {
             let n = cx_net_poll(self.handle, timeout_ms)
             for i in 0usize..n {
-                let conn = Conn { number: cx_net_event_conn(self.handle, i) }
+                let conn = Conn { number: cx_net_event_conn(self.handle, i), net: self.number }
                 events.push(match cx_net_event_kind(self.handle, i) {
                     1 => Event.Accepted(conn),
                     2 => Event.Connected(conn),
@@ -286,14 +309,26 @@ impl Net {
         }
     }
 
+    // The connection's number, which it panics at for another `Net`'s connection: that number
+    // could be one of this `Net`'s too, which would be read from or written to in its place.
+    @track_caller
+    fn id_of(self, conn: Conn) -> u32 {
+        if conn.net != 0 and conn.net != self.number {
+            panic("the connection is another `Net`'s: a `Net` reads, writes and closes only the connections it opened or accepted")
+        }
+        return conn.number
+    }
+
     /// Moves every byte that has arrived on the connection onto the end of `buf`, and returns
     /// how many there were.
+    @track_caller
     pub fn read(self, conn: Conn, buf: mut List<u8>) -> usize {
+        let id = self.id_of(conn)
         unsafe {
-            let n = cx_net_available(self.handle, conn.number)
+            let n = cx_net_available(self.handle, id)
             buf.reserve(n)
             let start = buf.len()
-            let got = cx_net_read(self.handle, conn.number, buf.as_mut_ptr().add(start), n)
+            let got = cx_net_read(self.handle, id, buf.as_mut_ptr().add(start), n)
             buf.set_len(start + got)
             return got
         }
@@ -302,8 +337,9 @@ impl Net {
     /// How many bytes queued on the connection the system hasn't taken yet, so a program sending
     /// something big can queue the next part once most of the last has gone. 0 for a connection
     /// that has closed.
+    @track_caller
     pub fn queued(self, conn: Conn) -> usize {
-        return unsafe { cx_net_queued(self.handle, conn.number) }
+        return unsafe { cx_net_queued(self.handle, self.id_of(conn)) }
     }
 
     /// Queues `n` bytes of `file`, from byte `at`, to send on the connection after what's queued
@@ -312,16 +348,19 @@ impl Net {
     /// the file, so `file` can be closed at once. What's written while it waits or goes is sent
     /// after it. `false` if the connection is closing or closed, or the file can't be opened
     /// again. A file shorter than the range closes the connection when its end is reached.
+    @track_caller
     pub fn send_file(self, conn: Conn, file: File, at: u64, n: u64) -> bool {
-        return unsafe { cx_net_send_file(self.handle, conn.number, file.raw(), at, n) }
+        return unsafe { cx_net_send_file(self.handle, self.id_of(conn), file.raw(), at, n) }
     }
 
     /// Queues the bytes to send on the connection. They go to the system at the next poll or
     /// `flush`, with everything else queued on the connection since the last, and then as soon
     /// as the socket takes them. On a connection that has closed, they're dropped.
+    @track_caller
     pub fn write(self, conn: Conn, bytes: List<u8>) {
+        let id = self.id_of(conn)
         unsafe {
-            cx_net_send(self.handle, conn.number, bytes.as_ptr(), bytes.len())
+            cx_net_send(self.handle, id, bytes.as_ptr(), bytes.len())
         }
     }
 
@@ -351,28 +390,42 @@ impl Net {
 
     /// Wakes this `Net`'s polls at each signal the program handles with `std.signal`, as a
     /// `Waker` would, so a server waiting for connections hears that it's asked to stop: the
-    /// poll reports `Woken`, and `std.signal.take` says which signal it was.
+    /// poll reports `Woken`, and `std.signal.take` says which signal it was. Every `Net` that asks
+    /// is woken, on whichever thread it's polled.
     pub fn wake_on_signal(self) ! NetError {
         if not unsafe { cx_net_wake_on_signal(self.handle) } {
             fail NetError.Os(0)
         }
     }
 
+    /// Whether a signal has woken this `Net` since `wake_on_signal`, or since `signalled` last
+    /// said so, which it then forgets. Each `Net` hears of each signal, though only one thread
+    /// `take`s it, so a loop on each of several threads stops at one signal: each asks its own
+    /// `Net`, rather than asking `std.signal` whether one is pending, which another thread may
+    /// have taken first.
+    pub fn signalled(self) -> bool {
+        return unsafe { cx_net_signalled(self.handle) }
+    }
+
     /// Sends what was queued on the connection, then closes it. A poll reports `Closed` after.
+    @track_caller
     pub fn close(self, conn: Conn) {
+        let id = self.id_of(conn)
         unsafe {
-            cx_net_close(self.handle, conn.number)
+            cx_net_close(self.handle, id)
         }
     }
 
     /// The address at the connection's other end, as it was when the connection opened. It
     /// stays until the poll after the connection's `Closed`, so the `Closed` can be logged with
     /// it. None for a connection that never opened, and once it's gone.
+    @track_caller
     pub fn peer(self, conn: Conn) -> Address? {
+        let id = self.id_of(conn)
         var out = List<u8>()
         out.reserve(22)
         // The runtime writes all 22 bytes.
-        let family = unsafe { cx_net_peer(self.handle, conn.number, out.as_mut_ptr()) }
+        let family = unsafe { cx_net_peer(self.handle, id, out.as_mut_ptr()) }
         unsafe {
             out.set_len(22)
         }

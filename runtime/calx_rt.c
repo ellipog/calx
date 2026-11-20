@@ -258,17 +258,29 @@ static struct {
     cx_u64 arg;
 } signal_wakes[SIGNAL_WAKES];
 static int signal_wakes_count;
+/* Held while one is added: two threads that each asked for their `Net` at once both took the same
+ * place in the list, and one `Net` was never woken (CLX-386). Waking takes no lock, since a
+ * signal's thread mustn't wait on one the program holds. */
+static int signal_wakes_lock;
 
 void cx_signal_wakes_add(void (*wake)(cx_u64), cx_u64 arg) {
-    int n = __atomic_load_n(&signal_wakes_count, __ATOMIC_ACQUIRE);
+    while (__atomic_exchange_n(&signal_wakes_lock, 1, __ATOMIC_ACQUIRE)) CX_SPIN_PAUSE();
+    int n = __atomic_load_n(&signal_wakes_count, __ATOMIC_RELAXED);
     for (int i = 0; i < n; i++) {
-        if (signal_wakes[i].arg == arg) return;
+        if (signal_wakes[i].arg == arg) {
+            __atomic_store_n(&signal_wakes_lock, 0, __ATOMIC_RELEASE);
+            return;
+        }
     }
-    if (n == SIGNAL_WAKES) cx_panic_text("std.net", "more than 64 polls are woken by signals");
+    if (n == SIGNAL_WAKES) {
+        __atomic_store_n(&signal_wakes_lock, 0, __ATOMIC_RELEASE);
+        cx_panic_text("std.net", "more than 64 polls are woken by signals");
+    }
     signal_wakes[n].wake = wake;
     signal_wakes[n].arg = arg;
     /* Each is whole before the count says it's there, for the thread that wakes them. */
     __atomic_store_n(&signal_wakes_count, n + 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&signal_wakes_lock, 0, __ATOMIC_RELEASE);
 }
 
 void cx_signal_wakes_fire(void) {

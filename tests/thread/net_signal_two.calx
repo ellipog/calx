@@ -1,0 +1,84 @@
+// Two servers on two threads, each stopping at a signal with `wake_on_signal` (CLX-386): one signal
+// stops both, though each thread takes it as soon as its own server stops, and the other's may
+// be gone by the time its thread looks. Each `Net` hears of each signal itself, with `signalled`,
+// so neither depends on the other leaving it pending. Each server is asked one request first,
+// and two plain `Net`s on the main thread both say they were signalled, once.
+import std.http.{Header, get}
+import std.http.server.{Response, Server}
+import std.net.{Event, Net}
+import std.signal.{Signal, handle, raise, take}
+import std.thread.{Task}
+import std.time.{Instant}
+
+struct Serving {
+    name: String
+    ports: Sender<u16>
+    out: Sender<String>
+}
+
+impl Task for Serving {
+    fn run(own self) {
+        var ports = self.ports
+        var out = self.out
+        var server = Server.listen(0)!
+        server.log = false
+        server.wake_on_signal()!
+        ports.send(server.port)
+        var answered = 0
+        let start = unsafe { Instant.now() }
+        while let req = server.next(30000) {
+            server.respond(req, Response.text("{self.name} here"))
+            answered += 1
+        }
+        let soon = unsafe { Instant.now() }.secs_since(start) < 20.0
+        // Taken here, so the other thread may find nothing pending.
+        _ = take()
+        server.shutdown()
+        out.send("{self.name}: answered {answered}, stopped soon {soon}")
+    }
+}
+
+fn main() {
+    handle()
+    var ports = Receiver<u16>()
+    var out = Receiver<String>()
+    let a = unsafe { Thread.spawn(Serving { name: String("a"), ports: ports.sender(), out: out.sender() }) }
+    let b = unsafe { Thread.spawn(Serving { name: String("b"), ports: ports.sender(), out: out.sender() }) }
+    var bodies = List<String>()
+    for _ in 0..2 {
+        let port = ports.wait() ?? 0
+        var r = get("http://127.0.0.1:{port}/", List<Header>(), 10000, 1024)
+        let resp = r.wait()!
+        bodies.push(String.from_utf8(resp.body) ?? String())
+    }
+    bodies.sort()
+    println("{bodies}")    // out: [a here, b here]
+
+    // Two `Net`s on this thread, each signalled once by the same signal.
+    let one = Net.new()!
+    let two = Net.new()!
+    one.wake_on_signal()!
+    two.wake_on_signal()!
+    println("{one.signalled()} {two.signalled()}")    // out: false false
+
+    _ = raise(Signal.Interrupt)
+    a.join()
+    b.join()
+    var lines = List<String>()
+    while let line = out.next() {
+        lines.push(line)
+    }
+    lines.sort()
+    for line in lines {
+        println(line)
+    }
+    // out: a: answered 1, stopped soon true
+    // out: b: answered 1, stopped soon true
+
+    var events = List<Event>()
+    one.poll(5000, mut events)
+    println("{events}")    // out: [Woken]
+    two.poll(5000, mut events)
+    println("{events}")    // out: [Woken]
+    println("{one.signalled()} {two.signalled()} {one.signalled()}")    // out: true true false
+}
