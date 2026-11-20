@@ -1055,6 +1055,20 @@ CX_FN(cx_usize, cx_http_ws_text_len, (cx_u64 h, cx_u32 which));
 CX_FN(void, cx_http_ws_text, (cx_u64 h, cx_u32 which, cx_u8* out));
 CX_FN(void, cx_http_ws_close, (cx_u64 h, cx_u32 code, const cx_u8* reason, cx_usize reason_len));
 
+/* The system's credential store, behind std.keyring (CLX-380), in calx_keyring.c: Credential
+ * Manager, the Keychain, or the Secret Service through libsecret. Each call gives std.keyring's
+ * Error number or 0, and leaves the secret it read, or the words for what went wrong, for
+ * `cx_keyring_result_len` and `cx_keyring_result_copy`, which wipes it, and the system's code for
+ * `cx_keyring_error_code`, per thread. `text` keeps a secret as the system's tools keep text:
+ * UTF-16 on Windows. */
+CX_FN(cx_i32, cx_keyring_set, (const cx_u8* service, cx_usize service_len, const cx_u8* account, cx_usize account_len,
+                               const cx_u8* secret, cx_usize secret_len, cx_u32 text));
+CX_FN(cx_i32, cx_keyring_get, (const cx_u8* service, cx_usize service_len, const cx_u8* account, cx_usize account_len, cx_u32 text));
+CX_FN(cx_i32, cx_keyring_delete, (const cx_u8* service, cx_usize service_len, const cx_u8* account, cx_usize account_len));
+CX_FN(cx_usize, cx_keyring_result_len, (void));
+CX_FN(void, cx_keyring_result_copy, (cx_u8* out));
+CX_FN(cx_i32, cx_keyring_error_code, (void));
+
 /* LZ4 as lz4-java's block streams write it, in calx_lz4.c (D118). `cx_lz4_decode` carries on from
  * `state`, four numbers: where the next header is, the output's length, what the rest decompresses
  * to, and the length lz4-java's buffer would have, 21 to start. It
