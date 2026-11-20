@@ -65,4 +65,10 @@ if(WIN32)
     # A manifest that makes the driver's code page UTF-8, so its arguments and paths aren't lossy.
     # The linker merges it into the one it writes.
     target_sources(calx PRIVATE src/calx.manifest)
+    # Visual Studio's STL 14.52 refuses a clang older than 22 (error STL1000), and GitHub's
+    # windows-latest image has that STL with LLVM 20 since 2026-11-18 (CLX-373). The compiler uses
+    # nothing from the STL that clang 20 can't build, so an older clang is let through.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 22)
+        target_compile_definitions(calx PRIVATE _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH)
+    endif()
 endif()
