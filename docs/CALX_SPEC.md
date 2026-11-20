@@ -334,10 +334,18 @@ Build time is tracked like run time (D34): [`bench/build.calx`](../bench/build.c
 
 ## FFI
 
-Built: `extern "C"` declarations and calls, with integers, floats, `bool` and pointers ([C functions](reference/unsafe.md#c-functions)). Still to build:
+Built:
+
+- `extern "C"` declarations and calls, with integers, floats, `bool` and pointers ([C functions](reference/unsafe.md#c-functions)).
+- Pointers in struct fields, and in the parameters and results of `unsafe fn`s and `@export_c` functions, with `cast`, `addr` and `*T` going where `*const T` is wanted (CLX-332). A `@handle` struct's `drop` gives back what C gave it ([owning what C gave](reference/unsafe.md#owning-what-c-gave)).
+- `extern "C" fn(...) -> T`, the type of a C function's address, which Calx calls, passes to C, and makes from an address C gave with `p.to_fn<F>()` ([C function values](reference/unsafe.md#c-function-values), CLX-333).
+- `@export_c("name")` exports a Calx function with the C ABI, for C code to call, on any thread, the runtime's or not; one called before the runtime starts is refused ([calling Calx from C](reference/unsafe.md#calling-calx-from-c), CLX-333). A Calx plugin doesn't need it: [`@export`](reference/libraries.md) exports a function with Calx's own ABI, whose type the host checks when it finds it (D123). `Box.into_ptr` and `to_box` give C a Calx value to hold, and `unsafe impl Send` vouches for a struct's pointers going to another thread.
+- `calx build --staticlib`: a `.lib` or `.a` with the runtime and the `@export_c` functions, a C header for them, and `calx_init` and `calx_shutdown`, which a C, C++, Rust or Swift program links ([static libraries](reference/embedding.md), CLX-334).
+
+Still to build:
 
 - C's own type names are in `std.c`: `c.int`, `c.size_t`, and `CStr` for C strings.
-- `@export_c("name")` exports a Calx function with the C ABI, for C code to call. A Calx plugin doesn't need it: [`@export`](reference/libraries.md) exports a function with Calx's own ABI, whose type the host checks when it finds it (D123).
+- `--cdylib`: the same C as a shared library.
 - `extern` is allowed only in trusted modules, the same rule as `unsafe`. A WASM build has no `extern` except the host's imports.
 - Struct layout follows C's rules for `@repr(c)` structs. Other structs' layout is the compiler's choice.
 

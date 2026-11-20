@@ -11,8 +11,10 @@ namespace calx {
 
 enum class BuildMode { debug, release };
 
-// A program, or a library a program opens while it runs (D123).
-enum class BuildKind { program, library };
+// A program, a library a program opens while it runs (D123), or a static library, with its own
+// runtime, for a host that isn't Calx to link, which calls the functions it exports with
+// `@export_c` (CLX-334).
+enum class BuildKind { program, library, staticlib };
 
 struct Toolchain {
     std::string clang;    // the clang executable
@@ -139,6 +141,16 @@ void trim_cache(const std::string& dir, std::size_t keep, std::uintmax_t budget)
 
 // What a built library's file name ends with: `.dll`, `.so` or `.dylib`.
 const char* library_suffix();
+
+// CLX-334: what a static library's file name ends with, `.lib` on Windows and `.a` elsewhere, and
+// the name `calx build --staticlib` gives one built from `stem`: `stem.lib`, or `libstem.a`.
+const char* staticlib_suffix();
+std::string staticlib_name(const std::string& stem);
+
+// Puts `objects` in the static library `output`, with the first archiver it finds: on Windows
+// llvm-lib or lld, beside clang or on PATH, or Visual Studio's lib.exe; on macOS libtool; and
+// elsewhere llvm-ar beside clang, or ar. Says what's wrong and returns false if it can't.
+bool archive_objects(const Toolchain& tc, const std::vector<std::string>& objects, const std::string& output, bool verbose);
 
 // Copies what `build_program` built to `out`, for `calx build`. On Windows its PDB goes beside it
 // as `out.pdb`, so stack traces and debuggers still find it once the cache has let it go.

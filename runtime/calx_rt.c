@@ -836,8 +836,55 @@ void cx_export_enter(const char* name) {
 
 /* A program some of whose functions C can call: they can be called on threads of C's, which
  * write to the same output as the program's own, so writing takes the lock from the start. */
-void cx_foreign_threads(void) {
-    __atomic_store_n(&out_shared, 1, __ATOMIC_RELEASE);
+void cx_foreign_threads(void) { __atomic_store_n(&out_shared, 1, __ATOMIC_RELEASE); }
+
+static int init_lock;
+
+/* A static library's start, which its host calls before anything else in it: what `main`
+ * does for a program, but for the command line, which is the host's, so std.env's `args` is
+ * empty, and the handlers for a stack that overflows, since the host's own, such as Rust's,
+ * are for the process. Calling it again while the runtime runs does nothing. */
+void calx_init(void) {
+    while (__atomic_exchange_n(&init_lock, 1, __ATOMIC_ACQUIRE)) {
+#ifdef _WIN32
+        Sleep(0);
+#else
+        sched_yield();
+#endif
+    }
+    if (__atomic_load_n(&rt_state, __ATOMIC_ACQUIRE) != 1) {
+#ifdef _WIN32
+        LARGE_INTEGER hz;
+        QueryPerformanceFrequency(&hz);
+        counter_hz = (cx_u64)hz.QuadPart;
+#endif
+        /* The host's threads call in whenever they like, so output always takes the lock. */
+        __atomic_store_n(&out_shared, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&rt_state, 1, __ATOMIC_RELEASE);
+    }
+    __atomic_store_n(&init_lock, 0, __ATOMIC_RELEASE);
+}
+
+/* A static library's end: what it wrote is written out, and the terminal is put back as it was.
+ * Threads the library started must have stopped, as its own stop function would see to. A
+ * debug build then checks that everything Calx allocated was freed, as a program's end does,
+ * and gives 102 if not, having said so; otherwise it gives 0. */
+int calx_shutdown(void) {
+    if (__atomic_load_n(&rt_state, __ATOMIC_ACQUIRE) != 1) return 0;
+    __atomic_store_n(&rt_state, 2, __ATOMIC_RELEASE);
+    flush_out();
+    term_end(1);
+#ifdef CX_DEBUG
+    cx_usize live = cx_alloc_live();
+    if (live && !__atomic_load_n(&services_live, __ATOMIC_ACQUIRE)) {
+        fprintf(stderr, "calx: %llu allocation%s never freed when the library was shut down\n", (unsigned long long)live,
+                live == 1 ? " was" : "s were");
+        if (!cx_alloc_report()) fputs("calx: run it with CALX_LEAKS=1 to see where each was allocated\n", stderr);
+        fflush(stderr);
+        return 102;
+    }
+#endif
+    return 0;
 }
 
 int cx_finish(void) {

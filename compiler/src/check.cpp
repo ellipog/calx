@@ -170,7 +170,7 @@ public:
         n_err_ = ctx.names.intern("err");
     }
 
-    void run(const std::vector<Module*>& modules, bool need_main, bool library) {
+    void run(const std::vector<Module*>& modules, bool need_main, bool library, bool c_library) {
         prog_.modules = modules;
         for (Module* m : modules) {
             auto scope = std::make_unique<Scope>();
@@ -268,7 +268,17 @@ public:
             // A closure's, after the code around it's, whose locals it reads (CLX-98).
             for (auto [c, report] : closure_moves_) check_moves(mc, c, report);
         }
-        find_main(modules.back(), need_main && !library);
+        find_main(modules.back(), need_main && !library && !c_library);
+        if (c_library) {
+            // CLX-334: a static library's code runs when its host calls what it exports to C.
+            if (prog_.main) {
+                error(prog_.main->name_span, "a static library has no `main`: its host calls the functions it exports with "
+                                             "`@export_c`");
+            } else if (prog_.c_exports.empty()) {
+                error(Span{modules.back()->file, 0, 0},
+                      "a static library exports at least one function to C: mark it `@export_c`");
+            }
+        }
         if (library) {
             // D123: a library's code runs when the program that opened it calls what it exports.
             if (prog_.main) {
@@ -13020,9 +13030,10 @@ private:
 
 }  // namespace
 
-void check_program(CheckContext ctx, const std::vector<Module*>& modules, Program& program, bool need_main, bool library) {
+void check_program(CheckContext ctx, const std::vector<Module*>& modules, Program& program, bool need_main, bool library,
+                   bool c_library) {
     Checker c(ctx, program);
-    c.run(modules, need_main, library);
+    c.run(modules, need_main, library, c_library);
 }
 
 }  // namespace calx

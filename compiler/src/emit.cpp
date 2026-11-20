@@ -1,6 +1,7 @@
 #include "emit.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -7584,6 +7585,104 @@ $dropall    m->len = 0;
 std::vector<CFile> emit_c(const Program& program, const Sources& sources, const Names& names, const EmitOptions& options) {
     Emitter e(program, sources, names, options);
     return e.run();
+}
+
+namespace {
+
+// C's own name for a type of a C function's: the fixed-width integers, `size_t`, `float`, `double`
+// and `bool`, which are what calx_rt.h's are.
+std::string c_base(const Type* t) {
+    switch (t->kind) {
+        case TypeKind::int_: return t->is_usize ? "size_t" : std::string(t->is_signed ? "int" : "uint") + std::to_string(t->bits) + "_t";
+        case TypeKind::float_: return t->bits == 32 ? "float" : "double";
+        case TypeKind::bool_: return "bool";
+        default: return "void";
+    }
+}
+
+// C's declaration of `name` as a `t`, or of a parameter without one when `name` is "": a pointer
+// is `uint8_t* p` or `const uint8_t* p`, and an `extern "C" fn` is `void (*f)(uint8_t*)`.
+std::string c_decl(const Type* t, const std::string& name) {
+    auto join = [](const std::string& base, const std::string& d) {
+        return d.empty() ? base : d[0] == '*' ? base + d : base + " " + d;
+    };
+    switch (t->kind) {
+        case TypeKind::pointer: {
+            const Type* e = t->elem;
+            bool plain = e->kind == TypeKind::int_ || e->kind == TypeKind::float_ || e->kind == TypeKind::bool_;
+            std::string rest = name.empty() ? "" : " " + name;
+            if (plain) return (t->is_const ? "const " : "") + c_base(e) + "*" + rest;
+            return c_decl(e, (t->is_const ? "const*" : "*") + rest);
+        }
+        case TypeKind::fn_: {
+            std::string ps;
+            for (std::size_t i = 0; i < t->elems.size(); i++) ps += (i ? ", " : "") + c_decl(t->elems[i], "");
+            return c_decl(t->elem, "(*" + name + ")(" + (ps.empty() ? std::string("void") : ps) + ")");
+        }
+        default: return join(c_base(t), name);
+    }
+}
+
+bool c_word(std::string_view s) {
+    static const char* const words[] = {"auto", "break", "case", "char", "const", "continue", "default", "do", "double",
+                                        "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long",
+                                        "register", "restrict", "return", "short", "signed", "sizeof", "static", "struct",
+                                        "switch", "typedef", "union", "unsigned", "void", "volatile", "while", "bool",
+                                        "true", "false", "class", "new", "delete", "this", "template", "namespace"};
+    for (const char* w : words) {
+        if (s == w) return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+std::string c_header(const Program& program, const Names& names, const std::string& name) {
+    std::string guard = "CALX_";
+    for (char c : name) guard += std::isalnum(static_cast<unsigned char>(c)) ? static_cast<char>(std::toupper(static_cast<unsigned char>(c))) : '_';
+    guard += "_H";
+    std::string s =
+        "/* " + name + ".h: the C functions of the Calx static library " + name + ", which `calx build --staticlib` made.\n"
+        " * It's made again with the library, so edits to it don't last.\n"
+        " *\n"
+        " * The host calls calx_init() before anything else in the library, and calx_shutdown() after the\n"
+        " * last call, once the threads the library started have stopped. In between, any thread can call\n"
+        " * these functions, one the library started or one it didn't. A call before calx_init() or after\n"
+        " * calx_shutdown() ends the process, saying so, as a panic in the library does.\n"
+        " *\n"
+        " * Link it on Windows with Visual Studio's linker, as Rust's MSVC target does, and the DLL C\n"
+        " * runtime (/MD); it names the system libraries it needs itself. On Linux, add -lm -lpthread -ldl;\n"
+        " * on macOS, nothing more. */\n"
+        "#ifndef " + guard + "\n#define " + guard + "\n\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdint.h>\n\n"
+        "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n"
+        "/* Starts the library's runtime. Calling it again while it runs does nothing. */\n"
+        "void calx_init(void);\n\n"
+        "/* Ends it: what the library printed is written out. A debug build of the library then checks\n"
+        " * that everything it allocated was freed, and returns 102 if not, having said so; otherwise 0. */\n"
+        "int calx_shutdown(void);\n";
+    for (const Item* f : program.c_exports) {
+        s += "\n";
+        if (!f->doc.empty()) {
+            std::string_view doc = f->doc;
+            std::size_t at = 0;
+            while (at <= doc.size()) {
+                std::size_t end = doc.find('\n', at);
+                if (end == std::string_view::npos) end = doc.size();
+                std::string_view line = doc.substr(at, end - at);
+                s += line.empty() ? "///\n" : "/// " + std::string(line) + "\n";
+                at = end + 1;
+            }
+        }
+        std::string ps;
+        for (std::size_t i = 0; i < f->params.size(); i++) {
+            std::string n(names.text(f->params[i].name));
+            if (c_word(n)) n += "_";
+            ps += (i ? ", " : "") + c_decl(f->params[i].local->type, n);
+        }
+        s += c_decl(f->result_type, std::string(f->export_name) + "(" + (ps.empty() ? std::string("void") : ps) + ")") + ";\n";
+    }
+    s += "\n#ifdef __cplusplus\n}\n#endif\n\n#endif\n";
+    return s;
 }
 
 }  // namespace calx

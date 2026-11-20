@@ -54,9 +54,9 @@ struct Program {
 };
 
 // Checks a program: its modules, from `load_program`, as one. With `need_main`, the main module
-// must have `fn main()`. A `library` has none, and exports at least one function (D123). Errors go
-// to `ctx.diags`.
+// must have `fn main()`. A `library` has none, and exports at least one function (D123), as a
+// `c_library` does with `@export_c` (CLX-334). Errors go to `ctx.diags`.
 void check_program(CheckContext ctx, const std::vector<Module*>& modules, Program& program, bool need_main,
-                   bool library = false);
+                   bool library = false, bool c_library = false);
 
 }  // namespace calx
