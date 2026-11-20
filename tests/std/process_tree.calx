@@ -1,0 +1,180 @@
+// std.process: reads that don't wait take what's in the pipe already (CLX-358), and a child
+// started in a group of its own is stopped, or killed, with the program it starts (CLX-376). The
+// test runs itself as each program: the child starts a grandchild that adds a byte to a file
+// every 20 ms, so the file stops growing once the grandchild is gone.
+import std.env.{args}
+import std.fs.{append_text, metadata, remove_dir_all, separator, temp_dir}
+import std.io.{flush}
+import std.process.{Command, Status, Stdio, current_exe}
+import std.thread.{sleep}
+
+fn pause(ms: u64) {
+    unsafe {
+        sleep(ms * 1000000)
+    }
+}
+
+fn child(a: List<String>) {
+    let what = a[0].copy()
+    if what == "hi" {
+        println("hi")
+        flush()
+        pause(60000)
+    } else if what == "beat" {
+        for _ in 0..3000 {
+            append_text(a[1], "x")!
+            pause(20)
+        }
+    } else if what == "server" or what == "launch" {
+        // A launcher: it starts the real server, and waits for it, or ends and leaves it running.
+        _ = Command.new(current_exe()).args(["beat", a[1].copy()]).stdin(Stdio.Null).stdout(Stdio.Null).stderr(Stdio.Null).spawn()!
+        println("ready")
+        flush()
+        if what == "server" {
+            pause(60000)
+        }
+    }
+}
+
+fn size(file: String) -> u64 {
+    return match metadata(file) {
+        ok(m) => m.size,
+        err(_) => 0,
+    }
+}
+
+// Whether the file is growing, as it does while the grandchild runs, within 30 seconds.
+fn growing(file: String) -> bool {
+    for _ in 0..300 {
+        let was = size(file)
+        pause(100)
+        if was > 0 and size(file) > was {
+            return true
+        }
+    }
+    return false
+}
+
+// Whether the file has stopped growing, as it does once the grandchild has gone, within 10 seconds.
+fn still(file: String) -> bool {
+    for _ in 0..20 {
+        let was = size(file)
+        pause(500)
+        if size(file) == was {
+            return true
+        }
+    }
+    return false
+}
+
+// How a program asked to stop ended: by SIGTERM on Linux and macOS, and on Windows by Ctrl+Break,
+// which ends a program with STATUS_CONTROL_C_EXIT.
+fn stopped(s: Status) -> bool {
+    return s.signal == some(15) or s.code == some(-1073741510)
+}
+
+fn main() {
+    let a = args()
+    if a.len() > 0 {
+        child(a)
+        return
+    }
+    let me = current_exe()
+    let windows = separator() == "\\"
+
+    // Output already in the pipe is read without waiting.
+    var hi = Command.new(me).arg("hi").stdout(Stdio.Pipe).spawn()!
+    var line = String("none")
+    for _ in 0..600 {
+        if let l = hi.read_line(0) {
+            line = l
+            break
+        }
+        pause(50)
+    }
+    println("read_line(0): {line}")    // out: read_line(0): hi
+    hi.kill()
+    _ = hi.wait()
+    var hi2 = Command.new(me).arg("hi").stdout(Stdio.Pipe).spawn()!
+    var got = List<u8>()
+    for _ in 0..600 {
+        got = hi2.read(0)
+        if not got.is_empty() {
+            break
+        }
+        pause(50)
+    }
+    println("read(0): {got.len() >= 2 and got[0] == 104 and got[1] == 105}")    // out: read(0): true
+    println("still running: {hi2.wait_timeout(0) == none}")    // out: still running: true
+    hi2.kill()
+    let killed = match hi2.wait_timeout(60000) {
+        some(s) => s.code == none,
+        none => false,
+    }
+    println("killed: {killed}")    // out: killed: true
+    _ = hi2.wait()
+
+    let tmp = temp_dir()!
+    let sep = separator()
+
+    // Asked to stop, the child and the grandchild it started both end.
+    let f1 = "{tmp}{sep}stop"
+    var server = Command.new(me).args(["server", f1.copy()]).stdout(Stdio.Pipe).own_group().spawn()!
+    println(server.wait_for_line("ready", 60000) ?? String("none"))    // out: ready
+    println("beating: {growing(f1)}")    // out: beating: true
+    server.stop()
+    match server.wait_timeout(30000) {
+        some(s) => println("stopped: {stopped(s)}"),    // out: stopped: true
+        none => {
+            server.kill_tree()
+            println("didn't stop")
+        },
+    }
+    println("grandchild gone: {still(f1)}")    // out: grandchild gone: true
+    _ = server.wait()
+
+    // A launcher that has ended leaves the server running, and kill_tree ends it.
+    let f2 = "{tmp}{sep}launch"
+    var launcher = Command.new(me).args(["launch", f2.copy()]).stdout(Stdio.Pipe).own_group().spawn()!
+    let ended = match launcher.wait_timeout(60000) {
+        some(s) => s.success(),
+        none => false,
+    }
+    println("launcher: {ended}")    // out: launcher: true
+    println("left running: {growing(f2)}")    // out: left running: true
+    launcher.kill_tree()
+    println("server gone: {still(f2)}")    // out: server gone: true
+    _ = launcher.wait()
+
+    // Killed with its tree while it runs. Started measured, so on Linux the helper that started it
+    // leads its group.
+    let f3 = "{tmp}{sep}kill"
+    var running = Command.new(me).args(["server", f3.copy()]).stdout(Stdio.Pipe).own_group().measured().spawn()!
+    _ = running.wait_for_line("ready", 60000)
+    println("beating: {growing(f3)}")    // out: beating: true
+    running.kill_tree()
+    let out = running.wait()
+    println("killed: {out.status.code == none} {still(f3)}")    // out: killed: true true
+
+    // A signal of choice, which Windows has none of.
+    var sig = Command.new(me).args(["server", "{tmp}{sep}signal"]).stdout(Stdio.Pipe).own_group().spawn()!
+    _ = sig.wait_for_line("ready", 60000)
+    match sig.signal(9) {
+        ok => println("signal: {windows == false} {sig.wait().status.signal == some(9)}"),
+        err(e) => {
+            println("signal: {windows} {"{e}" == "Windows has no signals: stop() sends Ctrl+Break"}")
+            sig.kill_tree()
+            _ = sig.wait()
+        },
+    }
+    // out: signal: true true
+    println("still: {still("{tmp}{sep}signal")}")    // out: still: true
+    var bad = Command.new(me).arg("hi").stdout(Stdio.Null).spawn()!
+    match bad.signal(100000) {
+        ok => println("bad signal sent"),
+        err(e) => println("bad signal: {windows or "{e}" == "100000 isn't a signal"}"),    // out: bad signal: true
+    }
+    bad.kill()
+    _ = bad.wait()
+    remove_dir_all(tmp)!
+}

@@ -35,6 +35,10 @@ extern "C" {
     fn cx_proc_available(h: i64, stream: u32) -> usize
     fn cx_proc_take(h: i64, stream: u32, to: *u8, n: usize)
     fn cx_proc_kill(h: i64)
+    fn cx_proc_kill_tree(h: i64)
+    fn cx_proc_stop(h: i64)
+    fn cx_proc_send_signal(h: i64, sig: i32) -> i32
+    fn cx_proc_wait_exit(h: i64, until: u64) -> i32
     fn cx_proc_id(h: i64) -> u32
     fn cx_proc_state(h: i64) -> u32
     fn cx_proc_code(h: i64) -> i32
@@ -212,6 +216,7 @@ pub struct Command {
     cpus: List<u32>,
     fast: bool,
     alone: bool,
+    grouped: bool,
 }
 
 impl Command {
@@ -232,6 +237,7 @@ impl Command {
             cpus: List<u32>(),
             fast: false,
             alone: false,
+            grouped: false,
         }
     }
 
@@ -376,6 +382,18 @@ impl Command {
         return c
     }
 
+    /// Starts it in a process group of its own, which the programs it starts are in too, so
+    /// `Child.stop` can ask them all to end and `Child.kill_tree` can end them, as a launcher
+    /// script and the server it starts. On Linux and macOS it's a session of its own, as Python's
+    /// `start_new_session=True` starts one. On Windows it's a console process group, as
+    /// `CREATE_NEW_PROCESS_GROUP` makes, and a job of its own. Either way the terminal's Ctrl+C
+    /// doesn't reach it: this program decides when it ends.
+    pub fn own_group(own self) -> Command {
+        var c = self
+        c.grouped = true
+        return c
+    }
+
     /// Runs it, with this program's input, output and error, and waits for it. Fails if it
     /// doesn't start, or doesn't succeed: a script's `subprocess.run(..., check=True)`.
     pub fn run(self) ! ProcessError {
@@ -425,6 +443,7 @@ impl Command {
             handle: h,
             input_piped: mode_of(self.in_mode, Stdio.Inherit) == Stdio.Pipe,
             output_piped: mode_of(self.out_mode, Stdio.Inherit) == Stdio.Pipe,
+            grouped: self.grouped,
         }
     }
 }
@@ -469,6 +488,7 @@ pub struct Child {
     handle: i64,
     input_piped: bool,
     output_piped: bool,
+    grouped: bool,
 }
 
 impl Child {
@@ -524,7 +544,8 @@ impl Child {
     /// The next line it writes to standard output, which is `Stdio.Pipe`, without its `\n` or
     /// `\r\n`, waiting at most `ms` milliseconds for it. `none` if it doesn't come in time, or the
     /// output has ended, which `ended` tells apart. The last line needn't end with a line break.
-    /// Panics if its output isn't a pipe.
+    /// With 0 it doesn't wait, but takes a line that's in the pipe already. Panics if its output
+    /// isn't a pipe.
     @track_caller
     pub fn read_line(self, ms: u64) -> String? {
         let h = self.live()
@@ -562,7 +583,7 @@ impl Child {
 
     /// What has come from its standard output, which is `Stdio.Pipe`, since it was last read,
     /// waiting at most `ms` milliseconds for something if nothing has. Empty if nothing comes in
-    /// time, or the output has ended.
+    /// time, or the output has ended. With 0 it doesn't wait, but takes what's in the pipe already.
     @track_caller
     pub fn read(self, ms: u64) -> List<u8> {
         let h = self.live()
@@ -601,6 +622,68 @@ impl Child {
         unsafe {
             cx_proc_kill(self.live())
         }
+    }
+
+    @track_caller
+    fn group(self) -> i64 {
+        let h = self.live()
+        if not self.grouped {
+            panic("the child wasn't started with own_group")
+        }
+        return h
+    }
+
+    /// Asks it, and every program in its group, to end, letting each clean up first: `SIGTERM` on
+    /// Linux and macOS, as Python's `os.killpg(pid, signal.SIGTERM)` sends it, and Ctrl+Break on
+    /// Windows, as `send_signal(signal.CTRL_BREAK_EVENT)` does. It doesn't wait: `wait_timeout`
+    /// says whether it did, and `kill_tree` ends what didn't. On Windows a program with no console
+    /// can't be sent Ctrl+Break, so it keeps running. Panics unless it was started with
+    /// `Command.own_group`.
+    @track_caller
+    pub fn stop(self) {
+        unsafe {
+            cx_proc_stop(self.group())
+        }
+    }
+
+    /// Ends it and every program in its group at once, without letting them clean up: `SIGKILL`
+    /// to the group on Linux and macOS, `os.killpg(pid, signal.SIGKILL)`, and on Windows the
+    /// end of its job. What it started is ended even when it has exited itself, as a launcher
+    /// script does once it has started the server. Panics unless it was started with
+    /// `Command.own_group`.
+    @track_caller
+    pub fn kill_tree(self) {
+        unsafe {
+            cx_proc_kill_tree(self.group())
+        }
+    }
+
+    /// Sends it the signal `sig`, such as 1 for `SIGHUP` or 15 for `SIGTERM`, as Python's
+    /// `send_signal` does: on Linux and macOS, to it, and if it was started with `own_group`, to
+    /// every program in its group, as `os.killpg` does. One that has ended is left alone. Fails
+    /// with `BadArgument` if `sig` isn't a signal, and on Windows, which has none: `stop` sends
+    /// Ctrl+Break there.
+    @track_caller
+    pub fn signal(self, sig: i32) ! ProcessError {
+        let r = unsafe { cx_proc_send_signal(self.live(), sig) }
+        if r == -1 {
+            fail ProcessError.BadArgument("{sig} isn't a signal")
+        }
+        if r == -2 {
+            fail ProcessError.BadArgument(String("Windows has no signals: stop() sends Ctrl+Break"))
+        }
+    }
+
+    /// How it ended, waiting at most `ms` milliseconds for it to, and reading its output
+    /// meanwhile: `none` if it's still running. A `stop` and then `kill_tree` if it doesn't end
+    /// in time is how a server is stopped.
+    @track_caller
+    pub fn wait_timeout(self, ms: u64) -> Status? {
+        let h = self.live()
+        if unsafe { cx_proc_wait_exit(h, deadline(ms)) } == 0 {
+            return none
+        }
+        return some(status_of(h))
     }
 
     /// What it has used so far: its CPU time and its memory in RAM now and at its peak, as the
@@ -834,6 +917,7 @@ fn start(c: Command, in_default: Stdio, out_default: Stdio, err_default: Stdio, 
     }
     spec.push(if c.fast { 1 } else { 0 })
     spec.push(if c.alone { 1 } else { 0 })
+    spec.push(if c.grouped { 1 } else { 0 })
     let h = unsafe { cx_proc_spawn(spec.as_ptr(), spec.len(), c.given.as_ptr(), c.given.len(), group) }
     if h != 0 {
         return h
