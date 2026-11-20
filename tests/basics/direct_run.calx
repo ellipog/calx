@@ -39,6 +39,6 @@ fn main() {
     println(calx([script.copy()]))    // out: [exited with status 4]
     println(calx([bare.copy()]))    // out: bare [exited with status 0]
     println(calx(["biuld", script.copy()]))    // out: [exited with status 2] calx: `biuld` isn't a command, or a file to run
-    println(calx(["-q", script.copy()]))    // out: [exited with status 2] calx: -q isn't an option for running a file; the options before one are --release, --timings and --verbose
+    println(calx(["-q", script.copy()]))    // out: [exited with status 2] calx: -q isn't an option for running a file; the options before one are --release, --cpu, --timings and --verbose
     remove_dir_all(dir)!
 }
