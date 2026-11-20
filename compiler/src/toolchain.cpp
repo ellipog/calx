@@ -1800,6 +1800,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     if (parts_ok && calls({"cx_jpg_"})) parts_ok = part("calx_jpeg.c");
     if (parts_ok && calls({"cx_fs_"})) parts_ok = part("calx_fs.c");
     if (parts_ok && calls({"cx_proc_"})) parts_ok = part("calx_proc.c");
+    if (parts_ok && calls({"cx_signal_"})) parts_ok = part("calx_signal.c");
     if (parts_ok && calls({"cx_queue_", "cx_thread_", "cx_Sender", "cx_Receiver", "cx_Thread"})) parts_ok = part("calx_thread.c");
     if (parts_ok && calls({"cx_sort_i8(", "cx_sort_i16(", "cx_sort_i32(", "cx_sort_i64(", "cx_sort_u8(", "cx_sort_u16(",
                            "cx_sort_u32(", "cx_sort_u64(", "cx_sort_usize(", "cx_sort_char(", "cx_sort_rune(", "cx_sort_bool(",
@@ -1903,7 +1904,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         link_flags.push_back("-Wl,--gc-sections");
         // The system libraries the runtime's parts use, which Visual Studio's linker takes from the
         // `#pragma comment(lib)` in each. A program imports from one only what it calls.
-        for (const char* lib : {"-lws2_32", "-lwinhttp", "-lbcrypt", "-lsynchronization"}) link_flags.push_back(lib);
+        for (const char* lib : {"-lws2_32", "-lwinhttp", "-lbcrypt", "-lsynchronization", "-ladvapi32"}) link_flags.push_back(lib);
     } else {
         // The PDB makes lld-link keep every section by default; a section nothing reads, such as
         // an `embed` table a program never looks at, is dropped as it would be without one.

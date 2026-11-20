@@ -45,6 +45,7 @@ Each method gives the command back with one more thing said, so they chain. A co
 | `c.timeout(ms: u64)` | Kills it if it's still running that many milliseconds after it started. 0, how a command starts, is no limit |
 | `c.affinity(cpus: List<u32>)` | Runs it only on these processors, numbered from 0 as the system numbers them, pinned before it runs anything. Panics if the list is empty: see [Pinning](#pinning-and-the-machines-load) |
 | `c.full_speed()` | Takes it out of Windows' power throttling, so Windows doesn't move it to the efficiency cores or slow it down to save power. Other systems have none, so it does nothing there |
+| `c.new_group()` | Starts it in a process group of its own, so Ctrl+C at the terminal doesn't reach it, and on Windows `stop` can ([below](#asking-a-program-to-stop)) |
 | `c.measured()` | Starts it so its peak memory is its own on Linux, not at least this program's: see [What it used](#what-it-used). Elsewhere it's its own already, so it does nothing there |
 
 `Stdio` is where a stream goes:
@@ -120,6 +121,7 @@ fn main() {
 | `child.read(ms: u64) -> List<u8>` | What has come from its output since the last read, waiting at most `ms` milliseconds if nothing has. Empty at the end, or if nothing comes in time |
 | `child.ended() -> bool` | Whether its output has ended and all of it has been read |
 | `child.try_wait() -> Status?` | How it ended, if it has, without waiting |
+| `child.stop() -> bool` | Asks it to stop, letting it clean up first: SIGTERM on POSIX, and Ctrl+Break on Windows, to a child started with `new_group`. `false` if it can't be asked ([below](#asking-a-program-to-stop)) |
 | `child.kill()` | Kills it, if it's running, without letting it clean up |
 | `child.id() -> u32` | Its process ID |
 | `unsafe child.usage() -> Usage` | What it has used so far, as the system says while it runs: see [What it used](#what-it-used) |
@@ -232,6 +234,39 @@ The program is found the same way on each system, by Calx, not by the system's o
 | --- | --- |
 | `which(name: String) -> String?` | The path of the program `name` would start, made whole, or `none` if there's nothing to run |
 | `current_exe() -> String` | The path of this program's own executable, to start it again |
+
+## Asking a program to stop
+
+`child.stop()` asks a program to stop and lets it clean up first, as Python's `terminate()` does on POSIX, where `kill()` gives it no chance. A Calx program hears it as [`std.signal`](signal.md)'s `Terminate`, on every system.
+
+```calx
+import std.env.{args}
+import std.io.{flush}
+import std.process.{Command, Stdio, current_exe}
+import std.signal.{Signal, handle, wait}
+
+fn main() {
+    if args().len() > 0 {
+        // The copy: it says it's ready, then waits to be asked to stop.
+        handle()
+        println("ready")
+        flush()
+        let s = wait() ?? Signal.Hangup
+        println("cleaned up after {s}")
+        return
+    }
+    var c = Command.new(current_exe()).arg("worker").new_group().stdout(Stdio.Pipe).spawn()!
+    _ = c.wait_for_line("ready", 30000)
+    println("{c.stop()}")    // out: true
+    let out = c.wait()
+    println("{out.text().trim()}, status {out.status.code ?? -1}")    // out: cleaned up after terminate, status 0
+}
+```
+
+- **On Linux and macOS** it's SIGTERM, to the child alone. One that doesn't handle it ends with the signal, which `Status.signal` gives as 15.
+- **On Windows** it's Ctrl+Break, the one console event a program can send another. It goes to a process group, so it reaches only a child started with `new_group`, which leads a group of its own, and every program that child started in its group too. `stop` gives `false` for any other, since a group ID that isn't a group's can reach every program on the console, this one and the shell too. A child that doesn't handle it ends with status `0xC000013A`. A program with no console of its own gave the child one without a window, which `stop` attaches to just to send it.
+- **`new_group`** starts a child in a process group of its own, as Python's `process_group=0` does on POSIX and `CREATE_NEW_PROCESS_GROUP` on Windows. Ctrl+C at the terminal then reaches this program but not the child, which this program stops as it sees fit. On POSIX the child is in the background as far as the terminal is concerned, so one that reads the terminal is stopped until it's brought back.
+- **`false`** also once the child has ended. `wait` then says how it ended, as after `kill`.
 
 ## When this program ends
 

@@ -35,6 +35,7 @@ extern "C" {
     fn cx_proc_available(h: i64, stream: u32) -> usize
     fn cx_proc_take(h: i64, stream: u32, to: *u8, n: usize)
     fn cx_proc_kill(h: i64)
+    fn cx_proc_stop(h: i64) -> bool
     fn cx_proc_id(h: i64) -> u32
     fn cx_proc_state(h: i64) -> u32
     fn cx_proc_code(h: i64) -> i32
@@ -212,6 +213,7 @@ pub struct Command {
     cpus: List<u32>,
     fast: bool,
     alone: bool,
+    grouped: bool,
 }
 
 impl Command {
@@ -232,6 +234,7 @@ impl Command {
             cpus: List<u32>(),
             fast: false,
             alone: false,
+            grouped: false,
         }
     }
 
@@ -373,6 +376,17 @@ impl Command {
     pub fn measured(own self) -> Command {
         var c = self
         c.alone = true
+        return c
+    }
+
+    /// Starts it in a process group of its own, as Python's `process_group=0` does on POSIX and
+    /// `CREATE_NEW_PROCESS_GROUP` on Windows. Ctrl+C typed at the terminal doesn't reach it then,
+    /// so this program decides when it stops, and on Windows `Child.stop` can ask it to. On POSIX
+    /// it's in the background as far as the terminal is concerned, so one that reads the terminal
+    /// is stopped until it's brought back.
+    pub fn new_group(own self) -> Command {
+        var c = self
+        c.grouped = true
         return c
     }
 
@@ -601,6 +615,18 @@ impl Child {
         unsafe {
             cx_proc_kill(self.live())
         }
+    }
+
+    /// Asks it to stop, letting it clean up first, as Python's `terminate()` does on POSIX: with
+    /// SIGTERM there, and on Windows with Ctrl+Break, which reaches a program only in a group of
+    /// its own, so one started with `new_group`, and every program it started in its group too.
+    /// A Calx program hears either as `std.signal`'s `Terminate`. `false` if it can't be asked:
+    /// it has ended, or on Windows it wasn't started with `new_group`. `wait` then says how it
+    /// ended: by the signal on POSIX, or with 0xC000013A on Windows, if it didn't handle it.
+    /// Panics if it was waited for already.
+    @track_caller
+    pub fn stop(self) -> bool {
+        return unsafe { cx_proc_stop(self.live()) }
     }
 
     /// What it has used so far: its CPU time and its memory in RAM now and at its peak, as the
@@ -834,6 +860,7 @@ fn start(c: Command, in_default: Stdio, out_default: Stdio, err_default: Stdio, 
     }
     spec.push(if c.fast { 1 } else { 0 })
     spec.push(if c.alone { 1 } else { 0 })
+    spec.push(if c.grouped { 1 } else { 0 })
     let h = unsafe { cx_proc_spawn(spec.as_ptr(), spec.len(), c.given.as_ptr(), c.given.len(), group) }
     if h != 0 {
         return h

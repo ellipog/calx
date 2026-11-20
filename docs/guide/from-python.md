@@ -174,6 +174,10 @@ fn main() ! Error {
 | `os.wait4(pid, 0)`, `psutil.Process(pid).memory_info()` | `unsafe { status.usage() }`, `unsafe { child.usage() }`: CPU time and memory, the same on both systems, without `ctypes` |
 | `os.sched_setaffinity(0, cpus)`, `psutil.cpu_times()` | `set_affinity(cpus)`, or `c.affinity(cpus)` for a program it starts, and `unsafe { machine_cpu() }`, on Windows too, from [`std.process`](../std/process.md#pinning-and-the-machines-load) |
 | `logging.basicConfig(level=logging.INFO, filename=p)`, `logging.info(m)`, `logging.getLogger(n)` | `config(level: Level.Info, file: p)`, `info(m)` and `logger(n)` from [`std.log`](../std/log.md), with Python's formats |
+| `signal.signal(signal.SIGTERM, on_stop)`, `signal.SIGINT` | `handle()` from [`std.signal`](../std/signal.md), then `take()` or `wait()` where the program is ready to stop, rather than a handler that runs anywhere |
+| `loop.add_signal_handler(SIGTERM, stop)`, `server.shutdown()` | `net.wake_on_signal()`, or `server.wake_on_signal()` and `server.shutdown()` from [`std.http.server`](../std/http-server.md#stopping-cleanly), whose `next` gives `none` at a signal |
+| `Popen(..., process_group=0)`, `p.terminate()` | `Command.new(...).new_group()`, `child.stop()`, SIGTERM on POSIX and Ctrl+Break on Windows ([asking a program to stop](../std/process.md#asking-a-program-to-stop)) |
+| pywin32's `win32serviceutil.ServiceFramework` | `service()` from [`std.signal`](../std/signal.md#windows-services), which runs the program as a Windows service, its stop coming as `Terminate` |
 
 ```calx
 import std.fs.{temp_dir, write_text, make_dir_all, glob, remove_dir_all}

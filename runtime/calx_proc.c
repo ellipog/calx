@@ -180,6 +180,7 @@ struct proc {
     cx_u64 cpu_ns, peak_memory;   /* what it used in all, recorded as it exited */
     cx_u64 started_ns, ended_ns;  /* on cx_clock_ns's clock: just before it started, and once it was seen to exit */
     cx_u32 pid;
+    int own_group;  /* started in a process group of its own */
     group* g;
 #ifdef _WIN32
     HANDLE process, wait;
@@ -252,6 +253,7 @@ typedef struct {
     size_t ncpus;
     int full_speed;
     int measured;
+    int new_group; /* in a process group of its own, which `stop` can reach on Windows */
 } spec;
 
 typedef struct {
@@ -319,6 +321,7 @@ static int spec_read(spec* sp, const cx_u8* p, size_t n) {
     for (size_t i = 0; i < sp->ncpus; i++) sp->cpus[i] = (cx_u32)rd_int(&r, 4);
     sp->full_speed = (int)rd_int(&r, 1);
     sp->measured = (int)rd_int(&r, 1);
+    sp->new_group = (int)rd_int(&r, 1);
     return !r.bad;
 }
 
@@ -916,6 +919,26 @@ static void kill_proc(proc* p) {
     if (!p->exited && TerminateProcess(p->process, 1)) p->killed = 1;
 }
 
+/* Asks the child to stop with Ctrl+Break, which goes to a process group: only to one of the
+ * child's own, since a group ID that isn't one can reach every program on the console, this one
+ * and the shell too. A program with no console of its own gave the child one without a window,
+ * which it attaches to just to send it, one thread at a time. */
+static int stop_proc(proc* p) {
+    static SRWLOCK attach = SRWLOCK_INIT;
+    if (p->exited || !p->own_group) return 0;
+    if (GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, p->pid)) return 1;
+    DWORD console;
+    if (GetConsoleProcessList(&console, 1) != 0) return 0;
+    AcquireSRWLockExclusive(&attach);
+    int sent = 0;
+    if (AttachConsole(p->pid)) {
+        sent = GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, p->pid) != 0;
+        FreeConsole();
+    }
+    ReleaseSRWLockExclusive(&attach);
+    return sent;
+}
+
 /* Waits until something happens to the children `ps`, which share a group, or until `until`
  * (0 for no limit), and handles all that happened. A child whose timeout runs out is killed. */
 static void pump(proc** ps, size_t n, cx_u64 until) {
@@ -1097,6 +1120,9 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
     if (GetConsoleProcessList(&console, 1) == 0) flags |= CREATE_NO_WINDOW;
     /* A child to pin, or to run at full speed, starts suspended, so it runs no instruction before. */
     if (pin || sp->full_speed) flags |= CREATE_SUSPENDED;
+    /* Ctrl+Break reaches a group: one of its own lets `stop` ask only it, and Ctrl+C typed at the
+     * console no longer reaches it. */
+    if (sp->new_group) flags |= CREATE_NEW_PROCESS_GROUP;
     PROCESS_INFORMATION pi;
     p->started_ns = cx_clock_ns();
     BOOL made = CreateProcessW(exe.p, line.p, NULL, NULL, count > 0, flags, changes ? env.p : NULL, sp->has_dir ? dir.p : NULL,
@@ -1130,6 +1156,7 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
     CloseHandle(pi.hThread);
     p->process = pi.hProcess;
     p->pid = pi.dwProcessId;
+    p->own_group = sp->new_group;
     for (int i = 0; i < 3; i++) {
         stream* s = &p->s[i];
         if (!ours[i]) continue;
@@ -1422,6 +1449,9 @@ static void reap(proc* p) {
 static void kill_proc(proc* p) {
     if (!p->exited && kill((pid_t)p->pid, SIGKILL) == 0) p->killed = 1;
 }
+
+/* Asks the child to stop with SIGTERM, which it can handle. */
+static int stop_proc(proc* p) { return !p->exited && kill((pid_t)p->pid, SIGTERM) == 0; }
 
 typedef struct {
     proc* p;
@@ -1772,12 +1802,18 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
     sigemptyset(&mask);
     posix_spawnattr_setsigdefault(&at, &def);
     posix_spawnattr_setsigmask(&at, &mask);
+    /* A child in a group of its own: the signals a terminal sends its foreground group, Ctrl+C's
+     * SIGINT and the rest, don't reach it. */
+    short spawn_flags = POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK;
+    if (sp->new_group) {
+        posix_spawnattr_setpgroup(&at, 0);
+        spawn_flags |= POSIX_SPAWN_SETPGROUP;
+    }
 #ifdef __APPLE__
     /* Only the three streams reach the child, whatever else is open and not yet close-on-exec. */
-    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT);
-#else
-    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK);
+    spawn_flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
 #endif
+    posix_spawnattr_setflags(&at, spawn_flags);
 #ifdef __APPLE__
     /* macOS has no affinity a program can set: its scheduler places threads itself. */
     if (sp->ncpus) {
@@ -1859,6 +1895,7 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
         goto done;
     }
     p->pid = (cx_u32)pid;
+    p->own_group = sp->new_group;
 #ifdef __APPLE__
     /* A kqueue that's ready once the child exits; one that has exited already is looked for. */
     p->pidfd = kqueue();
@@ -2109,6 +2146,8 @@ void cx_proc_take(cx_i64 h, cx_u32 i, cx_u8* to, cx_usize n) {
 }
 
 void cx_proc_kill(cx_i64 h) { kill_proc(P(h)); }
+
+cx_bool cx_proc_stop(cx_i64 h) { return (cx_bool)stop_proc(P(h)); }
 
 cx_u32 cx_proc_id(cx_i64 h) { return proc_id_os(P(h)); }
 

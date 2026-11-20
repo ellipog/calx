@@ -1,0 +1,112 @@
+// std.signal: signals the program handles (CLX-377). It sends them to itself with `raise`, which
+// on POSIX is the system's own signal and on Windows records it in this process, as C's raise
+// does there. Then it asks copies of itself, each started in a process group of its own, to stop
+// with `Child.stop`, SIGTERM on POSIX and Ctrl+Break to that group alone on Windows, so nothing
+// reaches the test runner: one that handles it cleans up and says how it stopped, and one that
+// doesn't is ended by it.
+import std.env.{args, os}
+import std.io.{flush}
+import std.net.{Event, Net}
+import std.process.{Command, Stdio, current_exe}
+import std.signal.{Signal, handle, pending, raise, service, take, wait}
+import std.term.{at_exit}
+import std.thread.{sleep}
+
+fn main() {
+    let given = args()
+    if given.len() > 0 {
+        child(given[0])
+        return
+    }
+    // Nothing has arrived, and none is handled, so a wait only waits its time.
+    println("{take() == none} {pending()} {wait(10) == none}")    // out: true false true
+
+    handle()
+    println("{raise(Signal.Terminate)} {pending()}")    // out: true true
+    println("{take() ?? Signal.Hangup}")                // out: terminate
+    println("{take() == none} {pending()}")             // out: true false
+
+    // Kinds that arrive before they're taken come in order, each kind once.
+    _ = raise(Signal.Hangup)
+    _ = raise(Signal.Interrupt)
+    _ = raise(Signal.Hangup)
+    println("{wait() ?? Signal.Terminate} {wait() ?? Signal.Terminate} {wait(0) == none}")    // out: interrupt hangup true
+
+    // A signal wakes a poll that was asked to wake at one.
+    let net = Net.new()!
+    net.wake_on_signal()!
+    _ = raise(Signal.Interrupt)
+    var events = List<Event>()
+    var woken = false
+    var polls = 0
+    while not woken and polls < 50 {
+        net.poll(100, mut events)
+        for e in events {
+            if e == Event.Woken {
+                woken = true
+            }
+        }
+        polls += 1
+    }
+    println("{woken} {take() ?? Signal.Hangup}")    // out: true interrupt
+
+    // Not started by Windows' Service Control Manager.
+    println("{service()}")    // out: false
+
+    // A copy that handles the stop finishes its work and ends as it means to.
+    var c = Command.new(current_exe()).arg("handles").new_group().stdout(Stdio.Pipe).spawn()!
+    println("{c.wait_for_line("ready", 30000) != none}")    // out: true
+    println("{c.stop()}")                                    // out: true
+    let out = c.wait()
+    println("{out.text().trim()} {out.status.code ?? -1}")    // out: stopping on terminate, saved 0
+
+    // One that doesn't is ended by it, as by any signal that isn't handled.
+    var d = Command.new(current_exe()).arg("plain").new_group().stdout(Stdio.Pipe).spawn()!
+    println("{d.wait_for_line("ready", 30000) != none}")    // out: true
+    println("{d.stop()}")                                    // out: true
+    let ended = d.wait()
+    let how = if os() == "windows" { ended.status.code == some(-1073741510) } else { ended.status.signal == some(15) }
+    println("{ended.status.success()} {how}")    // out: false true
+
+    // With std.term's text to write at the end, set before the handler: a copy that handles the
+    // stop writes it as it ends, after what it printed, and one that doesn't writes it as the
+    // stop ends it.
+    var t = Command.new(current_exe()).arg("term-handles").new_group().stdout(Stdio.Pipe).spawn()!
+    println("{t.wait_for_line("ready", 30000) != none} {t.stop()}")    // out: true true
+    let t_out = t.wait()
+    println("{t_out.text().trim().replace("\n", "|")} {t_out.status.code ?? -1}")    // out: stopping on terminate, saved|bye 0
+    var u = Command.new(current_exe()).arg("term-plain").new_group().stdout(Stdio.Pipe).spawn()!
+    println("{u.wait_for_line("ready", 30000) != none} {u.stop()}")    // out: true true
+    let u_out = u.wait()
+    println("{u_out.text().trim()} {u_out.status.success()}")    // out: bye false
+
+    // On Windows only a child in a group of its own can be asked, and none that has ended.
+    var p = Command.new(current_exe()).arg("plain").stdout(Stdio.Pipe).spawn()!
+    println("{p.wait_for_line("ready", 30000) != none}")    // out: true
+    println("{p.stop() == (os() != "windows")}")             // out: true
+    p.kill()
+    _ = p.wait()
+    var q = Command.new(current_exe()).arg("quick").new_group().spawn()!
+    while q.try_wait() == none {
+        unsafe { sleep(1000000) }
+    }
+    println("{q.stop()}")    // out: false
+    _ = q.wait()
+}
+
+fn child(what: String) {
+    if what == "quick" {
+        return
+    }
+    if what.starts_with("term-") {
+        at_exit("bye\n")
+    }
+    if what.ends_with("handles") {
+        handle([Signal.Terminate])
+    }
+    println("ready")
+    flush()
+    // A plain copy never gets past this: the stop ends it.
+    let s = wait(60000) ?? Signal.Hangup
+    println("stopping on {s}, saved")
+}

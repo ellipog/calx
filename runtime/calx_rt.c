@@ -222,6 +222,14 @@ static void term_end(int flush);
  * as after a panic, the programs it started end with it. */
 void (*cx_children_at_exit)(int normal);
 
+/* Set by calx_signal.c once the program runs as a Windows service, and called as the program
+ * ends, with whether it means to and the status `exit` gave, to tell the Service Control Manager
+ * it has stopped. */
+void (*cx_signal_at_exit)(int normal, int code);
+static int exit_status;
+
+void cx_exit_status(int code) { exit_status = code; }
+
 /* The terminal is put back as the program found it first (see "std.term" below), so what the
  * program writes as it ends, such as a panic's message, shows as it would have. `normal` says
  * whether it's ending as it means to. */
@@ -232,9 +240,57 @@ static void take_exit_as(int normal) {
     void (*children)(int) = __atomic_load_n(&cx_children_at_exit, __ATOMIC_ACQUIRE);
     if (children) children(normal);
     term_end(1);
+    void (*service)(int, int) = __atomic_load_n(&cx_signal_at_exit, __ATOMIC_ACQUIRE);
+    if (service) service(normal, exit_status);
 }
 
 static void take_exit(void) { take_exit_as(0); }
+
+/* --- std.signal: what a signal wakes -------------------------------------------------------
+ * The polls std.net's `wake_on_signal` was asked for, each woken by calx_signal.c as a signal the
+ * program handles arrives. They're here, in the part of the runtime every program has, so
+ * calx_net.c and calx_signal.c each work without the other. A `Net` lasts until the program ends,
+ * so the list only grows. */
+#define SIGNAL_WAKES 64
+CX_COLD void cx_panic_text(const char* at, const char* message);
+static struct {
+    void (*wake)(cx_u64);
+    cx_u64 arg;
+} signal_wakes[SIGNAL_WAKES];
+static int signal_wakes_count;
+
+void cx_signal_wakes_add(void (*wake)(cx_u64), cx_u64 arg) {
+    int n = __atomic_load_n(&signal_wakes_count, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < n; i++) {
+        if (signal_wakes[i].arg == arg) return;
+    }
+    if (n == SIGNAL_WAKES) cx_panic_text("std.net", "more than 64 polls are woken by signals");
+    signal_wakes[n].wake = wake;
+    signal_wakes[n].arg = arg;
+    /* Each is whole before the count says it's there, for the thread that wakes them. */
+    __atomic_store_n(&signal_wakes_count, n + 1, __ATOMIC_RELEASE);
+}
+
+void cx_signal_wakes_fire(void) {
+    int n = __atomic_load_n(&signal_wakes_count, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < n; i++) signal_wakes[i].wake(signal_wakes[i].arg);
+}
+
+#ifdef _WIN32
+/* A bit for each console event std.signal handles, `1 << CTRL_C_EVENT` and so on, which
+ * std.term's handler leaves to it. */
+unsigned cx_signal_console;
+
+/* As the system's own handler ends a program at a console event it doesn't handle, for
+ * std.signal's `raise`: with STATUS_CONTROL_C_EXIT, after the terminal is put back and what was
+ * printed is written. */
+void cx_signal_exit(void) {
+    take_exit();
+    flush_out();
+    fflush(stderr);
+    ExitProcess(0xC000013A);
+}
+#endif
 
 /* The threads `Thread.spawn` started that are still running, which own memory the leak check
  * would count, and whether this is one of them. */
@@ -965,7 +1021,9 @@ static void term_end(int flush) {
 /* Runs on a thread of its own, while the others carry on, so it doesn't touch the output buffer.
  * Returning FALSE lets the next handler, in the end the system's, end the program. */
 static BOOL WINAPI term_control(DWORD event) {
-    (void)event;
+    /* An event std.signal handles is the program's, which goes on: its handler, the next, has
+     * it, and the terminal is put back as the program ends. */
+    if (event < 32 && (__atomic_load_n(&cx_signal_console, __ATOMIC_ACQUIRE) & (1u << event))) return FALSE;
     term_end(0);
     return FALSE;
 }
@@ -1270,6 +1328,7 @@ void cx_process_exit(cx_u8 code) {
         panic_text("can't exit inside a `parallel for`");
         cx_panic_end();
     }
+    exit_status = code;
     take_exit_as(1);
     flush_out();
     fflush(stderr);

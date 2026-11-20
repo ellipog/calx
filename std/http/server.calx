@@ -18,6 +18,7 @@ import std.http.{Header}
 import std.http.websocket.{Message}
 import std.net.{Conn, Event, Net, NetError, Waker}
 import std.process.{processors}
+import std.signal.{pending}
 import std.thread.{Task}
 import std.time.{DateTime, Instant, Timestamp}
 import std.url.{decode, encode}
@@ -272,6 +273,8 @@ pub struct Server {
     // wait for the client's close.
     happened: Deque<ServerEvent>
     closing: usize
+    // `wake_on_signal` was called, so `next`, `next_event` and `serve` stop at a signal.
+    on_signal: bool
 }
 
 // A file `serve` is sending in parts after its response's head: where the next part starts, how
@@ -325,7 +328,7 @@ impl Server {
     pub fn listen(port: u16, host: String = "127.0.0.1") -> Server ! NetError {
         let net = try Net.new()
         let p = try net.listen(host, port)
-        return Server { port: p, host: host.copy(), max_body: 67108864, log: true, max_message: 67108864, net: net, clients: Map<u32, Client>(), ready: Deque<u32>(), events: List<Event>(), date: String(), date_second: -1, streams: List<Stream>(), happened: Deque<ServerEvent>(), closing: 0 }
+        return Server { port: p, host: host.copy(), max_body: 67108864, log: true, max_message: 67108864, net: net, clients: Map<u32, Client>(), ready: Deque<u32>(), events: List<Event>(), date: String(), date_second: -1, streams: List<Stream>(), happened: Deque<ServerEvent>(), closing: 0, on_signal: false }
     }
 
     /// The address to open in a browser: `http://127.0.0.1:8000/`.
@@ -340,10 +343,14 @@ impl Server {
     /// The next request, from whichever connection has one, waiting for it up to `timeout_ms`
     /// milliseconds, or forever if it's negative, and `none` if none came in that time. Each
     /// request gets one `respond`; until it does, the next request on the same connection waits,
-    /// while other connections' come.
+    /// while other connections' come. After `wake_on_signal`, it's `none` at once while a signal
+    /// is pending, so a server's loop ends when it's asked to stop.
     pub fn next(mut self, timeout_ms: i64 = -1) -> Request? {
         let start = unsafe { Instant.now() }
         loop {
+            if self.signalled() {
+                return none
+            }
             if let r = self.take_ready() {
                 return some(r)
             }
@@ -358,10 +365,14 @@ impl Server {
     /// The next thing that happens, as `next` gives requests: a request, a WebSocket's message
     /// or close, or an event stream's end, waiting up to `timeout_ms` milliseconds for it, or
     /// forever if it's negative. `none` if nothing happened in that time. What happens on
-    /// sockets and streams waits for it in order, while `next` gives only the requests.
+    /// sockets and streams waits for it in order, while `next` gives only the requests. After
+    /// `wake_on_signal`, it's `none` at once while a signal is pending, as `next` is.
     pub fn next_event(mut self, timeout_ms: i64 = -1) -> ServerEvent? {
         let start = unsafe { Instant.now() }
         loop {
+            if self.signalled() {
+                return none
+            }
             if let h = self.happened.pop_first() {
                 return some(h)
             }
@@ -374,6 +385,88 @@ impl Server {
             }
             self.poll_events(wait ?? 0)
         }
+    }
+
+    /// Stops `next`, `next_event` and `serve` at each signal the program handles with
+    /// `std.signal`: a signal wakes the server's poll, and they give `none`, or for `serve`
+    /// return, after `shutdown`, while one is pending, that `std.signal.take` hasn't taken.
+    pub fn wake_on_signal(mut self) ! NetError {
+        try self.net.wake_on_signal()
+        self.on_signal = true
+    }
+
+    fn signalled(self) -> bool {
+        return self.on_signal and pending()
+    }
+
+    /// Closes every connection cleanly, for a server that's stopping, as Python's
+    /// `server_close()` does after `shutdown()`. Each connection sends what it was sent first. A
+    /// WebSocket is closed with 1001, going away, and waits for the client's close. An event
+    /// stream ends, and a file being sent finishes. A request handed out and not answered gets no
+    /// answer, and a connection that comes meanwhile is closed at once. It waits up to
+    /// `timeout_ms` milliseconds for all that, 5 seconds to start with, or forever if it's
+    /// negative, then closes what's left. The sockets' `Closed` and the streams' `Ended` wait for
+    /// `next_event`, as they would have.
+    pub fn shutdown(mut self, timeout_ms: i64 = 5000) {
+        let start = unsafe { Instant.now() }
+        loop {
+            var ids = List<u32>()
+            for (id, _) in self.clients {
+                ids.push(id)
+            }
+            for id in ids {
+                let c = self.clients[id].conn
+                let what = self.clients[id].kind
+                if what == KIND_SOCKET {
+                    if not self.clients[id].closing {
+                        self.close_socket(ServerSocket { conn: c }, 1001)
+                    }
+                } else if what == KIND_STREAM {
+                    self.end_stream(EventStream { conn: c })
+                } else if not self.sending_file(c) {
+                    // Again each time: one that was sending a file is closed once it's done.
+                    self.net.close(c)
+                }
+            }
+            self.pump()
+            if self.clients.is_empty() {
+                break
+            }
+            let left = self.wait_left(start, timeout_ms)
+            if left == none {
+                break
+            }
+            var wait = left ?? 0
+            let cap: i64 = if self.streams.is_empty() { 100 } else { 1 }
+            if wait < 0 or wait > cap {
+                wait = cap
+            }
+            self.poll_events(wait)
+        }
+        for (_, client) in self.clients {
+            self.net.close(client.conn)
+        }
+        while let s = self.streams.pop() {
+            close_quietly(s.file)
+        }
+        // What's closing gets the time that's left, and at least 100 ms, so it has closed when
+        // the program ends.
+        var rest = timeout_ms
+        if timeout_ms >= 0 {
+            let spent = i64.wrap(unsafe { Instant.now() }.nanos_since(start) / 1000000)
+            rest = (timeout_ms - spent).max(100)
+        }
+        _ = self.net.drain(rest)
+    }
+
+    // Whether a file is being sent in parts on the connection.
+    fn sending_file(self, c: Conn) -> bool {
+        for s in self.streams {
+            if s.conn.id() == c.id() {
+                return true
+            }
+        }
+        return false
     }
 
     // How long a poll may wait, from `start` and a timeout that's negative for forever, or
@@ -906,7 +999,9 @@ impl Server {
     /// read on worker threads, one for each processor up to 8, so many are served at once, and a
     /// file of 64 KiB or more isn't read: the system sends it from the file, with
     /// `Net.send_file`, so the memory it takes doesn't grow with the file. Each request is logged
-    /// to standard error, unless `log` is false, which leaves out the line too.
+    /// to standard error, unless `log` is false, which leaves out the line too. After
+    /// `wake_on_signal`, a signal stops it: it takes no more requests, answers those it has,
+    /// closes every connection with `shutdown`, and returns.
     pub fn serve(mut self, dir: String) {
         if self.log {
             let shown = if self.host.is_empty() { String("every address") } else { self.host.copy() }
@@ -924,6 +1019,9 @@ impl Server {
                             log_request(req, res.status)
                         }
                         self.respond(req, res)
+                    } else if self.signalled() {
+                        self.shutdown()
+                        return
                     }
                 }
             },
@@ -936,18 +1034,31 @@ impl Server {
             // Each runs as long as the program does.
             _ = unsafe { Thread.spawn(FileWorker { jobs: jobs.share(), out: done.sender(), waker: waker, dir: dir.copy() }) }
         }
+        // Requests the workers have that they haven't answered.
+        var working: usize = 0
         loop {
-            while let req = self.take_ready() {
-                to_workers.send(req)
+            // Asked to stop, it takes no more requests, and once the workers have answered those
+            // they have, closes every connection.
+            let stopping = self.signalled()
+            if stopping and working == 0 {
+                self.shutdown()
+                return
+            }
+            while not stopping and not self.ready.is_empty() {
+                if let req = self.take_ready() {
+                    to_workers.send(req)
+                    working += 1
+                }
             }
             while let d = done.next() {
+                working -= 1
                 self.finish(d)
             }
             self.pump()
             // An answer just sent may have let a request that came behind it through.
-            if self.ready.is_empty() {
+            if self.ready.is_empty() or stopping {
                 // Files being sent are topped up as their connections take them.
-                let wait: i64 = if self.streams.is_empty() { -1 } else { 1 }
+                let wait: i64 = if stopping { 10 } else if self.streams.is_empty() { -1 } else { 1 }
                 self.poll_events(wait)
             }
         }

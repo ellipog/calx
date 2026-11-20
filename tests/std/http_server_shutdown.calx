@@ -1,0 +1,165 @@
+// std.http.server stopping at a signal (CLX-377): after `wake_on_signal`, `next` gives `none`
+// while a signal is pending, and `shutdown` closes each connection cleanly: a keep-alive
+// connection after what it was sent, a WebSocket with 1001, an event stream, and a connection
+// whose request was never handed out. The clients are written here on std.net, in the same
+// thread, so a WebSocket's client never answers the close, and `shutdown` closes it at its time.
+import std.http.server.{Response, Server}
+import std.net.{Conn, Event, Net}
+import std.signal.{Signal, handle, raise, take}
+
+struct Peer {
+    conn: Conn
+    got: List<u8>
+    closed: bool
+}
+
+fn connect(net: Net, port: u16, raw: String) -> Peer {
+    let c = net.connect("127.0.0.1", port)!
+    net.write(c, raw.to_bytes())
+    return Peer { conn: c, got: List<u8>(), closed: false }
+}
+
+fn poll_client(net: Net, peers: mut List<Peer>, events: mut List<Event>) {
+    net.poll(10, mut events)
+    for e in events {
+        for p in mut peers {
+            match e {
+                Received(c) => {
+                    if c.id() == p.conn.id() {
+                        _ = net.read(c, mut p.got)
+                    }
+                },
+                Closed(c) => {
+                    if c.id() == p.conn.id() {
+                        p.closed = true
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+}
+
+// Where the answer's head ends in what came, or the end of what came.
+fn head_end(got: List<u8>) -> usize {
+    var i: usize = 0
+    while i + 3 < got.len() {
+        if got[i] == 13 and got[i + 1] == 10 and got[i + 2] == 13 and got[i + 3] == 10 {
+            return i + 4
+        }
+        i += 1
+    }
+    return got.len()
+}
+
+// What came on a peer's connection: its status and the frames or events after the head, in
+// words, and whether it closed.
+fn shown(p: Peer) -> String {
+    let end = head_end(p.got)
+    let t = String.from_utf8(p.got[0..end]) ?? String("<not UTF-8>")
+    var out = List<String>()
+    if t.starts_with("HTTP/1.1 ") {
+        out.push(t[9..12].copy())
+    }
+    if end < p.got.len() {
+        let rest = p.got[end..]
+        if rest[0] == 0x88 {
+            let code = (u32(rest[2]) << 8) | u32(rest[3])
+            out.push("close {code}")
+        } else if t.contains("event-stream") {
+            out.push("events")
+        } else {
+            out.push("body {rest.len()}")
+        }
+    }
+    if p.closed {
+        out.push("closed")
+    }
+    return out.join(" ")
+}
+
+fn main() {
+    handle([Signal.Terminate])
+    var server = Server.listen(0)!
+    server.wake_on_signal()!
+    let port = server.port
+    let net = Net.new()!
+    var events = List<Event>()
+    var peers = List<Peer>()
+    peers.push(connect(net, port, "GET /a HTTP/1.1\r\nHost: x\r\n\r\n"))
+    peers.push(connect(net, port, "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"))
+    peers.push(connect(net, port, "GET /events HTTP/1.1\r\nHost: x\r\n\r\n"))
+    var answered: usize = 0
+    var rounds = 0
+    while answered < 3 and rounds < 500 {
+        net.flush()
+        if let req = server.next(10) {
+            if req.path == "/ws" {
+                _ = server.upgrade(req)!
+            } else if req.path == "/events" {
+                let s = server.stream(req)
+                _ = server.send_event(s, "hi")
+            } else {
+                server.respond(req, Response.text("hello"))
+            }
+            answered += 1
+        }
+        poll_client(net, mut peers, mut events)
+        rounds += 1
+    }
+    // Each answer arrives, and every connection stays open. The server polls too, so what it
+    // queued goes.
+    rounds = 0
+    while rounds < 50 {
+        _ = server.next(1)
+        poll_client(net, mut peers, mut events)
+        rounds += 1
+    }
+    for p in peers {
+        println(shown(p))
+    }
+    // out: 200 body 5
+    // out: 101
+    // out: 200 events
+
+    // A request that comes after the signal isn't handed out.
+    _ = raise(Signal.Terminate)
+    peers.push(connect(net, port, "GET /late HTTP/1.1\r\nHost: x\r\n\r\n"))
+    rounds = 0
+    while rounds < 20 {
+        poll_client(net, mut peers, mut events)
+        rounds += 1
+    }
+    println("{server.next(1000) == none}")    // out: true
+
+    server.shutdown(timeout_ms: 300)
+    rounds = 0
+    while rounds < 100 and not (peers[0].closed and peers[1].closed and peers[2].closed and peers[3].closed) {
+        poll_client(net, mut peers, mut events)
+        rounds += 1
+    }
+    for p in peers {
+        println(shown(p))
+    }
+    // out: 200 body 5 closed
+    // out: 101 close 1001 closed
+    // out: 200 events closed
+    // out: closed
+
+    // Once the signal's taken, the server gives what happened as it closed.
+    println("{take() ?? Signal.Hangup}")    // out: terminate
+    var happened = List<String>()
+    var tries = 0
+    while happened.len() < 2 and tries < 100 {
+        if let e = server.next_event(10) {
+            match e {
+                Closed(_, code, _) => happened.push("socket {code}"),
+                Ended(_) => happened.push("stream"),
+                _ => happened.push("other"),
+            }
+        }
+        tries += 1
+    }
+    happened.sort()
+    println(happened.join(", "))    // out: socket 1006, stream
+}

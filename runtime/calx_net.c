@@ -1567,6 +1567,62 @@ void cx_net_wake(cx_u64 h) {
 #endif
 }
 
+/* Whether every connection has sent what was queued on it, and each the program closed has
+ * closed: on Windows, once the receive `finish` cancelled has come back and the socket with it. */
+static int settled(net* n) {
+    for (size_t i = 0; i < n->nslots; i++) {
+        net_slot* s = n->slots[i];
+        if (s->kind != SLOT_CONN || s->state == CONN_CONNECTING) continue;
+        if (s->state == CONN_CLOSING) return 0;
+#ifdef _WIN32
+        if (s->state == CONN_CLOSED) {
+            if (s->s != INVALID_SOCKET) return 0;
+            continue;
+        }
+        if (s->sending) return 0;
+#else
+        if (s->state == CONN_CLOSED) continue;
+#endif
+        if (buf_live(&s->out) || s->has_file || s->waiting) return 0;
+    }
+    return 1;
+}
+
+/* Waits up to `timeout_ms`, or forever if it's negative, until what was queued has gone and what
+ * was closed has closed, for a program about to end, which would cut both off. 1 if they have.
+ * What happens meanwhile is kept for the next poll. */
+cx_bool cx_net_drain(cx_u64 h, cx_i64 timeout_ms) {
+    net_check_thread();
+    net* n = (net*)(uintptr_t)h;
+#ifdef _WIN32
+    ULONGLONG start = GetTickCount64();
+#else
+    cx_i64 start = monotonic_ms();
+#endif
+    for (;;) {
+        send_dirty(n);
+        if (settled(n)) return 1;
+#ifdef _WIN32
+        cx_i64 spent = (cx_i64)(GetTickCount64() - start);
+#else
+        cx_i64 spent = monotonic_ms() - start;
+#endif
+        if (timeout_ms >= 0 && spent >= timeout_ms) return 0;
+        cx_i64 slice = timeout_ms < 0 || timeout_ms - spent > 10 ? 10 : timeout_ms - spent;
+        wait_events(n, slice);
+    }
+}
+
+/* Each signal std.signal handles wakes the poller's poll, as a waker does, from the thread that
+ * hears of it. The list is in calx_rt.c, so a program without std.signal needs nothing more. */
+void cx_signal_wakes_add(void (*wake)(cx_u64), cx_u64 arg);
+
+cx_bool cx_net_wake_on_signal(cx_u64 h) {
+    if (!cx_net_waker(h)) return 0;
+    cx_signal_wakes_add(cx_net_wake, h);
+    return 1;
+}
+
 void cx_net_close(cx_u64 h, cx_u32 id) {
     net_check_thread();
     net* n = (net*)(uintptr_t)h;
