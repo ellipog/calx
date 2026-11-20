@@ -20,13 +20,14 @@ Installing Calx, then learning it by building one small program, `stash`, which 
 3. [Reading the commands](guide/reading-input.md): standard input a line at a time, optionals and `while let`, and splitting a line into words
 4. [What the commands mean](guide/commands.md): commands as an enum, parsing numbers, functions that fail, matching on text, and copying out of a list
 5. [The stash](guide/stash.md): a sorted map, parameters that own or change what they're given, `try`, the whole program, and modules
-6. [Coming from Python](guide/from-python.md): the Python a script reaches for next to the Calx that does the same, from text, lists and files to JSON, CSV, the web and dates, and where Calx differs on purpose
+6. [Packages](guide/packages.md): code from another folder or git repository, with `calx.toml`, path and git dependencies, `calx.lock`, and builds that work offline
+7. [Coming from Python](guide/from-python.md): the Python a script reaches for next to the Calx that does the same, from text, lists and files to JSON, CSV, the web and dates, and where Calx differs on purpose
 
 ### Reference
 
 What's built, one page per feature:
 
-1. [The calx command](reference/command.md): new, check, build, run, test, eval, fmt, emit-c, how builds stay fast, cleaning, uninstalling, completions, and errors for editors
+1. [The calx command](reference/command.md): new, check, build, run, test, eval, fmt, emit-c, how builds stay fast, packages and calx.lock, cleaning, uninstalling, completions, and errors for editors
 2. [Editor support](reference/editors.md): the VS Code extension, and the grammar, error format and formatter other editors can use
 3. [Syntax](reference/syntax.md): files, comments, names, keywords, literals, raw strings and operators
 4. [Types](reference/types.md): the primitive types, arrays, `Copy`, and where the other types are
@@ -58,7 +59,7 @@ What's built, one page per feature:
 30. [Generics](reference/generics.md): generic functions and types, inference, bounds, `Copy`, `Equal`, `Display`, `Hash` and `JavaHash`, and their C
 31. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, naming the interface, generic interfaces, and operators on a type of one's own
 32. [Comparing and printing](reference/comparing.md): the derived `Equal` and `Display`, `==` and `{x}` on every type, and their bounds
-33. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
+33. [Modules](reference/modules.md): files as modules, imports, `pub`, one C file per module, and the modules of packages
 34. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, formats such as `{x:.2}` and `{n:>8}`, assert and panic, and `@track_caller`
 35. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers in values and signatures, calling C, C function values, calling Calx from C with `@export_c`, callbacks on C's threads, and a handle's `drop`
 36. [Libraries](reference/libraries.md): `calx build --lib`, `@export`, opening a library while a program runs, types checked down to the fields, and the one runtime they share
@@ -81,8 +82,8 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 8. [std.hint](std/hint.md): `black_box`, which hides a value from the optimizer, for benchmarks
 9. [std.text.mutf8](std/text-mutf8.md): Java's Modified UTF-8, as `DataOutputStream.writeUTF` writes it
 10. [std.mail](std/mail.md): messages between actors, delivered at the barrier in order of sender, then of sending
-11. [std.hash](std/hash.md): MD5, SHA-1, SHA-256, SHA-384, SHA-512 and HMAC with any of them, as Java's `MessageDigest` and `Mac` and Python's `hashlib` give them, with SHA-1 and SHA-256 on the processor's SHA instructions
-12. [std.crypto](std/crypto.md): random bytes from the system, AES-CFB8 and RSA
+11. [std.hash](std/hash.md): MD5, SHA-1, SHA-256, SHA-384, SHA-512 and HMAC with any of them, as Java's `MessageDigest` and `Mac` and Python's `hashlib` give them, with SHA-1 and SHA-256 on the processor's SHA instructions, and BLAKE2b
+12. [std.crypto](std/crypto.md): random bytes from the system, AES-CFB8, RSA, argon2id password hashing in PHC strings, and Ed25519 signatures
 13. [std.zlib](std/zlib.md): zlib, gzip and raw deflate, as Java's `Deflater`, `Inflater` and GZIP streams write and read them
 14. [std.http](std/http.md): HTTP and HTTPS requests on the system's own client, each on a thread of its own, `fetch`, which waits for one, for scripts, and `multipart/form-data` forms for uploads
 15. [std.lz4](std/lz4.md): LZ4 block streams, as lz4-java's `LZ4BlockOutputStream` and `LZ4BlockInputStream` write and read them
@@ -134,6 +135,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 61. [std.nbt](std/nbt.md): Minecraft's NBT read and written as vanilla 26.3's `NbtIo` does it, files gzipped, zlib-compressed or plain, tags changed in place, SNBT read, shown and laid out, and NBT paths, as vanilla does, and FTB's SNBT as FTB Library does
 62. [std.nbt.region](std/nbt-region.md): Minecraft's region files read and written as vanilla 26.3's `RegionFile` reads and writes them, chunks in each compression, chunks in files of their own, and broken chunks, read as vanilla reads them
 63. [std.http.websocket](std/http-websocket.md): a WebSocket client, `ws://` and `wss://` on the system's own HTTP client, text and binary messages sent and received, with pings and closes answered on a thread of its own, as Python's `websockets` connects
+64. [std.signal](std/signal.md): Ctrl+C, SIGTERM, SIGHUP, Windows' console close and shutdown, and a service's stop, handled by the program as Python's `signal.signal` handles them, with a server's event loop woken to stop cleanly, and a program run as a Windows service
 
 ### Java compatibility
 

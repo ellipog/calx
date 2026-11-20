@@ -62,6 +62,44 @@ constexpr const char* release_cpu_flag(Target t) {
     return t.arch == Arch::x86_64 ? "-march=x86-64-v3" : t.os == Os::macos ? "-mcpu=apple-m1" : "-march=armv8.2-a";
 }
 
+// The default level's name, as `--cpu` takes it: `x86-64-v3`, `apple-m1` or `armv8.2-a`.
+inline std::string default_cpu(Target t) {
+    std::string flag = release_cpu_flag(t);
+    return flag.substr(flag.find('=') + 1);
+}
+
+// The levels `--cpu` and CALX_CPU take for a release build on the target, the default among them
+// (CLX-381). On x86 they're the psABI's: x86-64, any 64-bit processor; v2 adds SSE4.2 and POPCNT,
+// as nearly every one since 2009 has, and old VPS and home servers without AVX2 do; v3 is the
+// default; v4 adds AVX-512. On Arm Linux and Windows, ARMv8.0 is the Raspberry Pi 4's. The runtime
+// counts on no more than each says: its AVX2 code checks for AVX2 as the program runs, or has an
+// SSE2 path that a build without it uses, as debug builds do.
+inline const char* const* cpu_levels(Target t) {
+    static const char* const x86[] = {"x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4", nullptr};
+    static const char* const arm[] = {"armv8-a", "armv8.2-a", nullptr};
+    static const char* const mac[] = {"apple-m1", nullptr};
+    return t.arch == Arch::x86_64 ? x86 : t.os == Os::macos ? mac : arm;
+}
+
+// clang's flag for the level `cpu` names, "" taking the default, or "" with the reason in `error`
+// if the target has no such level.
+inline std::string cpu_flag(Target t, const std::string& cpu, std::string& error) {
+    if (cpu.empty()) return release_cpu_flag(t);
+    std::string list;
+    for (const char* const* l = cpu_levels(t); *l; l++) {
+        if (cpu == *l) return (t.os == Os::macos ? "-mcpu=" : "-march=") + cpu;
+        list += std::string(list.empty() ? "" : l[1] ? ", " : " or ") + *l;
+    }
+    bool x86_level = cpu.rfind("x86-64", 0) == 0;
+    if (x86_level != (t.arch == Arch::x86_64) && (x86_level || cpu.rfind("arm", 0) == 0 || cpu.rfind("apple", 0) == 0)) {
+        error = "`" + cpu + "` is a level of " + (x86_level ? "x86-64" : "Arm64") + " processors, and this calx builds for " +
+                target_name(t) + ", whose release builds take " + list;
+    } else {
+        error = "`" + cpu + "` isn't a processor level; release builds for " + target_name(t) + " take " + list;
+    }
+    return "";
+}
+
 // llvm-mingw's folder for the target's headers and libraries, beside its bin, and the target clang
 // builds for with them (CLX-110).
 constexpr const char* mingw_dir(Arch arch) { return arch == Arch::x86_64 ? "x86_64-w64-mingw32" : "aarch64-w64-mingw32"; }

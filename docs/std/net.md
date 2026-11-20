@@ -5,7 +5,7 @@ description: TCP connections driven by events, on IOCP on Windows and epoll on L
 
 # `std.net`
 
-TCP servers and clients. A `Net` holds listening sockets and connections, and `poll` reports what happened to them as events. Nothing else waits for the network: `write` queues bytes and returns, and `read` takes bytes that have already arrived. Another thread can wake a poll with a `Waker`.
+TCP servers and clients. A `Net` holds listening sockets and connections, and `poll` reports what happened to them as events. Nothing else waits for the network: `write` queues bytes and returns, and `read` takes bytes that have already arrived. Another thread can wake a poll with a `Waker`, and so can a signal, so a server [stops cleanly](#stopping-at-a-signal) when it's asked to.
 
 ```calx
 import std.net.{Event, Net}
@@ -66,6 +66,8 @@ fn main() {
 | `net.flush()` | Sends what was queued on every connection now, rather than at the next poll |
 | `net.queued(conn: Conn) -> usize` | How many bytes queued on the connection the system hasn't taken yet, a file's too, so something big can be sent in parts, the next queued once most of the last has gone. 0 once it's closed |
 | `net.close(conn: Conn)` | Sends what was queued on the connection, then closes it |
+| `net.drain(timeout_ms: i64) -> bool` | Waits up to `timeout_ms` milliseconds, or forever if it's negative, until what was written has gone and what was closed has closed, for a program about to end, as asyncio's `drain()` and `wait_closed()` do. `false` if the time ran out ([below](#stopping-at-a-signal)) |
+| `net.wake_on_signal() ! NetError` | Wakes the poll at each signal the program handles with [`std.signal`](signal.md), which reports `Woken` ([below](#stopping-at-a-signal)) |
 | `net.waker() -> Waker ! NetError` | A `Waker` for the `Net`'s polls |
 | `Waker` | Wakes a `Net`'s poll from another thread. It's `Copy` and `Send`, and every copy wakes the same `Net` |
 | `waker.wake()` | Makes the poll waiting report `Woken`, or the next poll if none is waiting. Any thread can call it, except inside a `parallel for` |
@@ -88,7 +90,7 @@ fn main() {
 | `Connected(c)` | The connection `c` from `connect` is open |
 | `Received(c)` | Bytes arrived on `c`, and `read` takes them. A connection gets at most one `Received` per poll, however many times bytes arrived |
 | `Closed(c)` | `c` ended: the other side closed it, it failed, `connect` couldn't open it, or `close` finished. It's the last event for `c` |
-| `Woken` | A `Waker` woke the poll. However many wakes came before the poll reported one, it reports one `Woken` |
+| `Woken` | A `Waker` woke the poll, or a signal did after `wake_on_signal`. However many wakes came before the poll reported one, it reports one `Woken` |
 
 What arrived before a `Closed` can still be read until the next poll. After that, `read`, `write` and `close` on the connection do nothing, and a new connection can get its slot. A `Conn` kept past then never names the new connection: the id holds a generation as well as the slot, so the runtime ignores the old one.
 
@@ -253,6 +255,54 @@ fn main() {
 A server can poll on its main thread and encode what it sends, compressing and encrypting it, on threads of its own, which wake the poll with each batch they finish.
 
 A `Net` lasts until the program ends. It has no `close` of its own until Calx has destructors, so that a copy can never name a `Net` that was freed.
+
+## Stopping at a signal
+
+A server that's asked to stop, by Ctrl+C, by systemd's SIGTERM or by Windows shutting down, should stop taking connections, send what it owes, and close each one, rather than die with bytes still queued. [`std.signal`](signal.md)'s `handle` says the program handles those signals, and `wake_on_signal` makes each one wake the `Net`'s poll, which reports `Woken`, as asyncio's `loop.add_signal_handler` wakes its loop. The program closes its connections, and `drain` waits until what was queued has gone and they have closed, since a program that ends cuts both off:
+
+```calx
+import std.net.{Conn, Event, Net}
+import std.signal.{Signal, handle, raise, take}
+
+fn main() {
+    handle()
+    let net = Net.new()!
+    net.wake_on_signal()!
+    let port = net.listen("127.0.0.1", 0)!
+    _ = net.connect("127.0.0.1", port)!
+    var events = List<Event>()
+    var open = List<u32>()
+    var stopping = false
+    while not stopping {
+        net.poll(1000, mut events)
+        for e in events {
+            match e {
+                Accepted(c) => {
+                    open.push(c.id())
+                    // As if Ctrl+C had been pressed.
+                    _ = raise(Signal.Interrupt)
+                }
+                Woken => {
+                    if let s = take() {
+                        println("stopping on {s}")    // out: stopping on interrupt
+                        stopping = true
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for id in open {
+        net.write(Conn.from_id(id), "bye\n".to_bytes())
+        net.close(Conn.from_id(id))
+    }
+    println("{net.drain(5000)}")    // out: true
+}
+```
+
+- **A signal wakes a poll from the thread that hears of it**, as a `Waker` would, so it comes as `Woken`, one with any other wakes before the poll, and `take` says which signal it was. A `Net` can be woken by signals and `Waker`s both.
+- **`drain(timeout_ms)`** waits up to that long, or forever if it's negative, until what was written to every connection has gone to the system, and each connection `close` closed has closed: on Windows that's once the receive the runtime cancels comes back. `false` if the time ran out first. Events that come meanwhile wait for the next poll.
+- **[`std.http.server`](http-server.md#stopping-cleanly)** does all of this for a server with `wake_on_signal` and `shutdown`.
 
 ## How it works
 

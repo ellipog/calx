@@ -170,10 +170,15 @@ fn main() ! Error {
 | `subprocess.run(["git", "status"], check=True)` | `Command.new("git").arg("status").run()` |
 | `subprocess.check_output(...)` | `Command.new(...).read()`, its output as text |
 | `subprocess.run(..., capture_output=True)` | `Command.new(...).output()`, with the status and both streams |
+| `Popen(cmd, start_new_session=True)`, `os.killpg(p.pid, signal.SIGTERM)`, `CREATE_NEW_PROCESS_GROUP` with `p.send_signal(signal.CTRL_BREAK_EVENT)` | `Command.new(...).own_group().spawn()` and `child.stop()`, the same call on every system, then `child.kill_tree()` for what's left, which Python needs `psutil` for ([stopping it](../std/process.md#stopping-it-and-what-it-started)) |
+| `p.wait(timeout=10)`, `p.send_signal(signal.SIGHUP)` | `child.wait_timeout(10000)`, `none` if it's still running, and `child.signal(1)` |
 | `shlex.split(line)`, `shlex.quote(w)`, `shlex.join(words)` | `split(line)`, `quote(w)` and `join(words)` from [`std.shell`](../std/shell.md) |
 | `os.wait4(pid, 0)`, `psutil.Process(pid).memory_info()` | `unsafe { status.usage() }`, `unsafe { child.usage() }`: CPU time and memory, the same on both systems, without `ctypes` |
 | `os.sched_setaffinity(0, cpus)`, `psutil.cpu_times()` | `set_affinity(cpus)`, or `c.affinity(cpus)` for a program it starts, and `unsafe { machine_cpu() }`, on Windows too, from [`std.process`](../std/process.md#pinning-and-the-machines-load) |
 | `logging.basicConfig(level=logging.INFO, filename=p)`, `logging.info(m)`, `logging.getLogger(n)` | `config(level: Level.Info, file: p)`, `info(m)` and `logger(n)` from [`std.log`](../std/log.md), with Python's formats |
+| `signal.signal(signal.SIGTERM, on_stop)`, `signal.SIGINT` | `handle()` from [`std.signal`](../std/signal.md), then `take()` or `wait()` where the program is ready to stop, rather than a handler that runs anywhere |
+| `loop.add_signal_handler(SIGTERM, stop)`, `server.shutdown()` | `net.wake_on_signal()`, or `server.wake_on_signal()` and `server.shutdown()` from [`std.http.server`](../std/http-server.md#stopping-cleanly), whose `next` gives `none` at a signal |
+| pywin32's `win32serviceutil.ServiceFramework` | `service()` from [`std.signal`](../std/signal.md#windows-services), which runs the program as a Windows service, its stop coming as `Terminate` |
 
 ```calx
 import std.fs.{temp_dir, write_text, make_dir_all, glob, remove_dir_all}
@@ -216,11 +221,17 @@ fn main() ! Error {
 | `uuid.uuid4()` | `Uuid.random()` from [`std.uuid`](../std/uuid.md) |
 | `requests.get(url).text` | `fetch(url)` from [`std.http`](../std/http.md), then `String.from_utf8(resp.body)`, ready for `parse` |
 | `requests.post(url, data={...}, files={...})` | `post_form(url, headers, Form.new().field(n, v).file(n, filename, bytes), timeout_ms, limit)` from [`std.http`](../std/http.md), a `multipart/form-data` body with its boundary and quoting done |
+| `httpx.Client(http2=True)`, `c.get(url)`, `r.http_version` | `get(url, headers, timeout_ms, limit, version: Version.Http2)` from [`std.http`](../std/http.md#http2), then `resp.version`. The whole program is one client, so connections are kept, and HTTP/2 requests to a host go over one at once. `http1=False` is `Version.Http2Only` |
+| `requests.Session()`, `r.elapsed` | Nothing for the session: every request keeps its connection for the next ([connections](../std/http.md#connections)). `resp.timings` has the time to connect, finish TLS and get the first byte, as curl's `-w` gives them ([timings](../std/http.md#timings)) |
 | `http.server.HTTPServer`, `BaseHTTPRequestHandler`, `do_GET` | `Server.listen(port)`, then `next()` for each request and `respond(req, res)` from [`std.http.server`](../std/http-server.md) |
 | `websockets.connect(url)`, `await ws.send(m)`, `await ws.recv()` | `connect(url)`, `ws.send_text(m)`, `ws.receive(timeout_ms)` from [`std.http.websocket`](../std/http-websocket.md), on a thread of its own rather than `asyncio` |
 | `websockets.serve(handler, host, port)`, `await ws.send(m)`, `async for m in ws` | `server.upgrade(req)`, `server.send_text(s, m)`, and each message from `server.next_event()` in [`std.http.server`](../std/http-server.md#websockets) |
 | A `text/event-stream` response kept open, written to as events happen | `server.stream(req)`, then `server.send_event(s, data)` ([event streams](../std/http-server.md#event-streams)) |
 | `hashlib.sha256(b).hexdigest()` | `hex(sha256(b))`, with [`std.hash`](../std/hash.md) and [`std.bytes`](../std/bytes.md) |
+| `hashlib.blake2b(b, digest_size=32, key=k).digest()`, `h.update(b)` | `blake2b(b, 32, key: k)`, or `Blake2b.new(32, key: k)` and `h.add(b)`, from [`std.hash`](../std/hash.md#blake2b) |
+| argon2-cffi's `ph = PasswordHasher()`, `ph.hash(pw)`, `ph.verify(h, pw)`, `ph.check_needs_rehash(h)` | `let ph = PasswordHasher()`, `ph.hash(pw)`, `verify_password(h, pw)` and `ph.needs_rehash(h)` from [`std.crypto`](../std/crypto.md#passwords), the same PHC strings, with `false` where `verify` raises |
+| `hmac.compare_digest(a, b)` | `compare_digest(a, b)` from [`std.crypto`](../std/crypto.md#passwords) |
+| cryptography's `Ed25519PrivateKey.from_private_bytes(seed)`, `k.sign(m)`, `Ed25519PublicKey.from_public_bytes(p).verify(sig, m)` | `Ed25519Key.from_seed(seed)!`, `k.sign(m)` and `Ed25519PublicKey.from_bytes(p)!.verify(m, sig)` from [`std.crypto`](../std/crypto.md#ed25519), with `false` where `verify` raises `InvalidSignature` |
 | `base64.b64encode(b)` | `base64(b)` from [`std.bytes`](../std/bytes.md) |
 | `zipfile`, `tarfile`, `gzip` | [`std.zip`](../std/zip.md), [`std.tar`](../std/tar.md), [`std.zlib`](../std/zlib.md) |
 | nbtlib's `nbtlib.load(p)`, `f.save()`, `f["Data"]["DayTime"]`, `str(tag)` | `NbtFile.open(p)`, `f.save(p)`, `f.root.get("Data")!.get("DayTime")` or a `match` in place, and `"{tag}"` from [`std.nbt`](../std/nbt.md), with vanilla's SNBT, and 20 to 66 times as fast on [its benchmark](../std/nbt.md#speed) |

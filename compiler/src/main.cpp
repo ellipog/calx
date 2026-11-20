@@ -103,6 +103,7 @@ const std::vector<HelpGroup>& help_groups() {
           {"version", "", "print the version, and where this calx is"}}},
         {"options",
          {{"--release", "", "optimize; the default, a debug build, builds fastest"},
+          {"--cpu", "LEVEL", "the processor a release build counts on: `x86-64-v2` for one without AVX2"},
           {"--lib", "", "build a library, which a program opens while it runs"},
           {"--staticlib", "", "build a static library and its C header, for a C, C++ or Rust program to link"},
           {"-o", "PATH", "where build and emit-c write"},
@@ -188,6 +189,9 @@ int usage(bool asked = false) {
         "\n"
         "options:\n"
         "  --release   optimize (the default is a debug build, which builds fastest)\n"
+        "  --cpu LEVEL the processor a release build counts on: x86-64, x86-64-v2, x86-64-v3 (the\n"
+        "            default) or x86-64-v4 on x86; armv8-a or armv8.2-a (the default) on Arm\n"
+        "            Linux and Windows. CALX_CPU says the same\n"
         "  --lib       build a library, which a program opens while it runs\n"
         "  --staticlib build a static library, and its C header, for a C, C++ or Rust program to link\n"
         "  -o PATH     where build and emit-c write\n"
@@ -206,6 +210,8 @@ struct Options {
     std::vector<std::string> program_args;
     std::vector<std::string> filters;  // `calx test`: the tests to run are those whose names hold one
     BuildMode mode = BuildMode::debug;
+    std::string cpu;    // `--cpu`: the processor level a release build counts on, or "" (CLX-381)
+    bool cpu_given = false;
     bool library = false;
     bool staticlib = false;  // `--staticlib`, for a host that isn't Calx (CLX-334)
     bool timings = false;
@@ -217,6 +223,22 @@ struct Options {
 
 double ms(std::chrono::steady_clock::time_point t) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+}
+
+// `--cpu LEVEL` or `--cpu=LEVEL` at `argv[i]`, its level put in `opt` (CLX-381): 1 if it was one, 0 if
+// it's something else, and 2, the status to stop with, if it has no level.
+int cpu_option(int argc, char** argv, int& i, Options& opt) {
+    std::string a = argv[i];
+    if (a.rfind("--cpu=", 0) == 0) opt.cpu = a.substr(6);
+    else if (a != "--cpu") return 0;
+    else opt.cpu = i + 1 < argc ? argv[++i] : "";
+    if (opt.cpu.empty()) {
+        std::fprintf(stderr, "calx: --cpu takes the processor level a release build counts on, such as `--cpu %s`\n",
+                     kTarget.arch == Arch::x86_64 ? "x86-64-v2" : cpu_levels(kTarget)[0]);
+        return 2;
+    }
+    opt.cpu_given = true;
+    return 1;
 }
 
 bool is_command(const std::string& c) {
@@ -236,10 +258,12 @@ int direct_run(int argc, char** argv, Options& opt) {
             opt.mode = BuildMode::release;
         } else if (a == "--timings") {
             opt.timings = true;
+        } else if (int got = cpu_option(argc, argv, i, opt)) {
+            if (got == 2) return 2;
         } else if (a == "--verbose") {
             opt.verbose = true;
         } else if (!a.empty() && a[0] == '-') {
-            std::fprintf(stderr, "calx: %s isn't an option for running a file; the options before one are --release, --timings and --verbose\n", a.c_str());
+            std::fprintf(stderr, "calx: %s isn't an option for running a file; the options before one are --release, --cpu, --timings and --verbose\n", a.c_str());
             return 2;
         } else {
             break;
@@ -403,8 +427,13 @@ struct Front {
 
     // Reads `file` and the modules it imports, runs their attributes, since what they generate is
     // checked with the rest (D124), and checks the program.
-    void check(std::uint32_t file, const Options& opt, bool color) {
+    // A file's imports can name the packages its calx.toml lists; `calx eval`'s code and `calx
+    // serve`'s program have none.
+    void check(std::uint32_t file, const Options& opt, bool color, bool packages = false) {
         loader = std::make_unique<ModuleLoader>(pc, sources, home, home_error);
+        PackageOptions po;
+        po.enabled = packages;
+        loader->use_packages(po);
         loader->load(file);
         if (!diags.has_errors()) {
             ExpandOptions xo;
@@ -729,11 +758,13 @@ std::string record_for(const Options& opt) {
                                     opt.library ? "library" : opt.staticlib ? "staticlib" : "",
                                     opt.line_directives ? "lines" : "",
                                     opt.mode == BuildMode::release ? "release" : "debug",
+                                    opt.cpu,
                                     home,
                                     env("PATH"),
                                     env("CALX_CC"),
                                     env("CALX_PROFILE"),
-                                    env("CALX_LTO")};
+                                    env("CALX_LTO"),
+                                    env("CALX_CPU")};
     std::vector<std::string_view> parts(key.begin(), key.end());
     return record_path(cache_dir(), parts);
 }
@@ -887,6 +918,8 @@ int main(int argc, char** argv) {
             opt.json = true;
         } else if (a == "--stdin") {
             opt.stdin_text = true;
+        } else if (int got = cpu_option(argc, argv, i, opt)) {
+            if (got == 2) return 2;
         } else if (a == "-o" && i + 1 < argc) {
             opt.output = argv[++i];
         } else if (!a.empty() && a[0] == '-' && !(opt.command == "eval" && opt.input.empty())) {
@@ -906,6 +939,22 @@ int main(int argc, char** argv) {
         }
     }
     if (opt.input.empty()) return usage();
+    // The processor level a release build counts on (CLX-381): `--cpu`, or CALX_CPU, or the
+    // default. A debug build counts on nothing past the architecture whatever it says, but a level
+    // the target hasn't is an error in either, so a typo isn't found only in the release build.
+    if (!opt.cpu_given) {
+        const char* v = std::getenv("CALX_CPU");
+        opt.cpu = v ? v : "";
+    }
+    std::string march;
+    if (!opt.cpu.empty()) {
+        std::string why;
+        march = cpu_flag(kTarget, opt.cpu, why);
+        if (march.empty()) {
+            std::fprintf(stderr, "calx: %s%s\n", why.c_str(), opt.cpu_given ? "" : " (from CALX_CPU)");
+            return 2;
+        }
+    }
     if (!opt.json) update_notice();
     if (opt.library && opt.command == "run") {
         std::fprintf(stderr, "calx: a library doesn't run by itself; build it with `calx build --lib`, and open it from a program\n");
@@ -971,7 +1020,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "calx: can't read %s\n", opt.input.c_str());
             return 1;
         }
-        front->check(file, opt, color);
+        front->check(file, opt, color, true);
     }
     Sources& sources = front->sources;
     Diagnostics& diags = front->diags;
@@ -1076,6 +1125,12 @@ int main(int argc, char** argv) {
     if (!record.empty() && !sources.any_generated() && diags.all().empty()) {
         for (const std::string& f : sources.loaded()) made.files.push_back(absolute_path(f));
         for (const std::string& d : front->loader->folders()) made.folders.push_back(absolute_path(d));
+        // Each place a calx.toml was looked for and wasn't, since one added there would be the
+        // program's, and calx.lock if this build wrote it (CLX-370).
+        const PackageSet& packages = front->loader->packages();
+        for (const std::string& f : packages.missing) made.missing.push_back(absolute_path(f));
+        for (const std::string& f : packages.written) made.files.push_back(absolute_path(f));
+        if (packages.any() && !file_exists(packages.lock)) made.missing.push_back(absolute_path(packages.lock));
         // Every constant's, used or not, since the checker checks each one's size.
         for (const Module* m : program.modules) {
             for (const Item* c : m->items) {
@@ -1091,7 +1146,7 @@ int main(int argc, char** argv) {
     // that uses std.regex half a millisecond (CLX-240).
     (void)front.release();
     BuildKind kind = opt.library ? BuildKind::library : opt.staticlib ? BuildKind::staticlib : BuildKind::program;
-    BuildResult b = build_program(tc, c_sources, opt.mode, kind, opt.verbose);
+    BuildResult b = build_program(tc, c_sources, opt.mode, kind, opt.verbose, march);
     building.reset();
     if (!b.ok) return 1;
     if (opt.staticlib) {

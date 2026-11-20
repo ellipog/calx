@@ -122,9 +122,10 @@ struct BuildResult {
 // cached under a hash of its C text, so only files whose text changed are compiled again, in
 // parallel (D64), at most one clang for each logical processor on the machine at a time
 // (run_parallel, CLX-205), and an unchanged program is reused whole. A library has no runtime of
-// its own: it takes the program's when the program opens it (D123).
+// its own: it takes the program's when the program opens it (D123). A release build counts on the
+// processor `cpu` names, clang's flag for it, or on the default with "" (CLX-381).
 BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c_sources, BuildMode mode, BuildKind kind,
-                          bool verbose);
+                          bool verbose, const std::string& cpu = "");
 
 // A hash of the compiler's own bytes, as 32 hex digits, kept in the cache under its size and time
 // so it's worked out once per build of the compiler.

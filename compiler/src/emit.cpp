@@ -230,7 +230,7 @@ private:
         out += "    if (r.tag != 0) {\n        cx_out_to was = cx_err_begin();\n        cx_print_str(" + str_const("error: ") +
                ");\n        " + show_value(et, e) + "\n        cx_print_newline();\n        cx_err_end(was);\n";
         if (!is_copy(et)) out += "        " + drop_fn(et) + "(&" + e + ");\n";
-        out += "        int status = cx_finish();\n        return status ? status : 1;\n    }\n    ";
+        out += "        cx_exit_status(1);\n        int status = cx_finish();\n        return status ? status : 1;\n    }\n    ";
         return out;
     }
 
