@@ -28,6 +28,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <wincred.h>
+/* The most a generic credential holds, 5 * 512 bytes, as the Windows SDK has it. mingw-w64's
+ * wincred.h, which the toolchain Calx ships builds with, still says 512, the limit before Windows
+ * Vista, so that one isn't used. */
+#define KEYRING_MAX_BLOB 2560
 #include <wchar.h>
 #else
 #include <dlfcn.h>
@@ -254,7 +258,7 @@ cx_i32 cx_keyring_set(const cx_u8* service, cx_usize service_len, const cx_u8* a
         }
         blob = (cx_u8*)w, blob_len = (size_t)units * 2;
     }
-    if (blob_len > CRED_MAX_CREDENTIAL_BLOB_SIZE) {
+    if (blob_len > KEYRING_MAX_BLOB) {
         r = fail(K_TOO_LONG, 0, "");
     } else {
         CREDENTIALW c;
