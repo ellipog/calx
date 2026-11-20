@@ -485,9 +485,16 @@ cx_i32 cx_keyring_set(const cx_u8* service, cx_usize service_len, const cx_u8* a
     if (!data || !change) {
         r = fail(K_OS, 0, "out of memory");
     } else {
-        /* Changing the secret keeps who may read it; adding one lets this program. */
+        /* Changing the secret keeps who may read it; adding one lets this program. An update to
+         * empty data leaves the old secret in place, so an empty one replaces the item instead. */
         sec.dict_set(change, sec.data, data);
-        OSStatus s = sec.item_update(q, change);
+        OSStatus s;
+        if (secret_len == 0) {
+            s = sec.item_delete(q);
+            if (s == errSecSuccess) s = errSecItemNotFound;
+        } else {
+            s = sec.item_update(q, change);
+        }
         if (s == errSecItemNotFound) {
             sec.dict_set(q, sec.data, data);
             s = sec.item_add(q, NULL);
