@@ -1787,8 +1787,11 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     if (parts_ok && calls({"cx_text_trim(", "cx_text_replace", "cx_text_repeat", "cx_text_pad", "cx_text_split(", "cx_text_split_first(", "cx_text_split_into(", "cx_text_split_whitespace(", "cx_text_lines(", "cx_text_join", "cx_text_words"})) {
         parts_ok = part("calx_text.c");
     }
-    if (parts_ok && calls({"cx_digest_"})) parts_ok = part("calx_digest.c");
+    // argon2 hashes with BLAKE2b and Ed25519 with SHA-512, both in calx_digest.c.
+    if (parts_ok && calls({"cx_digest_", "cx_argon2_", "cx_ed25519_"})) parts_ok = part("calx_digest.c");
     if (parts_ok && calls({"cx_crypto_", "cx_cfb8_", "cx_rsa_"})) parts_ok = part("calx_crypto.c");
+    if (parts_ok && calls({"cx_argon2_"})) parts_ok = part("calx_argon2.c");
+    if (parts_ok && calls({"cx_ed25519_"})) parts_ok = part("calx_ed25519.c");
     if (parts_ok && calls({"cx_zlib_", "cx_inflate", "cx_deflate"})) parts_ok = part("calx_zlib.c");
     if (parts_ok && calls({"cx_http_"})) parts_ok = part("calx_http.c");
     if (parts_ok && calls({"cx_lz4_"})) parts_ok = part("calx_lz4.c");

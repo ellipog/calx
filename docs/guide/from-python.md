@@ -221,6 +221,10 @@ fn main() ! Error {
 | `websockets.serve(handler, host, port)`, `await ws.send(m)`, `async for m in ws` | `server.upgrade(req)`, `server.send_text(s, m)`, and each message from `server.next_event()` in [`std.http.server`](../std/http-server.md#websockets) |
 | A `text/event-stream` response kept open, written to as events happen | `server.stream(req)`, then `server.send_event(s, data)` ([event streams](../std/http-server.md#event-streams)) |
 | `hashlib.sha256(b).hexdigest()` | `hex(sha256(b))`, with [`std.hash`](../std/hash.md) and [`std.bytes`](../std/bytes.md) |
+| `hashlib.blake2b(b, digest_size=32, key=k).digest()`, `h.update(b)` | `blake2b(b, 32, key: k)`, or `Blake2b.new(32, key: k)` and `h.add(b)`, from [`std.hash`](../std/hash.md#blake2b) |
+| argon2-cffi's `ph = PasswordHasher()`, `ph.hash(pw)`, `ph.verify(h, pw)`, `ph.check_needs_rehash(h)` | `let ph = PasswordHasher()`, `ph.hash(pw)`, `verify_password(h, pw)` and `ph.needs_rehash(h)` from [`std.crypto`](../std/crypto.md#passwords), the same PHC strings, with `false` where `verify` raises |
+| `hmac.compare_digest(a, b)` | `compare_digest(a, b)` from [`std.crypto`](../std/crypto.md#passwords) |
+| cryptography's `Ed25519PrivateKey.from_private_bytes(seed)`, `k.sign(m)`, `Ed25519PublicKey.from_public_bytes(p).verify(sig, m)` | `Ed25519Key.from_seed(seed)!`, `k.sign(m)` and `Ed25519PublicKey.from_bytes(p)!.verify(m, sig)` from [`std.crypto`](../std/crypto.md#ed25519), with `false` where `verify` raises `InvalidSignature` |
 | `base64.b64encode(b)` | `base64(b)` from [`std.bytes`](../std/bytes.md) |
 | `zipfile`, `tarfile`, `gzip` | [`std.zip`](../std/zip.md), [`std.tar`](../std/tar.md), [`std.zlib`](../std/zlib.md) |
 | nbtlib's `nbtlib.load(p)`, `f.save()`, `f["Data"]["DayTime"]`, `str(tag)` | `NbtFile.open(p)`, `f.save(p)`, `f.root.get("Data")!.get("DayTime")` or a `match` in place, and `"{tag}"` from [`std.nbt`](../std/nbt.md), with vanilla's SNBT, and 20 to 66 times as fast on [its benchmark](../std/nbt.md#speed) |
