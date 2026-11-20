@@ -1,6 +1,6 @@
 ---
 title: Modules
-description: Files as modules, where the compiler finds them, imports, pub, where impls go, and how each module becomes its own C file.
+description: Files as modules, where the compiler finds them, imports, pub, where impls go, how each module becomes its own C file, and the modules of packages.
 ---
 
 # Modules
@@ -222,4 +222,15 @@ Since a file holds exactly what it uses, its text changes only when something it
 
 A function is `static` unless another module's file calls it, which lets clang inline it and drop it. Release builds inline across files too, when they link (ThinLTO, D99), so splitting code into modules costs nothing at run time. An item's C name starts with its module's: `Square` in `geo.shapes` is `geo_shapes__Square`. `calx emit-c` prints each file after a line `// ---- NAME.c`, and `-o` with a folder writes them there.
 
-Packages (`calx.toml`) are designed but not built yet ([spec](../CALX_SPEC.md#modules-and-builds)).
+## Packages
+
+A package is a folder with a `calx.toml` giving its name, its version and the packages it depends on, by path or by git URL ([packages](../guide/packages.md)). The calx.toml nearest the main file, in its folder or one above it, is the program's, and the program can import the modules of each package it lists:
+
+- Module `x.y` of the package `spar` is the file `x/y.calx` under the folder spar's calx.toml is in, and the program imports it as `spar.x.y`. Spar's file `spar.calx` is the module `spar`.
+- In a package's own modules, names are the package's: in spar, `import x.y` is its `x/y.calx`, and a module in a folder starts with its `module` line as in any program, `module x.y`. A name a package's calx.toml lists is that package's, in that package only.
+- A module's whole name, in errors and in C, is the one the program imports it by, so spar's `window` is `spar.window`, and its C names start with `spar_window__`.
+- A package can import only the packages its own calx.toml lists. One the program has only through another package is an error that says to list it.
+- A program has one package of each name: two dependencies named `util` that are different folders, or different commits, are an error naming both. Two that are the same folder, or the same commit of the same repository, are one package.
+- A module of the program's own can't have a package's name, and packages can't depend on each other in a cycle.
+
+`std` isn't one of them: it's the standard library's name, which no package can have. With no calx.toml above the main file, a program is its own modules, as above. How git dependencies are fetched and pinned is in [the calx command](command.md#packages).

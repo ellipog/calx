@@ -1,0 +1,65 @@
+// An attribute a package defines works on the program's types, and on the package's own (CLX-370):
+// the program that runs attributes imports each one's module by its whole name, `show.text`.
+// file: main.calx
+import show.text.{show}
+import show.{Pair}
+
+@show
+struct Point {
+    x: i32
+    y: i32
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 }
+    p.show()
+    // out: x = 3
+    // out: y = 4
+    let q = Pair { a: 1, b: 2 }
+    q.show()
+    // out: a = 1
+    // out: b = 2
+}
+
+// file: calx.toml
+[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+show = { path = "libs/show" }
+
+// file: libs/show/calx.toml
+[package]
+name = "show"
+version = "0.1.0"
+
+// file: libs/show/show.calx
+import text.{show}
+
+@show
+pub struct Pair {
+    pub a: i32
+    pub b: i32
+}
+
+// file: libs/show/text.calx
+import std.meta.{StructDecl, Generated}
+
+/// A `show` method that prints each field.
+@attribute
+pub fn show(decl: StructDecl) -> Generated {
+    var lines = String()
+    for f in decl.fields {
+        lines.push_str(#"        println("#{f.name} = {self.#{f.name}}")"#)
+        lines.push('\n')
+    }
+    var g = Generated.new()
+    g.add(#"
+        impl #{decl.name} {
+            pub fn show(self) {
+        #{lines}    }
+        }
+        "#)
+    return g
+}

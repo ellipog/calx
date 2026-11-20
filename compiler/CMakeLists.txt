@@ -19,6 +19,8 @@ add_executable(calx
     src/lexer.cpp
     src/parser.cpp
     src/modules.cpp
+    src/packages.cpp
+    src/toml.cpp
     src/expand.cpp
     src/moves.cpp
     src/types.cpp

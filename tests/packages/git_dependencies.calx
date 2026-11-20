@@ -1,0 +1,193 @@
+// Packages from git (CLX-370): a dependency by `git` URL and a tag, rev or branch is fetched into
+// the cache, and calx.lock pins it to a commit, which later builds use without git, offline too.
+// A branch moving on doesn't move a pinned build; taking its entry out of calx.lock does. The
+// repository is a bare one the test makes and pushes to, reached by a `file://` URL, and the cache
+// is one of the test's own, CALX_CACHE, so nothing is fetched from or left anywhere else.
+import std.env.{variable}
+import std.fs.{make_dir_all, read_text, remove_dir_all, remove_file, rename, temp_dir, write_text}
+import std.process.{Command}
+
+// Runs git in `dir`, with an identity and settings of its own, so a machine's git settings, such
+// as signing commits, change nothing. Its output, trimmed.
+fn git_text(args: List<String>, dir: String) -> String {
+    var all: List<String> = ["-c", "user.name=calx", "-c", "user.email=calx@example.com", "-c", "commit.gpgsign=false",
+        "-c", "tag.gpgsign=false", "-c", "core.autocrlf=false", "-c", "init.defaultBranch=main"]
+    for a in args {
+        all.push(a.copy())
+    }
+    let o = Command.new("git").args(all).dir(dir).output()!
+    if not o.status.success() {
+        panic("git {args[0]} failed: {o.error_text()}")
+    }
+    return o.text().trim()
+}
+
+struct Calx {
+    exe: String
+    cache: String
+    tmp: String
+    url: String
+    missing: String
+}
+
+impl Calx {
+    // What `calx ARGS` in `dir` printed, or its first error without its column, which depends on
+    // how long the URL is, with the URLs as `<url>` and `<missing>` and the test's folder as
+    // `<tmp>`, and `(fetched)` after it if it fetched anything.
+    fn run(self, args: List<String>, dir: String) -> String {
+        match Command.new(self.exe.copy()).args(args).dir(dir).env("CALX_CACHE", self.cache.copy()).output() {
+            ok(o) => {
+                let said = o.error_text().replace(self.url, "<url>").replace(self.missing, "<missing>").replace("\\", "/").replace(self.tmp.replace("\\", "/"), "<tmp>")
+                let fetched = if said.contains("Fetching gitdep") { " (fetched)" } else { "" }
+                if o.status.success() {
+                    return "{o.text().trim()}{fetched}"
+                }
+                for line in said.lines() {
+                    match line.find(": error: ") {
+                        some(at) => {
+                            let place = line[0..at]
+                            let column = place.find_last(":") ?? at
+                            var message = line[at + 9..line.len()]
+                            // What git says after the URL differs from one version of git to the next.
+                            if message.starts_with("can't fetch") {
+                                match message.find(">: ") {
+                                    some(cut) => message = "{message[0..cut + 2]} ...",
+                                    none => {},
+                                }
+                            }
+                            return "{place[0..column]}: {message}"
+                        },
+                        none => {},
+                    }
+                }
+                return said
+            },
+            err(e) => return "{e}",
+        }
+    }
+}
+
+// The URL of the folder at `path`.
+fn file_url(path: String) -> String {
+    let p = path.replace("\\", "/")
+    return if p.starts_with("/") { "file://{p}" } else { "file:///{p}" }
+}
+
+// The lines of the app's calx.lock that say what it's pinned to, and whether its commit is `want`.
+fn lock(app: String, want: String) -> String {
+    let text = read_text("{app}/calx.lock")! ?? String()
+    var out = String()
+    for line in text.lines() {
+        if line.starts_with("tag") or line.starts_with("branch") or line.starts_with("rev") {
+            out = "{out}{line} "
+        }
+    }
+    let pinned = text.contains("commit = \"{want}\"")
+    return "{out}{pinned}"
+}
+
+fn toml(url: String, pin: String) -> String {
+    return "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\ngitdep = \{ git = \"{url}\"{pin} \}\n"
+}
+
+fn source(word: String) -> String {
+    return "pub fn hello() -> String \{\n    return String(\"{word}\")\n\}\n"
+}
+
+fn main() {
+    let tmp = temp_dir()!
+    let origin = "{tmp}/origin.git"
+    let work = "{tmp}/work"
+    let app = "{tmp}/app"
+    make_dir_all(work)!
+    make_dir_all(app)!
+    git(["init", "--quiet", "--bare", origin.copy()], tmp.copy())
+    git(["init", "--quiet"], work.copy())
+    write_text("{work}/calx.toml", "[package]\nname = \"gitdep\"\nversion = \"1.0.0\"\n")!
+    write_text("{work}/gitdep.calx", source("one"))!
+    git(["add", "-A"], work.copy())
+    git(["commit", "--quiet", "-m", "one"], work.copy())
+    git(["tag", "v1"], work.copy())
+    write_text("{work}/gitdep.calx", source("two"))!
+    git(["commit", "--quiet", "-am", "two"], work.copy())
+    git(["tag", "v2"], work.copy())
+    git(["push", "--quiet", origin.copy(), "HEAD:refs/heads/main", "--tags"], work.copy())
+    git(["checkout", "--quiet", "-b", "dev"], work.copy())
+    write_text("{work}/gitdep.calx", source("dev one"))!
+    git(["commit", "--quiet", "-am", "dev one"], work.copy())
+    git(["push", "--quiet", origin.copy(), "HEAD:refs/heads/dev"], work.copy())
+    let v1 = git_text(["rev-parse", "v1"], work.copy())
+    let v2 = git_text(["rev-parse", "v2"], work.copy())
+    let dev1 = git_text(["rev-parse", "HEAD"], work.copy())
+    let url = file_url(origin)
+    let c = Calx { exe: variable("CALX") ?? String("calx"), cache: "{tmp}/cache", tmp: tmp.copy(), url: url.copy(), missing: file_url("{tmp}/missing.git") }
+    write_text("{app}/main.calx", "import gitdep.\{hello\}\n\nfn main() \{\n    println(hello())\n\}\n")!
+
+    // Fetched, pinned to v1's commit in calx.lock, then built from the cache.
+    write_text("{app}/calx.toml", toml(url.copy(), ", tag = \"v1\""))!
+    println(c.run(["run", "main.calx"], app.copy()))    // out: one (fetched)
+    println(lock(app.copy(), v1.copy()))    // out: tag = "v1" true
+    println(c.run(["run", "main.calx"], app.copy()))    // out: one
+
+    // Offline: with the repository gone, what's pinned and fetched builds as it did.
+    rename(origin, "{tmp}/away.git")!
+    println(c.run(["run", "main.calx"], app.copy()))    // out: one
+    println(c.run(["check", "main.calx"], app.copy()))    // out:
+    // A tag the cache's clone has already is found in it, offline too.
+    write_text("{app}/calx.toml", toml(url.copy(), ", tag = \"v2\""))!
+    println(c.run(["run", "main.calx"], app.copy()))    // out: two
+    println(lock(app.copy(), v2.copy()))    // out: tag = "v2" true
+    // A branch is fetched to find its newest commit, which can't be done offline.
+    write_text("{app}/calx.toml", toml(url.copy(), ", branch = \"dev\""))!
+    println(c.run(["check", "main.calx"], app.copy()))    // out: calx.toml:6: can't fetch `gitdep` from <url>: ...
+    rename("{tmp}/away.git", origin)!
+
+    // A branch is pinned to the commit it was on, and stays there when the branch moves on, until
+    // its entry is taken out of calx.lock.
+    println(c.run(["run", "main.calx"], app.copy()))    // out: dev one (fetched)
+    println(lock(app.copy(), dev1.copy()))    // out: branch = "dev" true
+    write_text("{work}/gitdep.calx", source("dev two"))!
+    git(["commit", "--quiet", "-am", "dev two"], work.copy())
+    git(["push", "--quiet", origin.copy(), "HEAD:refs/heads/dev"], work.copy())
+    println(c.run(["run", "main.calx"], app.copy()))    // out: dev one
+    remove_file("{app}/calx.lock")!
+    println(c.run(["run", "main.calx"], app.copy()))    // out: dev two (fetched)
+
+    // A commit, by the start of its hash.
+    write_text("{app}/calx.toml", toml(url.copy(), ", rev = \"{v1[0..10]}\""))!
+    println(c.run(["run", "main.calx"], app.copy()))    // out: one
+    println(lock(app.copy(), v1.copy()).replace(v1[0..10], "<v1>"))    // out: rev = "<v1>" true
+
+    // What isn't there.
+    write_text("{app}/calx.toml", toml(url.copy(), ", tag = \"v9\""))!
+    println(c.run(["check", "main.calx"], app.copy()))    // out: calx.toml:6: <url> has no tag `v9`; its tags are v1, v2
+    write_text("{app}/calx.toml", toml(url.copy(), ", branch = \"nope\""))!
+    println(c.run(["check", "main.calx"], app.copy()))    // out: calx.toml:6: <url> has no branch `nope`; its branches are dev, main
+    write_text("{app}/calx.toml", toml(url.copy(), ", rev = \"deadbeef\""))!
+    println(c.run(["check", "main.calx"], app.copy()))    // out: calx.toml:6: <url> has no commit `deadbeef`
+    write_text("{app}/calx.toml", toml(url.copy(), ", rev = \"v1\""))!
+    println(c.run(["check", "main.calx"], app.copy()))    // out: calx.toml:6: a `rev` is a commit's hash, or at least its first 4 digits; for a tag or a branch, give `tag` or `branch`
+    write_text("{app}/calx.toml", toml(file_url("{tmp}/missing.git"), ", tag = \"v1\""))!
+    let gone = c.run(["check", "main.calx"], app.copy())
+    println(gone)    // out: calx.toml:6: can't fetch `gitdep` from <missing>: ...
+
+    // calx.lock pinning a commit the repository doesn't have, and one this calx can't read.
+    write_text("{app}/calx.toml", toml(url.copy(), ", tag = \"v1\""))!
+    write_text("{app}/calx.lock", "version = 1\n\n[[git]]\nname = \"gitdep\"\nurl = \"{url}\"\ntag = \"v1\"\ncommit = \"0000000000000000000000000000000000000000\"\n")!
+    println(c.run(["check", "main.calx"], app.copy()))    // out: calx.toml:6: calx.lock pins `gitdep` to the commit 000000000000, which <url> doesn't have; take `gitdep`'s entry out of calx.lock to pin it again
+    write_text("{app}/calx.lock", "version = 2\n")!
+    println(c.run(["check", "main.calx"], app.copy()))    // out: calx.lock:1: calx.lock needs `version = 1`, the form this calx reads; calx.lock is written by calx, so delete it to have it written again
+    remove_file("{app}/calx.lock")!
+
+    // The same package by git and by path is two packages of one name.
+    make_dir_all("{tmp}/mid")!
+    write_text("{tmp}/mid/calx.toml", "[package]\nname = \"mid\"\nversion = \"0.1.0\"\n\n[dependencies]\ngitdep = \{ path = \"../work\" \}\n")!
+    let with_mid = toml(url.copy(), ", tag = \"v1\"")
+    write_text("{app}/calx.toml", "{with_mid}mid = \{ path = \"../mid\" \}\n")!
+    println(c.run(["check", "main.calx"], app.copy()).replace(v1[0..12], "<v1>"))    // out: <tmp>/mid/calx.toml:6: two packages are named `gitdep`: `<tmp>/work`, from `mid`'s calx.toml, and `<url> at tag `v1` (<v1>)`, from `app`'s calx.toml, version 1.0.0; a program has one package of each name, so point both at the same one
+    remove_dir_all(tmp)!
+}
+
+fn git(args: List<String>, dir: String) {
+    _ = git_text(args, dir)
+}

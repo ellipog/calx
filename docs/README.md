@@ -20,13 +20,14 @@ Installing Calx, then learning it by building one small program, `stash`, which 
 3. [Reading the commands](guide/reading-input.md): standard input a line at a time, optionals and `while let`, and splitting a line into words
 4. [What the commands mean](guide/commands.md): commands as an enum, parsing numbers, functions that fail, matching on text, and copying out of a list
 5. [The stash](guide/stash.md): a sorted map, parameters that own or change what they're given, `try`, the whole program, and modules
-6. [Coming from Python](guide/from-python.md): the Python a script reaches for next to the Calx that does the same, from text, lists and files to JSON, CSV, the web and dates, and where Calx differs on purpose
+6. [Packages](guide/packages.md): code from another folder or git repository, with `calx.toml`, path and git dependencies, `calx.lock`, and builds that work offline
+7. [Coming from Python](guide/from-python.md): the Python a script reaches for next to the Calx that does the same, from text, lists and files to JSON, CSV, the web and dates, and where Calx differs on purpose
 
 ### Reference
 
 What's built, one page per feature:
 
-1. [The calx command](reference/command.md): new, check, build, run, test, eval, fmt, emit-c, how builds stay fast, cleaning, uninstalling, completions, and errors for editors
+1. [The calx command](reference/command.md): new, check, build, run, test, eval, fmt, emit-c, how builds stay fast, packages and calx.lock, cleaning, uninstalling, completions, and errors for editors
 2. [Editor support](reference/editors.md): the VS Code extension, and the grammar, error format and formatter other editors can use
 3. [Syntax](reference/syntax.md): files, comments, names, keywords, literals, raw strings and operators
 4. [Types](reference/types.md): the primitive types, arrays, `Copy`, and where the other types are
@@ -58,7 +59,7 @@ What's built, one page per feature:
 30. [Generics](reference/generics.md): generic functions and types, inference, bounds, `Copy`, `Equal`, `Display`, `Hash` and `JavaHash`, and their C
 31. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, naming the interface, generic interfaces, and operators on a type of one's own
 32. [Comparing and printing](reference/comparing.md): the derived `Equal` and `Display`, `==` and `{x}` on every type, and their bounds
-33. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
+33. [Modules](reference/modules.md): files as modules, imports, `pub`, one C file per module, and the modules of packages
 34. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, formats such as `{x:.2}` and `{n:>8}`, assert and panic, and `@track_caller`
 35. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers, and calling C
 36. [Libraries](reference/libraries.md): `calx build --lib`, `@export`, opening a library while a program runs, types checked down to the fields, and the one runtime they share
