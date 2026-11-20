@@ -23,7 +23,7 @@ Status: Calcite's Phases 0 to 5 have passed their gates, the compiler's core, th
 - **Compression and archives:** `std.zlib`, `std.zstd`, `std.xz`, `std.lz4`, `std.zip` and `std.tar`.
 - **Numbers:** `std.math`, `std.bigint`, `std.decimal`, `std.stats`, `std.random` and `std.java.math`.
 - **Networking and threads:** `std.net` (TCP driven by events on IOCP and epoll), `std.http`, `std.http.server` and `std.http.websocket`, `std.mail` (messages between actors), `std.thread` and `std.pool`.
-- **The rest:** `std.crypto`, `std.hash`, `std.image` (PNG and JPEG), `std.time`, `std.meta` (declarations for attributes), `std.build`, and, for Calcite, `std.palette`, `std.text.mutf8` and the Java-compatible collections and strings.
+- **The rest:** `std.crypto`, `std.hash`, `std.keyring` (the system's credential store), `std.image` (PNG and JPEG), `std.time`, `std.meta` (declarations for attributes), `std.build`, and, for Calcite, `std.palette`, `std.text.mutf8` and the Java-compatible collections and strings.
 
 The [reference](docs/README.md#reference) lists what's built.
 

@@ -1791,6 +1791,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     if (parts_ok && calls({"cx_crypto_", "cx_cfb8_", "cx_rsa_"})) parts_ok = part("calx_crypto.c");
     if (parts_ok && calls({"cx_zlib_", "cx_inflate", "cx_deflate"})) parts_ok = part("calx_zlib.c");
     if (parts_ok && calls({"cx_http_"})) parts_ok = part("calx_http.c");
+    if (parts_ok && calls({"cx_keyring_"})) parts_ok = part("calx_keyring.c");
     if (parts_ok && calls({"cx_lz4_"})) parts_ok = part("calx_lz4.c");
     if (parts_ok && calls({"cx_log_"})) parts_ok = part("calx_log.c");
     if (parts_ok && calls({"cx_xz_"})) parts_ok = part("calx_xz.c");

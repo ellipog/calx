@@ -222,6 +222,7 @@ fn main() ! Error {
 | A `text/event-stream` response kept open, written to as events happen | `server.stream(req)`, then `server.send_event(s, data)` ([event streams](../std/http-server.md#event-streams)) |
 | `hashlib.sha256(b).hexdigest()` | `hex(sha256(b))`, with [`std.hash`](../std/hash.md) and [`std.bytes`](../std/bytes.md) |
 | `base64.b64encode(b)` | `base64(b)` from [`std.bytes`](../std/bytes.md) |
+| `keyring.set_password(s, u, pw)`, `get_password`, `delete_password` | `set(s, u, pw)`, `get(s, u)` and `delete(s, u)` from [`std.keyring`](../std/keyring.md), in Credential Manager, the Keychain or the Secret Service where keyring keeps them, with `none` and `false` for a secret that isn't there and `Unavailable` where there's no store |
 | `zipfile`, `tarfile`, `gzip` | [`std.zip`](../std/zip.md), [`std.tar`](../std/tar.md), [`std.zlib`](../std/zlib.md) |
 | nbtlib's `nbtlib.load(p)`, `f.save()`, `f["Data"]["DayTime"]`, `str(tag)` | `NbtFile.open(p)`, `f.save(p)`, `f.root.get("Data")!.get("DayTime")` or a `match` in place, and `"{tag}"` from [`std.nbt`](../std/nbt.md), with vanilla's SNBT, and 20 to 66 times as fast on [its benchmark](../std/nbt.md#speed) |
 | nbtlib's `nbtlib.parse_nbt(text)`, `serialize_tag(tag, indent=4)` | `parse_snbt(text)!` and `tag.to_pretty_snbt()` from [`std.nbt`](../std/nbt.md#snbt), which read and lay out SNBT as vanilla 26.3 does |

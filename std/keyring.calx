@@ -1,0 +1,160 @@
+/// Secrets kept in the system's own credential store, as Python's keyring keeps them: Credential
+/// Manager on Windows, the Keychain on macOS, and the Secret Service on Linux, through libsecret.
+/// Each secret is kept under a service and an account, such as `"kern"` and `"rcon:survival"`, so a
+/// program's passwords and tokens stay out of its config files.
+///
+/// A headless Linux server often has no Secret Service, or not libsecret, and a Windows service's
+/// logon session has no Credential Manager. Then every call fails with `Unavailable`, and a daemon
+/// keeps its secrets in an encrypted file of its own instead.
+module std.keyring
+
+extern "C" {
+    fn cx_keyring_set(service: *const u8, service_len: usize, account: *const u8, account_len: usize, secret: *const u8, secret_len: usize, text: u32) -> i32
+    fn cx_keyring_get(service: *const u8, service_len: usize, account: *const u8, account_len: usize, text: u32) -> i32
+    fn cx_keyring_delete(service: *const u8, service_len: usize, account: *const u8, account_len: usize) -> i32
+    fn cx_keyring_result_len() -> usize
+    fn cx_keyring_result_copy(out: *u8)
+    fn cx_keyring_error_code() -> i32
+}
+
+/// Why the store didn't keep, give or delete a secret. A secret that isn't there isn't an error:
+/// `get` gives `none` for it and `delete` gives `false`.
+pub enum Error {
+    /// There's no store to keep secrets in, and why: on Linux, libsecret isn't installed, there's
+    /// no D-Bus session bus, or nothing on it provides the Secret Service; on Windows, the logon
+    /// session has none, as a service's hasn't. A program that can do without falls back to a
+    /// file of its own.
+    Unavailable(String)
+    /// The store is there and said no, and why: the keychain or collection is locked and couldn't
+    /// be unlocked without asking, or the person asked said no.
+    Denied(String)
+    /// The secret is longer than the store takes. Windows takes 2560 bytes, which is 1280 UTF-16
+    /// units of text.
+    TooLong
+    /// `get` found a secret that isn't text, such as one `set_bytes` kept: read it with
+    /// `get_bytes`.
+    NotText
+    /// The service or account can't name a secret, and why: the service is empty, one of them
+    /// holds a NUL, or they're longer than the store takes.
+    BadName(String)
+    /// Something else, with the system's code and its words: a Windows error, a macOS OSStatus, or
+    /// libsecret's code.
+    Os(i32, String)
+}
+
+/// What went wrong, in words, with the system's own words for it where there are some:
+/// `no credential store: libsecret isn't installed, which the Secret Service is reached through`.
+impl Display for Error {
+    fn show(self) {
+        match self {
+            Unavailable(why) => print("no credential store: {why}"),
+            Denied(why) => print("the credential store refused: {why}"),
+            TooLong => print("the secret is longer than the credential store takes"),
+            NotText => print("the secret isn't text"),
+            BadName(why) => print("not a name for a secret: {why}"),
+            Os(code, why) => print("the credential store failed: {why} (error {code})"),
+        }
+    }
+}
+
+/// Keeps `secret` as the secret of `account` of `service`, replacing the one there was, as
+/// Python's `keyring.set_password(service, account, secret)`.
+///
+/// It's kept as each system's tools keep text, so they and keyring read it: as UTF-16 on Windows,
+/// and UTF-8 elsewhere.
+pub fn set(service: String, account: String, secret: String) ! Error {
+    try check(service, account)
+    let code = unsafe { cx_keyring_set(service.as_ptr(), service.len(), account.as_ptr(), account.len(), secret.as_ptr(), secret.len(), 1) }
+    try outcome(code)
+}
+
+/// The secret of `account` of `service`, or `none` if there isn't one, as Python's
+/// `keyring.get_password(service, account)`. Fails with `NotText` for a secret that isn't text in
+/// the form `set` keeps it.
+pub fn get(service: String, account: String) -> String? ! Error {
+    let bytes = try read(service, account, 1)
+    return match bytes {
+        some(b) => match String.from_utf8(b) {
+            some(text) => some(text),
+            none => fail Error.NotText,
+        },
+        none => none,
+    }
+}
+
+/// Keeps `secret` as the secret of `account` of `service`, as `set` does, as bytes as they are,
+/// for a key rather than a password.
+pub fn set_bytes(service: String, account: String, secret: List<u8>) ! Error {
+    try check(service, account)
+    let code = unsafe { cx_keyring_set(service.as_ptr(), service.len(), account.as_ptr(), account.len(), secret.as_ptr(), secret.len(), 0) }
+    try outcome(code)
+}
+
+/// The secret of `account` of `service` as the bytes the store keeps, or `none` if there isn't
+/// one. For a secret `set_bytes` kept.
+pub fn get_bytes(service: String, account: String) -> List<u8>? ! Error {
+    return try read(service, account, 0)
+}
+
+/// Deletes the secret of `account` of `service`, and says whether there was one, as Python's
+/// `keyring.delete_password(service, account)`, which raises an error when there isn't.
+pub fn delete(service: String, account: String) -> bool ! Error {
+    try check(service, account)
+    let code = unsafe { cx_keyring_delete(service.as_ptr(), service.len(), account.as_ptr(), account.len()) }
+    if code == 1 {
+        return false
+    }
+    try outcome(code)
+    return true
+}
+
+// Whether the store can take the names, which it's given ended by a NUL.
+fn check(service: String, account: String) ! Error {
+    if service.is_empty() {
+        fail Error.BadName("the service is empty")
+    }
+    for name in [service.copy(), account.copy()] {
+        for i in 0usize..name.len() {
+            if name.byte_at(i) == 0 {
+                fail Error.BadName("a name holds a NUL")
+            }
+        }
+    }
+}
+
+fn read(service: String, account: String, text: u32) -> List<u8>? ! Error {
+    try check(service, account)
+    let code = unsafe { cx_keyring_get(service.as_ptr(), service.len(), account.as_ptr(), account.len(), text) }
+    if code == 1 {
+        return none
+    }
+    try outcome(code)
+    return some(result())
+}
+
+// The runtime's result: the secret it read, or the words for what went wrong.
+fn result() -> List<u8> {
+    var bytes = List<u8>()
+    unsafe {
+        let n = cx_keyring_result_len()
+        bytes.reserve(n)
+        cx_keyring_result_copy(bytes.as_mut_ptr())
+        bytes.set_len(n)
+    }
+    return bytes
+}
+
+fn outcome(code: i32) ! Error {
+    if code == 0 {
+        return
+    }
+    let words = String.from_utf8(result()) ?? String()
+    fail match code {
+        2 => Error.Unavailable(words),
+        3 => Error.Denied(words),
+        4 => Error.TooLong,
+        5 => Error.NotText,
+        6 => Error.BadName(words),
+        _ => Error.Os(unsafe { cx_keyring_error_code() }, words),
+    }
+}
