@@ -400,8 +400,13 @@ struct Front {
 
     // Reads `file` and the modules it imports, runs their attributes, since what they generate is
     // checked with the rest (D124), and checks the program.
-    void check(std::uint32_t file, const Options& opt, bool color) {
+    // A file's imports can name the packages its calx.toml lists; `calx eval`'s code and `calx
+    // serve`'s program have none.
+    void check(std::uint32_t file, const Options& opt, bool color, bool packages = false) {
         loader = std::make_unique<ModuleLoader>(pc, sources, home, home_error);
+        PackageOptions po;
+        po.enabled = packages;
+        loader->use_packages(po);
         loader->load(file);
         if (!diags.has_errors()) {
             ExpandOptions xo;
@@ -928,7 +933,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "calx: can't read %s\n", opt.input.c_str());
             return 1;
         }
-        front->check(file, opt, color);
+        front->check(file, opt, color, true);
     }
     Sources& sources = front->sources;
     Diagnostics& diags = front->diags;
@@ -1030,6 +1035,12 @@ int main(int argc, char** argv) {
     if (!record.empty() && !sources.any_generated() && diags.all().empty()) {
         for (const std::string& f : sources.loaded()) made.files.push_back(absolute_path(f));
         for (const std::string& d : front->loader->folders()) made.folders.push_back(absolute_path(d));
+        // Each place a calx.toml was looked for and wasn't, since one added there would be the
+        // program's, and calx.lock if this build wrote it (CLX-370).
+        const PackageSet& packages = front->loader->packages();
+        for (const std::string& f : packages.missing) made.missing.push_back(absolute_path(f));
+        for (const std::string& f : packages.written) made.files.push_back(absolute_path(f));
+        if (packages.any() && !file_exists(packages.lock)) made.missing.push_back(absolute_path(packages.lock));
         // Every constant's, used or not, since the checker checks each one's size.
         for (const Module* m : program.modules) {
             for (const Item* c : m->items) {

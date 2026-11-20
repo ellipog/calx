@@ -425,3 +425,4 @@ The stash used most of what everyday Calx code needs. The [reference](../README.
 - [Ownership](../reference/ownership.md), for exactly when values are moved, copied and freed.
 - [Parallel loops](../reference/parallel.md), which run a loop on every core and give the same result with any number of threads.
 - [Strictness](../reference/strictness.md), for every rule the checker enforces, and why.
+- [Packages](packages.md), for code from another folder or git repository.

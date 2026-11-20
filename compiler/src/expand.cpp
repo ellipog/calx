@@ -710,7 +710,12 @@ private:
         std::string path = (fs::path(loader_.root()) / "calx_attributes.calx").generic_string();
         std::uint32_t file = sources.add(path, driver());
         ParseContext ctx{sources, names, arena, diags};
-        std::vector<Module*> modules = load_program(ctx, sources, file, opt_.home, opt_.home_error);
+        // With the program's packages, whose modules it imports by their whole names.
+        PackageOptions po;
+        po.enabled = loader_.packages().any();
+        po.from = loader_.packages_from();
+        po.any = true;
+        std::vector<Module*> modules = load_program(ctx, sources, file, opt_.home, opt_.home_error, po);
         Program program;
         if (!diags.has_errors()) check_program(CheckContext{sources, names, arena, diags, types}, modules, program, true);
         if (diags.has_errors()) {
