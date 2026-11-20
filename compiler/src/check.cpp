@@ -220,6 +220,7 @@ public:
         for (Type* t : pending_defaults_) check_instance_defaults(t);
         for (Item* f : all_fns_) check_signature(f);
         collect_exports();
+        collect_c_exports();
         collect_drops();
         collect_tests();
         for (Item* f : all_fns_) {
@@ -1007,6 +1008,42 @@ private:
                 }
                 continue;
             }
+            if (name == "export_c") {
+                // CLX-333, CLX-334: a function C calls by name, with the C ABI.
+                it->used = true;  // C calls it
+                if (it->kind != ItemKind::fn || it->is_extern) {
+                    error(a.span, "`@export_c` is for a function written in Calx");
+                } else if (owner) {
+                    error(a.span, "`@export_c` is for a function on its own, not one in " +
+                                      std::string(owner->kind == ItemKind::impl ? "an `impl`" : "an interface") +
+                                      "; export one that calls it");
+                } else if (it->export_c) {
+                    error(a.span, "`@export_c` is already on " + q(text(it->name)));
+                } else if (a.args.size() > 1 || (a.args.size() == 1 && (a.args[0].name || a.args[0].value->kind != ExprKind::string_lit ||
+                                                                        !a.args[0].value->interpolations.empty() ||
+                                                                        a.args[0].value->literal.parts.size() != 1))) {
+                    error(a.span, "`@export_c` takes the name C calls it by, as a string literal, such as `@export_c(\"app_start\")`, "
+                                  "or nothing for the function's own name");
+                } else {
+                    it->export_c = true;
+                    it->export_name = a.args.empty() ? text(it->name) : a.args[0].value->literal.parts[0].text;
+                    std::string_view n = it->export_name;
+                    bool ident = !n.empty() && !(n[0] >= '0' && n[0] <= '9');
+                    for (char c : n) ident = ident && (std::isalnum(static_cast<unsigned char>(c)) || c == '_');
+                    Span at = a.args.empty() ? it->name_span : a.args[0].span;
+                    if (!ident) {
+                        error(at, q(n) + " isn't a name C can call: it's letters, digits and `_`, and doesn't start with a digit");
+                    } else if (n.substr(0, 3) == "cx_" || n.substr(0, 5) == "calx_") {
+                        error(at, "names that start with `cx_` or `calx_` are the runtime's, so a function can't be exported as " + q(n));
+                    } else if (c_keyword(n)) {
+                        error(at, q(n) + " is a word of C's, so C can't call a function by it");
+                    } else if (auto [pos, fresh] = export_c_names_.emplace(n, it); !fresh) {
+                        error(at, "a function is already exported to C as " + q(n));
+                        note(pos->second->name_span, "that one is here");
+                    }
+                }
+                continue;
+            }
             if (name == "test") {
                 it->used = true;  // `calx test` runs it
                 if (!a.args.empty()) {
@@ -1474,8 +1511,49 @@ private:
         }
     }
 
+    // `unsafe impl Send for S {}` (CLX-333): `Send` is worked out from what a type holds, and a
+    // pointer isn't, since nothing says what it points at can be used from another thread. Code that
+    // knows, as a struct holding a C library's context that the library lets any thread use, says so.
+    bool send_impl(Item* impl) {
+        const TypeExpr* i = impl->interface;
+        bool names_send = i && i->kind == TypeExprKind::named && i->path.parts.size() == 1 && i->args.empty() &&
+                          text(i->path.parts[0]) == "Send" && !find_item(i->path.parts[0]);
+        if (!names_send) {
+            if (impl->is_unsafe) {
+                error(impl->span, "only `Send` is implemented with `unsafe impl`: `unsafe impl Send for S {}`");
+                return true;
+            }
+            return false;
+        }
+        if (!impl->is_unsafe) {
+            error(i->span, "`Send` is worked out from what a type holds; a struct whose fields hold pointers is `Send` only "
+                           "when the code vouches for what they point at, with `unsafe impl Send for S {}`");
+            return true;
+        }
+        if (!impl->members.empty() || !impl->generics.empty()) {
+            error(impl->span, "`unsafe impl Send for S {}` is empty, and isn't generic");
+            return true;
+        }
+        std::size_t mark = push_env(impl);
+        Type* t = resolve_type(impl->self_type);
+        pop_env(mark);
+        if (is_bad(t)) return true;
+        if (t->kind != TypeKind::struct_ || t->generic || !t->item->type_params.empty() || t->item->module != scope_->module) {
+            error(impl->self_type->span, "`unsafe impl Send` is for a struct that isn't generic, in its own module");
+            return true;
+        }
+        if (t->item->send_vouched) {
+            error(impl->span, name_of(t) + " is already vouched for as `Send`");
+            return true;
+        }
+        t->item->send_vouched = true;
+        use_item(t->item);
+        return true;
+    }
+
     ImplInfo* collect_impl(Item* impl) {
         InModule in(*this, impl);
+        if (send_impl(impl)) return nullptr;
         Item* iface = nullptr;
         std::size_t mark = push_env(impl);
         if (impl->interface) iface = resolve_interface(impl->interface);
@@ -2332,7 +2410,8 @@ private:
             case TypeKind::fn_: {
                 std::vector<Type*> params;
                 for (Type* e : t->elems) params.push_back(subst(e, s));
-                return T.fn_of(params, std::vector<std::uint8_t>(t->modes.begin(), t->modes.end()), subst(t->elem, s), t->unsafe_fn);
+                return T.fn_of(params, std::vector<std::uint8_t>(t->modes.begin(), t->modes.end()), subst(t->elem, s), t->unsafe_fn,
+                               t->c_abi);
             }
             case TypeKind::struct_: case TypeKind::enum_: {
                 std::vector<Type*> args;
@@ -2399,7 +2478,10 @@ private:
                 }
                 return true;
             case TypeKind::fn_:
-                if (pattern->elems.size() != actual->elems.size() || pattern->unsafe_fn != actual->unsafe_fn) return false;
+                if (pattern->elems.size() != actual->elems.size() || pattern->unsafe_fn != actual->unsafe_fn ||
+                    pattern->c_abi != actual->c_abi) {
+                    return false;
+                }
                 for (std::size_t i = 0; i < pattern->elems.size(); i++) {
                     if (pattern->modes[i] != actual->modes[i] || !unify(pattern->elems[i], actual->elems[i], s, vars)) return false;
                 }
@@ -2803,7 +2885,7 @@ private:
             }
             case TypeKind::fn_: {
                 static const char* const mode[] = {"", "mut_", "own_"};
-                std::string s = t->unsafe_fn ? "ufn" : "fn";
+                std::string s = t->c_abi ? "cfn" : t->unsafe_fn ? "ufn" : "fn";
                 for (std::size_t i = 0; i < t->elems.size(); i++) s += std::string("_") + mode[t->modes[i]] + mangle(t->elems[i]);
                 return s + "_to_" + mangle(t->elem);
             }
@@ -3188,36 +3270,56 @@ private:
         externs_.push_back(it);
     }
 
-    // Whether C has the type: integers, floats, `bool` and pointers to them.
+    // Whether C has the type: integers, floats, `bool`, C functions' addresses (CLX-333) and
+    // pointers to them.
     static bool c_type(const Type* t) {
         switch (t->kind) {
             case TypeKind::int_: case TypeKind::float_: case TypeKind::bool_: return true;
             case TypeKind::pointer: return c_type(t->elem);
+            case TypeKind::fn_: return t->c_abi;
             default: return false;
+        }
+    }
+
+    static constexpr const char* kCTypes = "integers, floats, `bool`, pointers and `extern \"C\" fn` types";
+
+    // C's keywords, and `main`, which no exported function can be named.
+    static bool c_keyword(std::string_view s) {
+        static const std::unordered_set<std::string_view> words = {
+            "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern",
+            "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict", "return", "short", "signed",
+            "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while", "bool",
+            "true", "false", "_Bool", "_Complex", "_Imaginary", "_Alignas", "_Alignof", "_Atomic", "_Generic", "_Noreturn",
+            "_Static_assert", "_Thread_local", "asm", "typeof", "main"};
+        return words.count(s) != 0;
+    }
+
+    // A function C calls or is called by takes and gives C types, as plain values. `what` is "a C
+    // function" or "an `@export_c` function".
+    void check_c_signature(Item* f, const std::string& what) {
+        for (const Param& p : f->params) {
+            if (p.is_self) {
+                error(p.span, what + " has no `self`");
+                continue;
+            }
+            if (p.mode != ParamMode::read) {
+                error(p.span, what + " takes plain values, so its parameters can't be `mut` or `own`; pass a pointer");
+            }
+            if (p.local && !is_bad(p.local->type) && !c_type(p.local->type)) {
+                error(p.type->span, name_of(p.local->type) + " isn't a C type; " + what + " takes " + kCTypes);
+            }
+        }
+        Type* r = f->result_type;
+        // `-> never` is C's `noreturn`, as `exit` is.
+        bool never_ok = f->is_extern;
+        if (f->result && !is_bad(r) && r->kind != TypeKind::unit && !(never_ok && r->kind == TypeKind::never) && !c_type(r)) {
+            error(f->result->span, name_of(r) + " isn't a C type; " + what + " returns one of " + kCTypes + ", or nothing");
         }
     }
 
     void check_extern(Item* f) {
         check_signature(f);
-        for (const Param& p : f->params) {
-            if (p.is_self) {
-                error(p.span, "a C function has no `self`");
-                continue;
-            }
-            if (p.mode != ParamMode::read) {
-                error(p.span, "a C function takes plain values, so its parameters can't be `mut` or `own`; pass a pointer");
-            }
-            if (p.local && !is_bad(p.local->type) && !c_type(p.local->type)) {
-                error(p.type->span, name_of(p.local->type) + " isn't a C type; a C function takes integers, floats, "
-                                                             "`bool` and pointers to them");
-            }
-        }
-        Type* r = f->result_type;
-        // `-> never` is C's `noreturn`, as `exit` is.
-        if (f->result && !is_bad(r) && r->kind != TypeKind::unit && r->kind != TypeKind::never && !c_type(r)) {
-            error(f->result->span, name_of(r) + " isn't a C type; a C function returns an integer, a float, a `bool`, "
-                                                "a pointer or nothing");
-        }
+        check_c_signature(f, "a C function");
         // One C function has one signature, wherever it's declared.
         auto [pos, fresh] = c_functions_.emplace(text(f->name), f);
         if (!fresh && !same_signature(pos->second, f)) {
@@ -3551,12 +3653,35 @@ private:
                     result = result_of(result, e);
                 }
                 if (bad) return T.error;
-                return T.fn_of(params, modes, result, t->is_unsafe);
+                // CLX-333: a C function's address takes and gives what a C function declared with
+                // `extern "C"` does.
+                if (t->c_abi) {
+                    for (std::size_t i = 0; i < t->args.size(); i++) {
+                        if (t->modes[i] != ParamMode::read) {
+                            error(t->args[i]->span, "a C function takes plain values, so its parameters can't be `mut` or `own`; "
+                                                    "pass a pointer");
+                            bad = true;
+                        } else if (!c_type(params[i])) {
+                            error(t->args[i]->span, name_of(params[i]) + " isn't a C type; a C function takes " + kCTypes);
+                            bad = true;
+                        }
+                    }
+                    if (t->error) {
+                        error(t->error->span, "a C function can't fail; give it a result, and check it in Calx");
+                        bad = true;
+                    } else if (result->kind != TypeKind::unit && !c_type(result)) {
+                        error(t->inner->span, name_of(result) + " isn't a C type; a C function returns one of " + kCTypes +
+                                                  ", or nothing");
+                        bad = true;
+                    }
+                    if (bad) return T.error;
+                }
+                return T.fn_of(params, modes, result, t->is_unsafe, t->c_abi);
             }
             case TypeExprKind::pointer: {
                 if (!pointer_ok) {
                     error(t->span, "a pointer can only be the type of a variable in `unsafe` code, a struct's field, or a "
-                                   "parameter or result of a C function or an `unsafe fn`");
+                                   "parameter or result of a C function, an `unsafe fn` or an `@export_c` function");
                     return T.error;
                 }
                 Type* inner = resolve_type(t->inner, true);
@@ -3739,10 +3864,10 @@ private:
     }
 
 
-    // Whether `f`'s parameters and result can be pointers (CLX-332): a C function's, and an `unsafe
-    // fn`'s, whose callers are `unsafe` code. Using the pointer, in the body or at the call, is
-    // `unsafe` all the same.
-    static bool pointers_ok(const Item* f) { return f->is_extern || f->is_unsafe; }
+    // Whether `f`'s parameters and result can be pointers (CLX-332): a C function's, an `unsafe
+    // fn`'s, whose callers are `unsafe` code, and an `@export_c` function's, which C calls. Using
+    // the pointer, in the body or at the call, is `unsafe` all the same.
+    static bool pointers_ok(const Item* f) { return f->is_extern || f->is_unsafe || f->export_c; }
 
     void check_signature(Item* f) {
         if (f->checked_signature) return;
@@ -6440,6 +6565,17 @@ private:
             modes.push_back(static_cast<std::uint8_t>(p.mode));
         }
         if (!f->result_type || is_bad(f->result_type)) return T.error;
+        // CLX-333: where C's function type is wanted, a C function, or one C calls, is its C address.
+        if (expected && expected->kind == TypeKind::fn_ && expected->c_abi) {
+            if (!f->is_extern && !f->export_c) {
+                error(e->span, q(n) + " is a Calx function, and " + a_type(expected) + " is a C one; mark " + q(n) +
+                                   " `@export_c`, so C can call it");
+                return T.error;
+            }
+            e->ref = Ref::fn;
+            e->item = f;
+            return T.fn_of(params, modes, f->result_type, true, true);
+        }
         Type* t = T.fn_of(params, modes, f->result_type, f->is_unsafe || f->is_extern);
         e->ref = Ref::fn;
         e->item = f;
@@ -8831,6 +8967,11 @@ private:
             return T.error;
         }
         if (expected && expected->kind == TypeKind::fn_) {
+            if (expected->c_abi) {
+                error(e->span, "a closure can't be " + a_type(expected) + ": C would call it with nothing it captures; "
+                                   "pass an `@export_c` function, and what it needs through a pointer C hands back to it");
+                return T.error;
+            }
             if (expected->unsafe_fn) {
                 error(e->span, "a closure isn't an `unsafe fn`");
                 return T.error;
@@ -9069,6 +9210,8 @@ private:
             }
             if (recv->kind == TypeKind::library && callee->member != n_copy_) return library_method(e, expected);
             if (recv->kind == TypeKind::dyn && callee->member != n_copy_) return dyn_call(e, recv, expected);
+            // `p.cast<T>()` and `p.to_fn<F>()` (CLX-332, CLX-333).
+            if (recv->kind == TypeKind::pointer && callee->member != n_copy_) return pointer_method(e, recv);
             if (!callee->type_args.empty() && !lookup(recv, callee->member, e->only_interface).fn) {
                 error(callee->type_args[0]->span, q(text(callee->member)) + " doesn't take generic arguments");
                 check_args(e);
@@ -10817,6 +10960,11 @@ private:
                                     "parameter");
                 f = T.error;
             }
+            if (!is_bad(f) && f->c_abi) {
+                error(callee->span, "`find` gives a function the library exports with `@export`, a Calx function, not " +
+                                        a_type(f) + "; a C function's address comes from C, as a pointer, and `to_fn` makes it one");
+                f = T.error;
+            }
         } else if (!callee->type_args.empty()) {
             error(callee->type_args[0]->span, q(m) + " doesn't take generic arguments");
         }
@@ -11540,6 +11688,17 @@ private:
                 check_args(e);
                 return T.error;
             }
+        } else if (recv->boxed && !recv->shared && m == "into_ptr") {
+            // CLX-333: the box's value, kept where it is, as a pointer C can hold, such as the
+            // user data it hands back to a callback, until `p.to_box()` takes it back. Rust's
+            // `Box::into_raw`.
+            if (!e->args.empty()) {
+                error(e->span, "`into_ptr` takes no arguments");
+                check_args(e);
+                return T.error;
+            }
+            e->bmethod = BMethod::box_into_ptr;
+            return T.pointer_of(recv->elem, false);
         } else if (recv->boxed) {
             // A box has no methods of its own: what's called is its value's.
             error(e->callee->span, name_of(recv) + " has no method " + q(m) + "; its value is " +
@@ -12057,9 +12216,45 @@ private:
         else if (m == "write") b = BMethod::ptr_write, param = recv->elem;
         else if (m == "add") b = BMethod::ptr_add, param = T.usize, result = recv;
         else if (m == "is_null") b = BMethod::ptr_is_null, result = T.bool_;
+        else if (m == "addr") b = BMethod::ptr_addr, result = T.usize;
+        else if (m == "to_box") b = BMethod::ptr_to_box, result = T.box_of(recv->elem);
+        else if (m == "cast" || m == "to_fn") b = m == "cast" ? BMethod::ptr_cast : BMethod::ptr_to_fn;
         if (b == BMethod::none) {
             error(e->callee->span, name_of(recv) + " has no method " + q(m));
             check_args(e);
+            return T.error;
+        }
+        // CLX-332, CLX-333: `p.cast<T>()` points at the same address as a `T`, and `p.to_fn<F>()` is
+        // the C function at it, as `extern "C" fn` type `F`, such as what `dlsym` gives.
+        Expr* callee = e->callee;
+        if (b == BMethod::ptr_cast || b == BMethod::ptr_to_fn) {
+            const char* example = b == BMethod::ptr_cast ? "`p.cast<i32>()`" : "`p.to_fn<extern \"C\" fn(i32) -> i32>()`";
+            if (callee->type_args.size() != 1) {
+                error(callee->span, q(m) + " takes one generic argument, the type: " + example);
+                check_args(e);
+                return T.error;
+            }
+            Type* to = resolve_type(callee->type_args[0], true);
+            if (is_bad(to)) {
+                check_args(e);
+                return T.error;
+            }
+            if (b == BMethod::ptr_cast) {
+                if (to->kind == TypeKind::unit || to->kind == TypeKind::never) {
+                    error(callee->type_args[0]->span, "a pointer can't point to " + name_of(to) + "; point to a `u8`");
+                    return T.error;
+                }
+                result = T.pointer_of(to, recv->is_const);
+            } else {
+                if (to->kind != TypeKind::fn_ || !to->c_abi) {
+                    error(callee->type_args[0]->span, "`to_fn` makes a C function's address, so its type is an `extern \"C\" fn(...)`, "
+                                                      "not " + a_type(to));
+                    return T.error;
+                }
+                result = to;
+            }
+        } else if (!callee->type_args.empty()) {
+            error(callee->type_args[0]->span, q(m) + " isn't generic");
             return T.error;
         }
         e->bmethod = b;
@@ -12081,6 +12276,12 @@ private:
         if (b == BMethod::ptr_write && recv->is_const) {
             error(e->callee->span, "can't write through " + name_of(recv) + "; that needs a `*` pointer, such as " +
                                        q("as_mut_ptr()") + " gives");
+            return T.error;
+        }
+        // `p.to_box()` takes back the value a box's `into_ptr` gave, which owns it again (CLX-333).
+        if (b == BMethod::ptr_to_box && recv->is_const) {
+            error(e->callee->span, "`to_box` takes back what `into_ptr` gave, a " + q("*" + std::string(recv->elem->name)) +
+                                       ", not " + a_type(recv));
             return T.error;
         }
         return result;
@@ -12551,6 +12752,44 @@ private:
         }
     }
 
+    // CLX-333, CLX-334: the functions marked `@export_c`, in every module, which C calls by name
+    // with the C ABI. Each takes and gives C types, can't fail, and has one C name in the program.
+    void collect_c_exports() {
+        for (Module* m : prog_.modules) {
+            for (Item* f : m->items) {
+                if (f->kind != ItemKind::fn || !f->export_c) continue;
+                const char* what = "an `@export_c` function";
+                if (!f->type_params.empty()) {
+                    error(f->name_span, std::string(what) + " can't be generic: C calls it by a name, which has one type");
+                    continue;
+                }
+                if (f->track_caller) {
+                    error(f->name_span, std::string(what) + " can't be `@track_caller`: C calls it, and C can't say where");
+                    continue;
+                }
+                if (f->exported) {
+                    error(f->name_span, "a function is `@export` for Calx programs or `@export_c` for C, not both; export one "
+                                        "that calls the other");
+                    continue;
+                }
+                if (f->error) {
+                    error(f->error->span, std::string(what) + " can't fail, since C has no results; give back a number that "
+                                                              "says how it went");
+                    continue;
+                }
+                if (f->is_unsafe) {
+                    error(f->name_span, std::string(what) + " can't be `unsafe`: C calls it, whatever it promises");
+                    continue;
+                }
+                check_c_signature(f, what);
+                if (f->result_type && f->result_type->kind == TypeKind::never) {
+                    error(f->result->span, std::string(what) + " returns to C, so it can't return `never`");
+                }
+                prog_.c_exports.push_back(f);
+            }
+        }
+    }
+
     // CLX-332: `fn drop(mut self)` in an `impl` of a `@handle` struct, which runs when a value of
     // it is dropped, before what its fields own is freed. It's how a struct that holds a C library's
     // handle gives it back.
@@ -12728,6 +12967,7 @@ private:
     std::vector<FieldAttribute> field_attributes_;
     std::unordered_map<const Item*, std::vector<std::string_view>> attribute_reads_;
     std::unordered_map<std::string_view, Item*> c_functions_;  // C functions by their C name
+    std::unordered_map<std::string_view, Item*> export_c_names_;  // `@export_c` functions by the name C calls (CLX-333)
     int unsafe_depth_ = 0;
     bool unsafe_used_ = false;  // the `unsafe` block being checked has done something unsafe
     std::unordered_map<Item*, bool> checking_consts_;

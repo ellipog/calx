@@ -1579,7 +1579,8 @@ private:
                 expr(recv, Use::change);
                 expr(arg(0), Use::view);
                 return;
-            case BMethod::queue_close: case BMethod::thread_join:
+            // CLX-333: a box's `into_ptr` gives its value to C, which `to_box` takes back.
+            case BMethod::queue_close: case BMethod::thread_join: case BMethod::box_into_ptr:
                 expr(recv, Use::consume);
                 return;
             case BMethod::thread_spawn:

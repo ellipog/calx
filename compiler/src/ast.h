@@ -52,6 +52,7 @@ struct TypeExpr {
     bool is_unsafe = false;       // fn: `unsafe fn`, which only `unsafe` code can call
     bool callable = false;        // fn: `Fn(A) -> R`, a bound any closure or function it fits has (CLX-98)
     bool callable_mut = false;    // fn: `FnMut(A) -> R`, whose closures can change what they capture (CLX-161)
+    bool c_abi = false;           // fn: `extern "C" fn(A) -> R`, a C function's address (CLX-333)
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -200,7 +201,8 @@ enum class BMethod : std::uint8_t {
     // kept, as a slice is; and new text or lists of it. `join` is on a list of text.
     text_trim, text_trim_start, text_trim_end, trim_prefix, trim_suffix, split, split_once, split_whitespace, lines, text_replace,
     repeat, pad_start, pad_end, join,
-    ptr_read, ptr_write, ptr_add, ptr_is_null,  // on a pointer
+    ptr_read, ptr_write, ptr_add, ptr_is_null, ptr_addr, ptr_cast, ptr_to_fn, ptr_to_box,  // on a pointer
+    box_into_ptr,  // `b.into_ptr()` on a `Box` (CLX-333)
     // On an `Arena`: a list from it, freeing everything at once, and the bytes taken since; and
     // on an `ArenaList`, a `List` with its elements (D114).
     arena_list, arena_reset, arena_used, to_list,
@@ -558,8 +560,15 @@ struct Item {
     bool is_attribute = false;   // `@attribute`: a function the compiler runs while compiling (D57, D124)
     bool is_handle = false;      // `@handle`: a struct that stands for something of the system's, which can't be copied
     bool is_test = false;        // `@test`: a test, which `calx test` runs in a process of its own (CLX-87)
+    // `@export_c` or `@export_c("name")`: a function C calls, by `export_name`, with the C ABI,
+    // as a library's entry point or a callback (CLX-333, CLX-334).
+    bool export_c = false;
+    std::string_view export_name;
     // A `@handle` struct's `fn drop(mut self)`, which runs when a value of it is dropped (CLX-332).
     Item* drop_fn = nullptr;
+    // A struct with `unsafe impl Send for S {}`: it's `Send` though its fields hold pointers, since
+    // the code says what they point at can be used from another thread (CLX-333).
+    bool send_vouched = false;
     // A closure's body, as a function of its own (CLX-98), which each C file that reaches it
     // copies, as instances are. It reads `captures`, the locals of the code around it that it
     // names, through their addresses; one that captures nothing and is a `fn(...)` value takes

@@ -350,11 +350,13 @@ Type* Types::pointer_of(Type* elem, bool is_const) {
 
 // A function value is the function's address, whatever it takes, so only `open` comes from its
 // parts: it holds no pointer, nothing scoped and nothing to free.
-Type* Types::fn_of(const std::vector<Type*>& params, const std::vector<std::uint8_t>& modes, Type* result, bool is_unsafe) {
-    auto key = std::make_tuple(params, modes, result, is_unsafe);
+Type* Types::fn_of(const std::vector<Type*>& params, const std::vector<std::uint8_t>& modes, Type* result, bool is_unsafe,
+                   bool c_abi) {
+    if (c_abi) is_unsafe = true;
+    auto key = std::make_tuple(params, modes, result, is_unsafe, c_abi);
     auto it = fn_map_.find(key);
     if (it != fn_map_.end()) return it->second;
-    std::string name = is_unsafe ? "unsafe fn(" : "fn(";
+    std::string name = c_abi ? "extern \"C\" fn(" : is_unsafe ? "unsafe fn(" : "fn(";
     for (std::size_t i = 0; i < params.size(); i++) {
         if (i) name += ", ";
         if (modes[i] == 1) name += "mut ";
@@ -372,6 +374,7 @@ Type* Types::fn_of(const std::vector<Type*>& params, const std::vector<std::uint
     t->modes = arena_.copy(modes);
     t->elem = result;
     t->unsafe_fn = is_unsafe;
+    t->c_abi = c_abi;
     t->open = result->open;
     for (Type* p : params) t->open = t->open || p->open;
     fn_map_.emplace(std::move(key), t);
@@ -491,6 +494,8 @@ bool send_walk(const Type* t, int depth, Seen& seen) {
             }
             return true;
         case TypeKind::struct_:
+            // `unsafe impl Send for S {}` (CLX-333): the code vouches for what its pointers point at.
+            if (t->item->send_vouched) return true;
             for (const FieldDecl& f : t->item->fields) {
                 if (f.resolved && !send_walk(f.resolved, depth + 1, seen)) return false;
             }

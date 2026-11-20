@@ -302,6 +302,8 @@ private:
                 case Tok::star: case Tok::kw_const: case Tok::kw_fn: case Tok::arrow: case Tok::kw_dyn:
                 // A function type's modes, `unsafe` and error: `find<unsafe fn(mut T) -> R ! E>`.
                 case Tok::kw_mut: case Tok::kw_own: case Tok::kw_unsafe: case Tok::bang: break;
+                // `p.to_fn<extern "C" fn(i32) -> i32>()` (CLX-333).
+                case Tok::kw_extern: case Tok::string_lit: break;
                 default: return false;
             }
             if (depth == 0) return true;
@@ -412,7 +414,14 @@ private:
             case Tok::kw_fn: it = fn_item(start); break;
             case Tok::kw_unsafe:
                 next();
-                if (!at(Tok::kw_fn)) fail(peek().span, "expected `fn` after `unsafe`");
+                // `unsafe impl Send for Handle {}`: the code vouches that a struct whose fields
+                // hold pointers can go to another thread (CLX-333).
+                if (at(Tok::kw_impl)) {
+                    it = impl_item(start);
+                    it->is_unsafe = true;
+                    break;
+                }
+                if (!at(Tok::kw_fn)) fail(peek().span, "expected `fn` or `impl` after `unsafe`");
                 it = fn_item(start);
                 it->is_unsafe = true;
                 break;
@@ -918,6 +927,23 @@ private:
                 next();
                 TypeExpr* t = new_type(TypeExprKind::fn, start);
                 t->is_unsafe = is_unsafe;
+                return fn_type_rest(t, start);
+            }
+            // `extern "C" fn(*u8) -> i32`: a C function's address, which C calls back or gives
+            // back (CLX-333). "C" is the only ABI, as in a declaration.
+            case Tok::kw_extern: {
+                next();
+                if (at(Tok::string_lit)) {
+                    const Token& abi = next();
+                    if (abi.parts.size() != 1 || abi.parts[0].text != "C") {
+                        fail(abi.span, "the only foreign ABI is \"C\": write `extern \"C\" fn(...)`");
+                    }
+                }
+                if (!at(Tok::kw_fn)) fail(peek().span, "expected `fn` after `extern \"C\"` in a type");
+                next();
+                TypeExpr* t = new_type(TypeExprKind::fn, start);
+                t->c_abi = true;
+                t->is_unsafe = true;
                 return fn_type_rest(t, start);
             }
             case Tok::star: {

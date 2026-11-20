@@ -777,6 +777,10 @@ cx_i64 cx_clock_zone_abbreviation(cx_i64 unix_ms, cx_u8* out, cx_usize cap) {
 /* 1 once a program has started here: a Calx library loaded into another program never does. */
 int cx_is_program;
 
+/* 0 before the runtime starts, 1 while it runs, 2 once a static library's host has ended it
+ * (see "C calling in" below). */
+static int rt_state;
+
 #ifdef __linux__
 /* In calx_proc.c, which a program has only when it starts others: when this program was run again
  * as the helper that starts a child to measure, it starts it and exits, never returning. */
@@ -805,6 +809,35 @@ void cx_start(int argc, char** argv) {
 #endif
     take_script();
     overflow_start();
+    __atomic_store_n(&rt_state, 1, __ATOMIC_RELEASE);
+}
+
+/* --- C calling in (CLX-333, CLX-334) --------------------------------------------------------
+ * An `@export_c` function can be called by C on any thread, one the runtime started or one it
+ * didn't, such as a host's own or a C library's. What the runtime keeps for each thread, its
+ * allocator's heap and the errors std's calls leave, is set up the first time a thread needs it,
+ * so a thread it didn't start runs Calx code as one it did. What's for the whole process is set
+ * up once: in a program by `main`, before any Calx runs, and in a static library by its host's
+ * call to `calx_init`, which must come before any call into the library. A call before it, or
+ * after `calx_shutdown`, is refused: it says so and ends the process, as a panic does. */
+
+static CX_COLD void refuse_call(const char* name, int state) {
+    fprintf(stderr, "calx: C called `%s` %s, so the runtime %s\n", name,
+            state == 0 ? "before `calx_init`" : "after `calx_shutdown`",
+            state == 0 ? "hasn't started; call `calx_init` first" : "has ended; call `calx_init` again first");
+    fflush(stderr);
+    _Exit(101);
+}
+
+void cx_export_enter(const char* name) {
+    int state = __atomic_load_n(&rt_state, __ATOMIC_ACQUIRE);
+    if (__builtin_expect(state != 1, 0)) refuse_call(name, state);
+}
+
+/* A program some of whose functions C can call: they can be called on threads of C's, which
+ * write to the same output as the program's own, so writing takes the lock from the start. */
+void cx_foreign_threads(void) {
+    __atomic_store_n(&out_shared, 1, __ATOMIC_RELEASE);
 }
 
 int cx_finish(void) {

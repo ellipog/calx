@@ -45,6 +45,9 @@ struct Program {
         Type* type;
     };
     std::vector<Export> exports;
+    // CLX-333, CLX-334: the functions marked `@export_c`, which C calls by their `export_name`, in
+    // the order the modules have them. A static library's header declares them.
+    std::vector<Item*> c_exports;
     // CLX-87: the functions marked `@test` in the main module, in the order they're written,
     // which `calx test` runs.
     std::vector<Item*> tests;

@@ -159,6 +159,12 @@ public:
             for (Item* f : p.c_fns) out_ += c_declaration(f);
             for (Item* f : p.externs) out_ += fns_.at(f).sig + ";\n";
             for (Item* f : p.defs) out_ += linkage(f, external) + fns_.at(f).sig + ";\n";
+            for (Item* f : p.externs) {
+                if (f->export_c) out_ += export_c_declaration(f);
+            }
+            for (Item* f : p.defs) {
+                if (f->export_c) out_ += export_c_declaration(f);
+            }
             out_ += "\n";
             // After the functions' declarations, as a type's glue can call what it writes for itself.
             out_ += kNoDebugPush;
@@ -176,11 +182,15 @@ public:
                 out_ += linkage(f, external);
                 out_ += o.sig;
                 out_ += o.body;
+                if (f->export_c && !f->origin) out_ += export_c_definition(f);
             }
+            // C can call this program's functions on threads of its own (CLX-333).
+            const char* foreign = prog_.c_exports.empty() ? "" : "cx_foreign_threads();\n    ";
             if (has_main && opt_.tests) {
                 // CLX-87: `calx test` runs this program once for each test, naming it with a first
                 // argument the runtime takes out. Without one, it lists its tests.
-                out_ += "int main(int argc, char** argv) {\n    switch (cx_test_start(argc, argv)) {\n";
+                out_ += "int main(int argc, char** argv) {\n    cx_i64 cx_which = cx_test_start(argc, argv);\n    " +
+                        std::string(foreign) + "switch (cx_which) {\n";
                 for (std::size_t i = 0; i < prog_.tests.size(); i++) {
                     out_ += "    case " + std::to_string(i) + ": {\n    " + call_entry(prog_.tests[i]) + "break;\n    }\n";
                 }
@@ -190,8 +200,8 @@ public:
                 }
                 out_ += "        break;\n    }\n    return cx_finish();\n}\n";
             } else if (has_main) {
-                out_ += "int main(int argc, char** argv) {\n    cx_start(argc, argv);\n    " + call_entry(prog_.main) +
-                        "return cx_finish();\n}\n";
+                out_ += "int main(int argc, char** argv) {\n    cx_start(argc, argv);\n    " + std::string(foreign) +
+                        call_entry(prog_.main) + "return cx_finish();\n}\n";
             }
             if (p.has_exports) out_ += exports();
             files.push_back({std::string(p.module->prefix) + ".c", std::move(out_)});
@@ -319,6 +329,12 @@ private:
             all.merge(fns_.at(f).uses);
         }
         for (Item* f : p.externs) all.merge(fns_.at(f).sig_uses);
+        // A C function's declaration names its types, such as the `extern "C" fn` `qsort` takes,
+        // which nothing else in the file may (CLX-333).
+        for (Item* f : p.c_fns) {
+            all.add_type(f->result_type);
+            for (const Param& q : f->params) all.add_type(q.local->type);
+        }
         // A constant's value can name other constants.
         for (std::size_t i = 0; i < all.consts.size(); i++) all.merge(consts_.at(all.consts[i]).uses);
         // A `main` that fails shows its error. A file of tests may have none, and its C's `main`
@@ -451,6 +467,34 @@ private:
         return s + ") __asm__(CX_SYMBOL(\"" + std::string(text(f->name)) + "\"));\n";
     }
 
+    // CLX-333, CLX-334: the function C calls for an `@export_c` one, by the name it's exported as,
+    // which the linker gets from an asm label, as a C function's name is. It checks the runtime is
+    // running, then calls the Calx function, whose C types are C's own.
+    std::string export_c_name(const Item* f) const { return "cx_xc_" + std::string(f->export_name); }
+
+    std::string export_c_head(const Item* f) const {
+        std::string s = "CX_EXPORT_C " + ctype(f->result_type) + " " + export_c_name(f) + "(";
+        for (std::size_t i = 0; i < f->params.size(); i++) {
+            if (i) s += ", ";
+            s += ctype(f->params[i].local->type) + " cx_a" + std::to_string(i);
+        }
+        if (f->params.empty()) s += "void";
+        return s + ")";
+    }
+
+    std::string export_c_declaration(const Item* f) const {
+        return export_c_head(f) + " __asm__(CX_SYMBOL(\"" + std::string(f->export_name) + "\"));\n";
+    }
+
+    std::string export_c_definition(const Item* f) const {
+        std::string call = std::string(f->c_name) + "(";
+        for (std::size_t i = 0; i < f->params.size(); i++) call += (i ? ", cx_a" : "cx_a") + std::to_string(i);
+        call += ")";
+        bool unit = f->result_type->kind == TypeKind::unit;
+        return export_c_head(f) + " {\n    cx_export_enter(" + c_string_literal(f->export_name) + ");\n    " +
+               (unit ? call + ";\n" : "return " + call + ";\n") + "}\n";
+    }
+
     // Written functions are `static` unless another file calls them, which lets clang inline and
     // drop them freely. Instances are always `static`: each file has its own copy.
     static std::string linkage(const Item* f, const std::unordered_set<const Item*>& external) {
@@ -544,7 +588,7 @@ private:
             case TypeKind::set: s = table_prefix(t) + "set_" + part(t->elem); break;
             case TypeKind::fn_:
                 // `cx_fn_i32_mList_i32__bool`: each parameter with its mode, then the result.
-                s = t->unsafe_fn ? "cx_ufn" : "cx_fn";
+                s = t->c_abi ? "cx_cfn" : t->unsafe_fn ? "cx_ufn" : "cx_fn";
                 for (std::size_t i = 0; i < t->elems.size(); i++) {
                     s += std::string("_") + (t->modes[i] == 1 ? "m" : t->modes[i] == 2 ? "o" : "") + part(t->elems[i]);
                 }
@@ -5314,8 +5358,10 @@ $dropall    m->len = 0;
             case ExprKind::self:
                 if (e->ref == Ref::const_) return const_value(e);
                 if (e->ref == Ref::fn) {
-                    // A function as a value is its address (D122).
+                    // A function as a value is its address (D122). As a C function's, an
+                    // `@export_c` one's is the function C calls, which checks the runtime first.
                     if (uses_) uses_->add_fn(e->item);
+                    if (e->type && e->type->c_abi && e->item->export_c) return export_c_name(e->item);
                     return std::string(e->item->c_name);
                 }
                 return place(e);
@@ -6901,7 +6947,7 @@ $dropall    m->len = 0;
                 s += ")";
                 return;
             case TypeKind::fn_:
-                s += t->unsafe_fn ? "unsafe_fn(" : "fn(";
+                s += t->c_abi ? "c_fn(" : t->unsafe_fn ? "unsafe_fn(" : "fn(";
                 for (std::size_t i = 0; i < t->elems.size(); i++) {
                     s += std::to_string(t->modes[i]);
                     shape(t->elems[i], s, seen);
@@ -7045,6 +7091,11 @@ $dropall    m->len = 0;
             return copy_fn(t) + "(" + address(recv) + ")";
         }
         if (e->bmethod == BMethod::opt_map) return optional_map(e);
+        // CLX-333: the box's memory, now C's to hold, as the box moved here and isn't dropped.
+        if (e->bmethod == BMethod::box_into_ptr) {
+            std::string b = tmp();
+            return "({ " + ctype(t) + " " + b + " = " + value(recv, t) + "; " + b + ".ptr; })";
+        }
         if (e->bmethod == BMethod::take || e->bmethod == BMethod::replace) {
             // The value moves out whole, and the place holds `none` or the new value, so nothing
             // is freed twice. A new value is made before the place is looked at.
@@ -7109,6 +7160,10 @@ $dropall    m->len = 0;
                            "; " + p + " + " + n + "; })";
                 }
                 case BMethod::ptr_is_null: return "(" + expr(recv) + " == 0)";
+                case BMethod::ptr_addr: return "((cx_usize)" + expr(recv) + ")";
+                // A box is a list of its one value (see `Box(v)`), whose memory `into_ptr` gave.
+                case BMethod::ptr_to_box: return "((" + ctype(e->type) + "){" + expr(recv) + ", 1, 1})";
+                case BMethod::ptr_cast: case BMethod::ptr_to_fn: return "((" + ctype(e->type) + ")(void*)" + expr(recv) + ")";
                 default: return "0";
             }
         }

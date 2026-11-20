@@ -1,0 +1,126 @@
+// What pointers in fields and signatures, `@export_c`, `extern "C" fn` types, `drop` and
+// `unsafe impl Send` don't allow (CLX-332, CLX-333).
+import std.thread.{Task}
+
+extern "C" fn abs(x: i32) -> i32
+
+struct Ctx {
+    p: *const u8
+}
+
+struct Job {
+    ctx: Ctx
+}
+
+impl Task for Job {
+    fn run(own self) {
+        _ = self.ctx
+    }
+}
+
+@export_c
+fn takes_text(s: String) {                    // error: `String` isn't a C type; an `@export_c` function takes
+    _ = s
+}
+
+@export_c
+fn changes(x: mut i32) {                      // error: can't be `mut` or `own`
+    x += 1
+}
+
+@export_c
+fn fails() ! String {                         // error: an `@export_c` function can't fail
+    return
+}
+
+@export_c
+fn generic<T>(x: T) -> T {                    // error: an `@export_c` function can't be generic
+    return x
+}
+
+@export_c("not a name")                       // error: isn't a name C can call
+fn spaced() {}
+
+@export_c("cx_mine")                          // error: names that start with `cx_` or `calx_` are the runtime's
+fn runtimes() {}
+
+@export_c("int")                              // error: is a word of C's
+fn keyword() {}
+
+@export_c("twice")
+fn first() {}
+
+@export_c("twice")                            // error: a function is already exported to C as `twice`
+fn second() {}
+
+@export_c
+fn callback(x: i32) -> i32 {
+    return x
+}
+
+fn plain(x: i32) -> i32 {
+    return x
+}
+
+pub struct Bad {
+    f: extern "C" fn(String)                  // error: `String` isn't a C type; a C function takes
+}
+
+@handle
+struct Door {
+    id: i64
+}
+
+impl Door {
+    fn drop(mut self) {
+        println("{self.id}")
+    }
+}
+
+@handle
+struct Window {
+    id: i64
+}
+
+impl Window {
+    fn drop(self) {                           // error: a `@handle` struct's `drop` is `fn drop(mut self)`
+        println("{self.id}")
+    }
+}
+
+struct Plain {
+    id: i64
+}
+
+impl Plain {
+    fn drop(mut self) {                       // error: only a `@handle` struct has a `drop` that runs by itself
+        self.id = 0
+    }
+}
+
+impl Send for Door {}                         // error: `Send` is worked out from what a type holds
+
+unsafe impl Task for Door {}                  // error: only `Send` is implemented with `unsafe impl`
+
+fn main() {
+    let bytes = List<u8>()
+    let c = unsafe { Ctx { p: bytes.as_ptr() } }
+    _ = c.p                                   // error: this is a pointer, `*const u8`, which can only be used inside `unsafe`
+    _ = unsafe { Thread.spawn(Job { ctx: c }) }    // error: isn't `Send`
+    let f: extern "C" fn(i32) -> i32 = callback
+    _ = f(1)                                  // error: calling it needs `unsafe`
+    let g: extern "C" fn(i32) -> i32 = plain  // error: `plain` is a Calx function
+    let h: extern "C" fn(i32) -> i32 = |x| x  // error: a closure can't be
+    let a: extern "C" fn(i32) -> i32 = abs
+    _ = (g, h, a)
+    var d = Door { id: 1 }
+    d.drop()                                  // error: `drop` runs by itself
+    let Door { id } = Door { id: 2 }          // error: has a `drop`, which runs on the whole value
+    _ = id
+    _ = Window { id: 3 }.id + Plain { id: 4 }.id
+    unsafe {
+        _ = c.p.to_fn<fn(i32) -> i32>()       // error: `to_fn` makes a C function's address
+        _ = c.p.to_box()                      // error: `to_box` takes back what `into_ptr` gave
+        _ = c.p.cast()                        // error: `cast` takes one generic argument
+    }
+}
