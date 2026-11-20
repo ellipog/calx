@@ -218,6 +218,8 @@ fn main() ! Error {
 | `uuid.uuid4()` | `Uuid.random()` from [`std.uuid`](../std/uuid.md) |
 | `requests.get(url).text` | `fetch(url)` from [`std.http`](../std/http.md), then `String.from_utf8(resp.body)`, ready for `parse` |
 | `requests.post(url, data={...}, files={...})` | `post_form(url, headers, Form.new().field(n, v).file(n, filename, bytes), timeout_ms, limit)` from [`std.http`](../std/http.md), a `multipart/form-data` body with its boundary and quoting done |
+| `httpx.Client(http2=True)`, `c.get(url)`, `r.http_version` | `get(url, headers, timeout_ms, limit, version: Version.Http2)` from [`std.http`](../std/http.md#http2), then `resp.version`. The whole program is one client, so connections are kept, and HTTP/2 requests to a host go over one at once. `http1=False` is `Version.Http2Only` |
+| `requests.Session()`, `r.elapsed` | Nothing for the session: every request keeps its connection for the next ([connections](../std/http.md#connections)). `resp.timings` has the time to connect, finish TLS and get the first byte, as curl's `-w` gives them ([timings](../std/http.md#timings)) |
 | `http.server.HTTPServer`, `BaseHTTPRequestHandler`, `do_GET` | `Server.listen(port)`, then `next()` for each request and `respond(req, res)` from [`std.http.server`](../std/http-server.md) |
 | `websockets.connect(url)`, `await ws.send(m)`, `await ws.recv()` | `connect(url)`, `ws.send_text(m)`, `ws.receive(timeout_ms)` from [`std.http.websocket`](../std/http-websocket.md), on a thread of its own rather than `asyncio` |
 | `websockets.serve(handler, host, port)`, `await ws.send(m)`, `async for m in ws` | `server.upgrade(req)`, `server.send_text(s, m)`, and each message from `server.next_event()` in [`std.http.server`](../std/http-server.md#websockets) |
