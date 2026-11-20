@@ -116,6 +116,18 @@ fn reads_a_number() ! String {
     assert(double(n) == 24, "12 doubled is {double(n)}")
 }
 
+fn half(n: i32) -> i32 ! Error {
+    if n % 2 != 0 {
+        fail "{n} is odd"
+    }
+    return n / 2
+}
+
+@test
+fn halves() ! Error {
+    assert(try half(double(3)) == 3)
+}
+
 fn main() {
     println("{double(4)}")    // out: 8
 }
@@ -125,12 +137,13 @@ fn main() {
 $ calx test tool.calx
 ok    doubles
 ok    reads_a_number
-2 passed, 0 failed (0.02 s)
+ok    halves
+3 passed, 0 failed (0.02 s)
 ```
 
 That's what it prints to a pipe or a file. In a terminal, each test starts with a green `✓` or a red `✗` and says how long it took, a status line names a test that's taking a while, and one that panicked says so ([in a terminal](#in-a-terminal)).
 
-- A test takes nothing and returns nothing. It fails by panicking, which is what a failed `assert` does, or by failing with an error, as a `main` can: `fn reads_a_number() ! String`.
+- A test takes nothing and returns nothing. It fails by panicking, which is what a failed `assert` does, or by failing with an error, as a `main` can: `fn reads_a_number() ! String`, or `fn halves() ! Error`, which can `try` calls that fail with any error that can be shown ([`Error`](errors.md#error)).
 - What a test prints is shown only if it fails, under its name, with its panic or its error and where it happened.
 - Names after the file run only the tests whose names hold one of them: `calx test tool.calx parse` runs `parses_ints` and `parse_errors`.
 - `calx test` exits with 0 when every test passed, and 1 otherwise, or if the file has no tests.

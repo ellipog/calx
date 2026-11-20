@@ -338,13 +338,19 @@ private:
         }
         // A constant's value can name other constants.
         for (std::size_t i = 0; i < all.consts.size(); i++) all.merge(consts_.at(all.consts[i]).uses);
-        // A `main` that fails shows its error. A file of tests may have none, and its C's `main`
-        // runs a test instead.
-        if (p.has_main && prog_.main && prog_.main->result_type->is_result) {
-            const Type* rt = prog_.main->result_type;
-            all.add_type(rt);
-            if (show_glue(rt->args[1])) all.add_show(rt->args[1]);
-            else if (rt->args[1]->kind == TypeKind::enum_) all.add_name(rt->args[1]);
+        // A `main` that fails shows its error, and so does a test (CLX-393). Under `calx test`, C's
+        // `main` runs a test instead of the file's `main`, which it may not have.
+        if (p.has_main) {
+            std::vector<const Item*> entries;
+            if (opt_.tests) entries.assign(prog_.tests.begin(), prog_.tests.end());
+            else if (prog_.main) entries.push_back(prog_.main);
+            for (const Item* f : entries) {
+                const Type* rt = f->result_type;
+                if (!rt->is_result) continue;
+                all.add_type(rt);
+                if (show_glue(rt->args[1])) all.add_show(rt->args[1]);
+                else if (rt->args[1]->kind == TypeKind::enum_) all.add_name(rt->args[1]);
+            }
         }
         for (std::size_t i = 0; i < all.eqs.size(); i++) {
             for (const Type* x : held(all.eqs[i])) {
