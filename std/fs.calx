@@ -533,7 +533,9 @@ pub fn remove_dir(path: String) ! FsError {
 }
 
 /// Removes the directory at `path` and everything in it. A link inside is removed, never
-/// followed, so nothing outside the directory is touched.
+/// followed, so nothing outside the directory is touched. A read-only file inside is removed too,
+/// as `rm -rf` removes one, on Windows as elsewhere: git makes its objects read-only, so a clone
+/// is one.
 pub fn remove_dir_all(path: String) ! FsError {
     for name in try list(path) {
         let inner = "{path}/{name}"
@@ -549,7 +551,17 @@ pub fn remove_dir_all(path: String) ! FsError {
                     },
                 }
             },
-            some(_) => try remove_file(inner),
+            some(_) => match remove_file(inner) {
+                ok => {},
+                // Windows won't remove a read-only file as it is.
+                err(FsError.Denied) => {
+                    try set_mode(inner, 0o600)
+                    try remove_file(inner)
+                },
+                err(e) => {
+                    fail e
+                },
+            },
             none => {},
         }
     }
