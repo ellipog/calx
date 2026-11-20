@@ -7,7 +7,7 @@ description: "A WebSocket client: ws:// and wss:// on the system's HTTP client, 
 
 A WebSocket client (RFC 6455), for talking to a server that pushes messages as they happen, as Python's `websockets` and `websocket-client` do: a browser's DevTools protocol, a chat or a live dashboard's feed. It connects to `ws://` and `wss://` URLs through the system's own HTTP client, so TLS certificates are checked as [`std.http`](http.md)'s are.
 
-Each connection runs on a thread of its own. It answers the server's pings and its close by itself, checks that text is UTF-8, and keeps the messages that come until the program takes them, so a program that's busy loses none.
+Each connection runs on a thread of its own. It answers the server's pings and its close by itself, checks that text is UTF-8, and keeps the messages that come until the program takes them, so a program that's busy loses none. It uses no [`std.net`](net.md#threads) `Net`, so a program can open one on any thread, beside a [server](http-server.md) on another thread of the same program, or in a [library](../reference/libraries.md).
 
 The server's side is [std.http.server](http-server.md#websockets)'s `upgrade`, which makes a request's connection a WebSocket, with the same `Message`.
 

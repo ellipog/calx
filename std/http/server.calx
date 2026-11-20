@@ -344,7 +344,8 @@ impl Server {
     /// milliseconds, or forever if it's negative, and `none` if none came in that time. Each
     /// request gets one `respond`; until it does, the next request on the same connection waits,
     /// while other connections' come. After `wake_on_signal`, it's `none` at once while a signal
-    /// is pending, so a server's loop ends when it's asked to stop.
+    /// is pending, and once after each signal, whichever thread takes it, so a server's loop ends
+    /// when it's asked to stop.
     pub fn next(mut self, timeout_ms: i64 = -1) -> Request? {
         let start = unsafe { Instant.now() }
         loop {
@@ -366,7 +367,7 @@ impl Server {
     /// or close, or an event stream's end, waiting up to `timeout_ms` milliseconds for it, or
     /// forever if it's negative. `none` if nothing happened in that time. What happens on
     /// sockets and streams waits for it in order, while `next` gives only the requests. After
-    /// `wake_on_signal`, it's `none` at once while a signal is pending, as `next` is.
+    /// `wake_on_signal`, it's `none` at a signal, as `next` is.
     pub fn next_event(mut self, timeout_ms: i64 = -1) -> ServerEvent? {
         let start = unsafe { Instant.now() }
         loop {
@@ -389,14 +390,20 @@ impl Server {
 
     /// Stops `next`, `next_event` and `serve` at each signal the program handles with
     /// `std.signal`: a signal wakes the server's poll, and they give `none`, or for `serve`
-    /// return, after `shutdown`, while one is pending, that `std.signal.take` hasn't taken.
+    /// return, after `shutdown`, while one is pending, that `std.signal.take` hasn't taken, and
+    /// once after each signal however soon another thread takes it, so servers on several
+    /// threads each stop.
     pub fn wake_on_signal(mut self) ! NetError {
         try self.net.wake_on_signal()
         self.on_signal = true
     }
 
+    // Whether to stop at a signal: one woke this server's `Net`, or one is pending. Its `Net`
+    // says so whichever thread takes the signal, so servers on two threads both stop at one,
+    // where a server whose thread looked after the other's had taken it saw none (CLX-386). Its
+    // `Net` is asked first, so it forgets a signal it was woken by however this ends.
     fn signalled(self) -> bool {
-        return self.on_signal and pending()
+        return self.on_signal and (self.net.signalled() or pending())
     }
 
     /// Closes every connection cleanly, for a server that's stopping, as Python's
@@ -1036,10 +1043,11 @@ impl Server {
         }
         // Requests the workers have that they haven't answered.
         var working: usize = 0
+        var stopping = false
         loop {
             // Asked to stop, it takes no more requests, and once the workers have answered those
-            // they have, closes every connection.
-            let stopping = self.signalled()
+            // they have, closes every connection. It stays asked, as its `Net` says so once.
+            stopping = stopping or self.signalled()
             if stopping and working == 0 {
                 self.shutdown()
                 return

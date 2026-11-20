@@ -1,0 +1,160 @@
+// Two `Net`s on two threads of one process, each with a burst of loopback traffic at the same time
+// (CLX-386), while a third thread waits in a poll of its own that nothing wakes until the end. Each
+// burst listens, opens 8 connections to itself, and sends 150 messages of 2000 bytes one after
+// another on each, every one echoed back before the next goes. Every byte a thread gets is its
+// own tag, so a connection of the other `Net`'s never reaches it, and every event names a
+// connection it made or accepted. Both finish while the third thread is still waiting, so no poll
+// holds anything the others need, and the third wakes once its `Waker` is used.
+import std.net.{Event, Net, Waker}
+import std.thread.{Task}
+import std.time.{Instant}
+
+const CONNS: usize = 8
+const ROUNDS: usize = 150
+const SIZE: usize = 2000
+
+struct Burst {
+    tag: u8
+    go: Receiver<bool>
+    out: Sender<String>
+}
+
+fn index_of(ids: List<u32>, id: u32) -> usize? {
+    for i in 0..ids.len() {
+        if ids[i] == id {
+            return some(i)
+        }
+    }
+    return none
+}
+
+impl Task for Burst {
+    fn run(own self) {
+        var go = self.go
+        var out = self.out
+        let net = Net.new()!
+        let port = net.listen("127.0.0.1", 0)!
+        _ = go.wait()
+        let began = unsafe { Instant.now() }
+        var clients = List<u32>()
+        for _ in 0..CONNS {
+            clients.push(net.connect("127.0.0.1", port)!.id())
+        }
+        var accepted = List<u32>()
+        let msg: List<u8> = [self.tag; SIZE]
+        var got: List<usize> = [0; CONNS]
+        var done: usize = 0
+        var foreign: usize = 0
+        var strangers: usize = 0
+        var lost: usize = 0
+        var events = List<Event>()
+        while done < CONNS {
+            net.poll(10000, mut events)
+            if events.is_empty() {
+                break
+            }
+            for e in events {
+                match e {
+                    Connected(c) => net.write(c, msg),
+                    Accepted(c) => accepted.push(c.id()),
+                    Received(c) => {
+                        var bytes = List<u8>()
+                        _ = net.read(c, mut bytes)
+                        for b in bytes {
+                            if b != self.tag {
+                                foreign += 1
+                            }
+                        }
+                        if let i = index_of(clients, c.id()) {
+                            got[i] += bytes.len()
+                            if got[i] == ROUNDS * SIZE {
+                                done += 1
+                                net.close(c)
+                            } else if got[i] % SIZE == 0 {
+                                net.write(c, msg)
+                            }
+                        } else if index_of(accepted, c.id()) != none {
+                            net.write(c, bytes)
+                        } else {
+                            strangers += 1
+                        }
+                    }
+                    Closed(c) => {
+                        if let i = index_of(clients, c.id()) {
+                            if got[i] < ROUNDS * SIZE {
+                                lost += 1
+                            }
+                        }
+                    }
+                    Woken => {}
+                }
+            }
+        }
+        let secs = unsafe { Instant.now() }.secs_since(began)
+        _ = net.drain(5000)
+        out.send("{self.tag}: {done} of {CONNS} done, {accepted.len()} accepted, {foreign} foreign bytes, {strangers} strangers, {lost} lost, in time {secs < 60.0}")
+    }
+}
+
+// Waits in one poll, which only its `Waker` ends.
+struct Idle {
+    waker: Sender<Waker>
+    out: Sender<String>
+}
+
+impl Task for Idle {
+    fn run(own self) {
+        var waker = self.waker
+        var out = self.out
+        let net = Net.new()!
+        waker.send(net.waker()!)
+        var events = List<Event>()
+        var polls = 0
+        var woken = false
+        while not woken and polls < 10 {
+            net.poll(60000, mut events)
+            polls += 1
+            for e in events {
+                if e == Event.Woken {
+                    woken = true
+                }
+            }
+        }
+        out.send("idle: woken {woken} after {polls} poll")
+    }
+}
+
+fn main() {
+    var results = Receiver<String>()
+    var wakers = Receiver<Waker>()
+    let idle = unsafe { Thread.spawn(Idle { waker: wakers.sender(), out: results.sender() }) }
+    let waker = wakers.wait() ?? panic("no waker")
+    let go_a = Receiver<bool>()
+    let go_b = Receiver<bool>()
+    var start_a = go_a.sender()
+    var start_b = go_b.sender()
+    let a = unsafe { Thread.spawn(Burst { tag: 65, go: go_a, out: results.sender() }) }
+    let b = unsafe { Thread.spawn(Burst { tag: 66, go: go_b, out: results.sender() }) }
+    start_a.send(true)
+    start_b.send(true)
+    a.join()
+    b.join()
+    var lines = List<String>()
+    while let line = results.next() {
+        lines.push(line)
+    }
+    // The idle thread hasn't said anything yet: it's still in its poll.
+    println("{lines.len()} before the wake")    // out: 2 before the wake
+    waker.wake()
+    idle.join()
+    while let line = results.next() {
+        lines.push(line)
+    }
+    lines.sort()
+    for line in lines {
+        println(line)
+    }
+    // out: 65: 8 of 8 done, 8 accepted, 0 foreign bytes, 0 strangers, 0 lost, in time true
+    // out: 66: 8 of 8 done, 8 accepted, 0 foreign bytes, 0 strangers, 0 lost, in time true
+    // out: idle: woken true after 1 poll
+}

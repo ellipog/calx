@@ -1009,6 +1009,8 @@ CX_FN(void, cx_net_flush, (cx_u64 h));
 CX_FN(cx_bool, cx_net_waker, (cx_u64 h));
 CX_FN(void, cx_net_wake, (cx_u64 h));
 CX_FN(cx_bool, cx_net_wake_on_signal, (cx_u64 h));
+CX_FN(cx_bool, cx_net_signalled, (cx_u64 h));
+CX_FN(cx_u32, cx_net_number, (cx_u64 h));
 CX_FN(cx_bool, cx_net_drain, (cx_u64 h, cx_i64 timeout_ms));
 CX_FN(cx_u32, cx_net_peer, (cx_u64 h, cx_u32 id, cx_u8* out));
 CX_FN(cx_u32, cx_net_error_kind, (void));

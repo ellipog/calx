@@ -55,7 +55,7 @@ fn main() {
 
 | Item | Gives |
 | --- | --- |
-| `Net` | Listening sockets, connections and their events. It's `Copy`: copies are the same `Net` |
+| `Net` | Listening sockets, connections and their events. It's `Copy`: copies are the same `Net`. It's one thread's at a time, and each thread that polls has its own ([threads](#threads)) |
 | `Net.new() -> Net ! NetError` | A new, empty `Net` |
 | `net.listen(host: String, port: u16) -> u16 ! NetError` | Listens on `host` and `port`, and returns the port, which the system picks when `port` is 0. An empty host listens on every address, IPv4 and IPv6, with one IPv6 socket that takes IPv4 clients too; where the machine has no IPv6, on every IPv4 address |
 | `net.connect(host: String, port: u16) -> Conn ! NetError` | Starts opening a connection. A poll reports `Connected` once it's open, or `Closed` if it couldn't be |
@@ -68,13 +68,14 @@ fn main() {
 | `net.close(conn: Conn)` | Sends what was queued on the connection, then closes it |
 | `net.drain(timeout_ms: i64) -> bool` | Waits up to `timeout_ms` milliseconds, or forever if it's negative, until what was written has gone and what was closed has closed, for a program about to end, as asyncio's `drain()` and `wait_closed()` do. `false` if the time ran out ([below](#stopping-at-a-signal)) |
 | `net.wake_on_signal() ! NetError` | Wakes the poll at each signal the program handles with [`std.signal`](signal.md), which reports `Woken` ([below](#stopping-at-a-signal)) |
+| `net.signalled() -> bool` | Whether a signal has woken the `Net` since `wake_on_signal`, or since `signalled` last said so, which it then forgets. Each `Net` hears of each signal, so loops on several threads each stop at one, though only one thread `take`s it ([below](#stopping-at-a-signal)) |
 | `net.waker() -> Waker ! NetError` | A `Waker` for the `Net`'s polls |
 | `Waker` | Wakes a `Net`'s poll from another thread. It's `Copy` and `Send`, and every copy wakes the same `Net` |
 | `waker.wake()` | Makes the poll waiting report `Woken`, or the next poll if none is waiting. Any thread can call it, except inside a `parallel for` |
 | `net.peer(conn: Conn) -> Address?` | The address at the connection's other end, as it was when it opened. It stays until the poll after the connection's `Closed`, so the `Closed` can be logged with it, and is `none` for a connection that never opened |
-| `Conn` | A connection. It's `Copy` |
+| `Conn` | A connection. It's `Copy`, and two are equal when their `id`s are. It's the `Net`'s that opened or accepted it, and another `Net` given it panics ([threads](#threads)) |
 | `conn.slot() -> usize` | A small number for the connection, counting from 0, for indexing what the program keeps per connection |
-| `conn.id() -> u32`, `Conn.from_id(id: u32) -> Conn` | The connection's number, its slot and how many connections had the slot before, which no two of a `Net`'s connections share at once, and the connection with a number, for a log of connections that's replayed. A number no connection has names none: reading it gives nothing, and writing to it or closing it does nothing |
+| `conn.id() -> u32`, `Conn.from_id(id: u32) -> Conn` | The connection's number, its slot and how many connections had the slot before, which no two of a `Net`'s connections share at once, and the connection with a number, in whichever `Net` it's given to, for a log of connections that's replayed. A number no connection has names none: reading it gives nothing, and writing to it or closing it does nothing |
 | `Event` | `Accepted(Conn)`, `Connected(Conn)`, `Received(Conn)`, `Closed(Conn)` or `Woken` |
 | `NetError` | `AddressInUse`, `BadAddress`, `Refused`, or `Os(i32)` with the system's error code |
 | `Ip` | `V4([u8; 4])`, or `V6([u8; 16], u32)` with its scope, the interface a link-local address is on, or 0 |
@@ -212,7 +213,68 @@ A connection that can't be opened, such as one to a port where nothing listens, 
 
 ## Threads
 
-Only the thread that made a `Net` can use it, and never inside a [`parallel for`](../reference/parallel.md), which panics. Other threads talk to it through [queues](thread.md), and a `Waker` lets them say they've queued something, so the thread polling needn't wait out its timeout to find it:
+A `Net` is an event loop, and it's one thread's at a time. A program with loops on several threads gives each [thread](thread.md) a `Net` of its own, as Python gives each thread its own `asyncio.new_event_loop()`. Everything about a `Net` is its own: its sockets, its buffers, its events, and the IOCP port, epoll or kqueue its poll waits on. So `Net`s on different threads poll at once, and none waits for another, or for anything another holds:
+
+```calx
+import std.net.{Event, Net}
+import std.thread.{Task}
+
+// A loop on a thread of its own: it listens, connects to itself, and says what came back.
+struct Loop {
+    word: String
+    out: Sender<String>
+}
+
+impl Task for Loop {
+    fn run(own self) {
+        var out = self.out
+        let net = Net.new()!
+        let client = net.connect("127.0.0.1", net.listen("127.0.0.1", 0)!)!
+        var events = List<Event>()
+        var got = List<u8>()
+        while got.len() < self.word.len() {
+            net.poll(5000, mut events)
+            for e in events {
+                match e {
+                    Connected(c) => net.write(c, self.word.to_bytes()),
+                    Received(c) => {
+                        if c == client {
+                            _ = net.read(c, mut got)
+                        } else {
+                            var bytes = List<u8>()
+                            _ = net.read(c, mut bytes)
+                            net.write(c, bytes)    // echo it back
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out.send(String.from_utf8(got) ?? String())
+    }
+}
+
+fn main() {
+    var out = Receiver<String>()
+    let a = unsafe { Thread.spawn(Loop { word: String("ping"), out: out.sender() }) }
+    let b = unsafe { Thread.spawn(Loop { word: String("pong"), out: out.sender() }) }
+    a.join()
+    b.join()
+    var words = [out.next() ?? String(), out.next() ?? String()]
+    words.sort()
+    println("{words}")    // out: [ping, pong]
+}
+```
+
+- **What threads share.** Only what the system has one of for the whole program: its limit on open sockets, and on Windows for desktops the two `TransmitFile` calls it runs at once, whose turns the runtime hands out to every `Net` alike ([below](#how-it-works)).
+- **One thread at a time.** A `Net` can move to another thread, as any value that's sent in a message or a task does, and a [`Server`](http-server.md) with it, which is then that thread's. But a `Net` is `Copy`, so two threads could hold one, and two using it at once panic, rather than tear its connections apart. Inside a [`parallel for`](../reference/parallel.md) it panics too.
+- **Connections are their `Net`'s.** A `Conn` names a connection by its number in its `Net`, and the first connections of two `Net`s have the same numbers. So a `Conn` from one `Net` given to another panics, rather than read or write that `Net`'s own connection with the number. One made with `Conn.from_id` is taken by whichever `Net` it's given to.
+- **Signals.** Each `Net` that `wake_on_signal` was called on is woken by each signal, on whichever thread it's polled, and `signalled` tells each that it was ([below](#stopping-at-a-signal)).
+- **In a library.** A [library](../reference/libraries.md#one-runtime) has no runtime of its own, so its `Net`s are the program's runtime's, as the program's own are. A library's threads poll beside the program's, each with its own `Net`, as they would in the program. The threads run the library's code, so they end before the program `close`s it. [tests/library/net_threads.calx](../../tests/library/net_threads.calx) runs a server and a WebSocket client to it on two threads a library starts, while the program polls a `Net` of its own on another.
+
+[std.http.server](http-server.md) and [std.http.websocket](http-websocket.md) follow from that. A `Server` holds a `Net`, so a server on a thread is that thread's, and a WebSocket client needs no `Net`: its connection runs on a thread std.http.websocket starts for it, so it can be opened on any thread, a server's own or another. [tests/thread/net_server_websocket.calx](../../tests/thread/net_server_websocket.calx) runs one of each on two threads of one program, and [tests/thread/net_two_loops.calx](../../tests/thread/net_two_loops.calx) two `Net`s with a burst of traffic each at once, while a third thread waits in a poll.
+
+Other threads talk to a `Net`'s thread through [queues](thread.md), and a `Waker` lets them say they've queued something, so the thread polling needn't wait out its timeout to find it:
 
 ```calx
 import std.net.{Event, Net, Waker}
@@ -301,6 +363,7 @@ fn main() {
 ```
 
 - **A signal wakes a poll from the thread that hears of it**, as a `Waker` would, so it comes as `Woken`, one with any other wakes before the poll, and `take` says which signal it was. A `Net` can be woken by signals and `Waker`s both.
+- **Loops on several threads** each call `wake_on_signal` on their own `Net`, and each is woken by each signal. But a signal is taken once for the whole program, so a loop that asks `take` or `pending` whether one came can find that another thread took it first, and miss it. Each asks its own `Net` instead: `signalled()` says whether a signal woke that `Net` since it last said so ([tests/thread/net_signal_two.calx](../../tests/thread/net_signal_two.calx)).
 - **`drain(timeout_ms)`** waits up to that long, or forever if it's negative, until what was written to every connection has gone to the system, and each connection `close` closed has closed: on Windows that's once the receive the runtime cancels comes back. `false` if the time ran out first. Events that come meanwhile wait for the next poll.
 - **[`std.http.server`](http-server.md#stopping-cleanly)** does all of this for a server with `wake_on_signal` and `shutdown`.
 
@@ -317,6 +380,8 @@ What's written is queued, and handed to the system at the next poll or flush: on
 
 A file goes once what was queued before it has gone, at most 1 GiB a call. On Windows the runtime opens it again with `ReOpenFile`, overlapped, so the offset it gives is the one used: a handle copied with `DuplicateHandle` would share the program's file position, which `TransmitFile` reads from, and two connections sent one file at once cut each other short. On Linux a `dup` does, since `sendfile` is given its own offset. What's written while a file goes, and files queued behind it, wait in the runtime and take their turns. On Windows they often have to: `TransmitFile` can say it's done after the other end has every byte and has asked for more. A connection whose other end has gone ends with a `Closed` event, never the program: `send` is given `MSG_NOSIGNAL`, and `sendfile`, which has no such flag, runs with `SIGPIPE` blocked, which it takes if the call raised it.
 Windows editions for desktops, rather than servers, run two `TransmitFile` calls at once in the whole system and queue the rest, so a connection queued behind two slow clients would get nothing until they were done. There the runtime takes turns: two calls at a time, each of at most 4 MiB. A connection that finds both turns taken reads 256 KiB of its file with an overlapped `ReadFile`, sends that with `WSASend`, and asks for a turn again before the next part. It takes a third turn anyway when the last call took at most 50 ms and ended in the last 100 ms, since a call that short won't wait long. Editions for servers and Linux never use parts. `CALX_NET_FILE_PARTS=1` in the environment makes Windows send every file in parts, so tests can run that path on any edition.
+
+Each `Net` has its own port, epoll or kqueue, and its own slots, buffers and events, and the TransmitFile turns, counted atomically, are all the `Net`s share. Each call of a `Net`'s holds it with a flag that's set and cleared atomically, which is how a second thread in it at once is found and panics, and which also hands what one thread did to the next to hold it. A `Waker`'s wake holds nothing, since any thread may wake a `Net`. A `Conn` holds its `Net`'s number, which std.net checks. The `Net`s a signal wakes are in a list that's locked while one is added, so two threads asking at once each get their place.
 
 Both read up to 16 KB at a time per connection. A listening socket on Windows uses `SO_EXCLUSIVEADDRUSE`, so a second listener on the same port fails with `AddressInUse` on both platforms.
 

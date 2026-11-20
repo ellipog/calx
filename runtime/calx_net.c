@@ -1,6 +1,7 @@
 /* The Calx runtime's TCP networking, behind std.net (D33, D92).
  *
- * A poller owns its connections, and only the thread that opened it uses it. The runtime keeps
+ * A poller owns its connections, and one thread at a time uses it (see net_enter), so each thread
+ * with an event loop of its own has its own poller, and they poll at once. The runtime keeps
  * each connection's buffers: what arrived, waiting for `read`, and what `send` queued, waiting
  * for the socket. `poll` reports what happened as events: a connection accepted, an outgoing one
  * open, bytes received, a connection closed, or a waker woke it. On Windows that's IOCP, whose
@@ -90,6 +91,9 @@ static void net_check_thread(void) {
                                  "saw would depend on timing");
     }
 }
+
+/* How many pollers the program has opened, which numbers each. */
+static cx_u32 net_count;
 
 static CX_COLD void net_out_of_memory(void) { cx_panic_text("<memory>", "out of memory"); }
 
@@ -212,12 +216,40 @@ typedef struct {
     int woken;      /* a wake is on its way, set and cleared atomically, so wakes come as one */
     int woke;       /* this poll's events have a Woken already */
     int has_waker;  /* other threads may wake it */
+    int busy;       /* a thread is in one of its calls, set and cleared atomically (see net_enter) */
+    int signalled;  /* a signal woke it since `cx_net_signalled` last said so, set atomically */
+    cx_u32 number;  /* which of the program's pollers it is, from 1, for telling their connections apart */
 #if !defined(_WIN32) && !defined(__APPLE__)
     int wake_fd;    /* the eventfd a wake writes to, once there's a waker; macOS's is in the kqueue */
 #endif
 } net;
 
 static cx_u32 slot_id(const net_slot* s) { return ((cx_u32)s->gen << NET_INDEX_BITS) | s->index; }
+
+/* Each poller is one thread's at a time (CLX-386). Pollers share nothing but the TransmitFile
+ * turns below, so each thread can have its own, polling at once with no lock between them. One
+ * can move to another thread, as a value that's sent does, but two threads in its calls at once
+ * would tear its slots and buffers, so each call holds it, and a second thread that finds it held
+ * panics rather than race. The acquire and release also hand what one thread did to the next to
+ * hold it. A waker's wake holds nothing, since any thread may wake it. */
+static net* net_enter(cx_u64 h) {
+    net_check_thread();
+    net* n = (net*)(uintptr_t)h;
+    int idle = 0;
+    if (!__atomic_compare_exchange_n(&n->busy, &idle, 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+        cx_panic_text("std.net", "two threads used one `Net` at once: a `Net` is one thread's at a time, so each "
+                                 "thread that polls needs its own, and other threads wake it with a `Waker`");
+    }
+    return n;
+}
+
+static void net_leave(net* n) { __atomic_store_n(&n->busy, 0, __ATOMIC_RELEASE); }
+
+/* A new poller's number: never 0, which a connection made from an id has, for any poller. */
+static void net_number(net* n) {
+    do n->number = __atomic_add_fetch(&net_count, 1, __ATOMIC_RELAXED);
+    while (n->number == 0);
+}
 
 #ifdef _WIN32
 static void tf_release(net_slot* s);
@@ -846,6 +878,7 @@ cx_u64 cx_net_open(void) {
     }
     net* n = calloc(1, sizeof *n);
     if (!n) net_out_of_memory();
+    net_number(n);
     n->iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
     if (!n->iocp) {
         net_fail(ERR_OTHER, (cx_i32)GetLastError());
@@ -855,9 +888,7 @@ cx_u64 cx_net_open(void) {
     return (cx_u64)(uintptr_t)n;
 }
 
-cx_i32 cx_net_listen(cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port) {
-    net_check_thread();
-    net* n = (net*)(uintptr_t)h;
+static cx_i32 net_listen(net* n, const cx_u8* host, cx_usize len, cx_u16 port) {
     struct addrinfo* a = resolve(host, len, port, 1);
     if (!a) return -1;
     const struct addrinfo* b = listen_addr(a, len == 0);
@@ -900,9 +931,7 @@ cx_i32 cx_net_listen(cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port) {
     return local_port(&at);
 }
 
-cx_u32 cx_net_connect(cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port) {
-    net_check_thread();
-    net* n = (net*)(uintptr_t)h;
+static cx_u32 net_connect(net* n, const cx_u8* host, cx_usize len, cx_u16 port) {
     struct addrinfo* a = resolve(host, len, port, 0);
     if (!a) return NET_NONE;
     SOCKET s = WSASocketW(a->ai_family, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
@@ -1269,6 +1298,7 @@ cx_u64 cx_net_open(void) {
     net_check_thread();
     net* n = calloc(1, sizeof *n);
     if (!n) net_out_of_memory();
+    net_number(n);
 #ifdef __APPLE__
     n->ep = kqueue();  /* never inherited by a child, so no close-on-exec needed */
 #else
@@ -1282,9 +1312,7 @@ cx_u64 cx_net_open(void) {
     return (cx_u64)(uintptr_t)n;
 }
 
-cx_i32 cx_net_listen(cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port) {
-    net_check_thread();
-    net* n = (net*)(uintptr_t)h;
+static cx_i32 net_listen(net* n, const cx_u8* host, cx_usize len, cx_u16 port) {
     struct addrinfo* a = resolve(host, len, port, 1);
     if (!a) return -1;
     const struct addrinfo* b = listen_addr(a, len == 0);
@@ -1318,9 +1346,7 @@ cx_i32 cx_net_listen(cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port) {
     return local_port(&at);
 }
 
-cx_u32 cx_net_connect(cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port) {
-    net_check_thread();
-    net* n = (net*)(uintptr_t)h;
+static cx_u32 net_connect(net* n, const cx_u8* host, cx_usize len, cx_u16 port) {
     struct addrinfo* a = resolve(host, len, port, 0);
     if (!a) return NET_NONE;
     int fd = new_socket(a->ai_family);
@@ -1375,8 +1401,7 @@ static void send_dirty(net* n) {
 
 /* Closes every socket, and frees the poller. */
 void cx_net_free(cx_u64 h) {
-    net_check_thread();
-    net* n = (net*)(uintptr_t)h;
+    net* n = net_enter(h);
     close_all(n);
     for (size_t i = 0; i < n->nslots; i++) {
         net_slot* s = n->slots[i];
@@ -1402,41 +1427,50 @@ void cx_net_free(cx_u64 h) {
 }
 
 cx_usize cx_net_poll(cx_u64 h, cx_i64 timeout_ms) {
-    net_check_thread();
-    net* n = (net*)(uintptr_t)h;
+    net* n = net_enter(h);
     send_dirty(n);
     closed_seen(n);
     retire(n);
     wait_events(n, n->nev ? 0 : timeout_ms);
-    return deliver(n);
+    size_t got = deliver(n);
+    net_leave(n);
+    return got;
 }
 
+/* What the last poll returned, which the thread that polled reads straight after. */
 cx_u32 cx_net_event_kind(cx_u64 h, cx_usize i) { return ((net*)(uintptr_t)h)->out[2 * i]; }
 cx_u32 cx_net_event_conn(cx_u64 h, cx_usize i) { return ((net*)(uintptr_t)h)->out[2 * i + 1]; }
 
+/* The poller's number, which std.net puts in each `Conn` it gives, so another poller's is told
+ * apart. It never changes, so any thread may ask. */
+cx_u32 cx_net_number(cx_u64 h) { return ((net*)(uintptr_t)h)->number; }
+
 cx_usize cx_net_available(cx_u64 h, cx_u32 id) {
-    net_check_thread();
-    net_slot* s = conn_of((net*)(uintptr_t)h, id);
-    return s ? buf_live(&s->in) : 0;
+    net* n = net_enter(h);
+    net_slot* s = conn_of(n, id);
+    cx_usize k = s ? buf_live(&s->in) : 0;
+    net_leave(n);
+    return k;
 }
 
 cx_usize cx_net_read(cx_u64 h, cx_u32 id, cx_u8* to, cx_usize max) {
-    net_check_thread();
-    net_slot* s = conn_of((net*)(uintptr_t)h, id);
-    if (!s) return 0;
-    size_t k = buf_live(&s->in);
-    if (k > max) k = max;
-    memcpy(to, s->in.p + s->in.at, k);
-    s->in.at += k;
-    if (s->in.at == s->in.len) s->in.at = s->in.len = 0;
+    net* n = net_enter(h);
+    net_slot* s = conn_of(n, id);
+    size_t k = 0;
+    if (s) {
+        k = buf_live(&s->in);
+        if (k > max) k = max;
+        memcpy(to, s->in.p + s->in.at, k);
+        s->in.at += k;
+        if (s->in.at == s->in.len) s->in.at = s->in.len = 0;
+    }
+    net_leave(n);
     return k;
 }
 
 /* What was queued on a connection that the system hasn't taken yet: on Windows, with what the
  * send in flight still holds. */
-cx_usize cx_net_queued(cx_u64 h, cx_u32 id) {
-    net_check_thread();
-    net_slot* s = conn_of((net*)(uintptr_t)h, id);
+static cx_usize queued(const net_slot* s) {
     if (!s) return 0;
     cx_u64 left = buf_live(&s->out) + buf_live(&s->after) + s->file_left;
     for (const net_wait* w = s->waiting; w; w = w->next) left += w->left + buf_live(&w->after);
@@ -1446,25 +1480,31 @@ cx_usize cx_net_queued(cx_u64 h, cx_u32 id) {
     return (cx_usize)left;
 }
 
+cx_usize cx_net_queued(cx_u64 h, cx_u32 id) {
+    net* n = net_enter(h);
+    cx_usize left = queued(conn_of(n, id));
+    net_leave(n);
+    return left;
+}
+
 void cx_net_send(cx_u64 h, cx_u32 id, const cx_u8* p, cx_usize len) {
-    net_check_thread();
-    net* n = (net*)(uintptr_t)h;
+    net* n = net_enter(h);
     net_slot* s = conn_of(n, id);
-    if (!s || len == 0 || s->state == CONN_CLOSED || s->state == CONN_CLOSING) return;
-    buf_append(s->waiting_last ? &s->waiting_last->after : s->has_file ? &s->after : &s->out, p, len);
-    if (!s->dirty) {
-        s->dirty = 1;
-        n->dirty = net_grow(n->dirty, &n->dirty_cap, n->ndirty + 1, sizeof(cx_u32));
-        n->dirty[n->ndirty++] = s->index;
+    if (s && len != 0 && s->state != CONN_CLOSED && s->state != CONN_CLOSING) {
+        buf_append(s->waiting_last ? &s->waiting_last->after : s->has_file ? &s->after : &s->out, p, len);
+        if (!s->dirty) {
+            s->dirty = 1;
+            n->dirty = net_grow(n->dirty, &n->dirty_cap, n->ndirty + 1, sizeof(cx_u32));
+            n->dirty[n->ndirty++] = s->index;
+        }
     }
+    net_leave(n);
 }
 
 /* Queues `n` bytes of the open file `file`, from `at`, after what's queued, files too: 0 if the
  * connection is closing or closed, or the file can't be opened again. The runtime's handle is its
  * own, so the program may close its own at once. */
-cx_bool cx_net_send_file(cx_u64 h, cx_u32 id, cx_i64 file, cx_u64 at, cx_u64 len) {
-    net_check_thread();
-    net* n = (net*)(uintptr_t)h;
+static cx_bool send_file(net* n, cx_u32 id, cx_i64 file, cx_u64 at, cx_u64 len) {
     net_slot* s = conn_of(n, id);
     if (!s || s->state == CONN_CLOSED || s->state == CONN_CLOSING) return 0;
     if (len == 0) return 1;
@@ -1514,16 +1554,22 @@ cx_bool cx_net_send_file(cx_u64 h, cx_u32 id, cx_i64 file, cx_u64 at, cx_u64 len
     return 1;
 }
 
+cx_bool cx_net_send_file(cx_u64 h, cx_u32 id, cx_i64 file, cx_u64 at, cx_u64 len) {
+    net* n = net_enter(h);
+    cx_bool ok = send_file(n, id, file, at, len);
+    net_leave(n);
+    return ok;
+}
+
 /* Sends what was queued on every connection, without waiting for the next poll. */
 void cx_net_flush(cx_u64 h) {
-    net_check_thread();
-    send_dirty((net*)(uintptr_t)h);
+    net* n = net_enter(h);
+    send_dirty(n);
+    net_leave(n);
 }
 
 /* Lets other threads wake the poller's polls: 1 once they can. */
-cx_bool cx_net_waker(cx_u64 h) {
-    net_check_thread();
-    net* n = (net*)(uintptr_t)h;
+static cx_bool waker(net* n) {
     if (n->has_waker) return 1;
 #ifdef __APPLE__
     /* On macOS a wake triggers a user event in the kqueue, which EV_CLEAR sets back once seen. */
@@ -1546,6 +1592,13 @@ cx_bool cx_net_waker(cx_u64 h) {
 #endif
     n->has_waker = 1;
     return 1;
+}
+
+cx_bool cx_net_waker(cx_u64 h) {
+    net* n = net_enter(h);
+    cx_bool ok = waker(n);
+    net_leave(n);
+    return ok;
 }
 
 /* Wakes the poller's poll, or its next, from any thread. A wake while one is on its way is
@@ -1591,9 +1644,7 @@ static int settled(net* n) {
 /* Waits up to `timeout_ms`, or forever if it's negative, until what was queued has gone and what
  * was closed has closed, for a program about to end, which would cut both off. 1 if they have.
  * What happens meanwhile is kept for the next poll. */
-cx_bool cx_net_drain(cx_u64 h, cx_i64 timeout_ms) {
-    net_check_thread();
-    net* n = (net*)(uintptr_t)h;
+static cx_bool drain(net* n, cx_i64 timeout_ms) {
 #ifdef _WIN32
     ULONGLONG start = GetTickCount64();
 #else
@@ -1613,19 +1664,39 @@ cx_bool cx_net_drain(cx_u64 h, cx_i64 timeout_ms) {
     }
 }
 
+cx_bool cx_net_drain(cx_u64 h, cx_i64 timeout_ms) {
+    net* n = net_enter(h);
+    cx_bool ok = drain(n, timeout_ms);
+    net_leave(n);
+    return ok;
+}
+
 /* Each signal std.signal handles wakes the poller's poll, as a waker does, from the thread that
  * hears of it. The list is in calx_rt.c, so a program without std.signal needs nothing more. */
 void cx_signal_wakes_add(void (*wake)(cx_u64), cx_u64 arg);
 
-cx_bool cx_net_wake_on_signal(cx_u64 h) {
-    if (!cx_net_waker(h)) return 0;
-    cx_signal_wakes_add(cx_net_wake, h);
-    return 1;
+/* A signal's wake, which says it was a signal too, for `cx_net_signalled`. Every poller asked to
+ * is woken, so each hears of each signal, whichever thread takes it from std.signal. */
+static void signal_wake(cx_u64 h) {
+    __atomic_store_n(&((net*)(uintptr_t)h)->signalled, 1, __ATOMIC_SEQ_CST);
+    cx_net_wake(h);
 }
 
-void cx_net_close(cx_u64 h, cx_u32 id) {
-    net_check_thread();
-    net* n = (net*)(uintptr_t)h;
+cx_bool cx_net_wake_on_signal(cx_u64 h) {
+    net* n = net_enter(h);
+    cx_bool ok = waker(n);
+    net_leave(n);
+    if (ok) cx_signal_wakes_add(signal_wake, h);
+    return ok;
+}
+
+/* Whether a signal woke the poller since this last said so, which it then forgets. Any thread may
+ * ask. */
+cx_bool cx_net_signalled(cx_u64 h) {
+    return __atomic_exchange_n(&((net*)(uintptr_t)h)->signalled, 0, __ATOMIC_SEQ_CST) != 0;
+}
+
+static void close_conn(net* n, cx_u32 id) {
     net_slot* s = conn_of(n, id);
     if (!s || s->state == CONN_CLOSED || s->state == CONN_CLOSING) return;
     if (s->state == CONN_CONNECTING) {
@@ -1646,13 +1717,17 @@ void cx_net_close(cx_u64 h, cx_u32 id) {
 #endif
 }
 
+void cx_net_close(cx_u64 h, cx_u32 id) {
+    net* n = net_enter(h);
+    close_conn(n, id);
+    net_leave(n);
+}
+
 /* The other end of the connection, as it was when the connection opened: 4 or 6 for its family,
  * or 0 if there's no such connection or the system didn't say. The address goes in out[0..16),
  * the port in out[16..18) and an IPv6 scope in out[18..22), both big-endian. An IPv4 client of
  * a socket that listens on IPv6 too comes back as IPv4, not as an IPv4-mapped IPv6 address. */
-cx_u32 cx_net_peer(cx_u64 h, cx_u32 id, cx_u8* out) {
-    net_check_thread();
-    net_slot* s = conn_of((net*)(uintptr_t)h, id);
+static cx_u32 peer(const net_slot* s, cx_u8* out) {
     memset(out, 0, 22);
     if (!s || !s->has_peer) return 0;
     if (s->peer.ss_family == AF_INET) {
@@ -1679,5 +1754,27 @@ cx_u32 cx_net_peer(cx_u64 h, cx_u32 id, cx_u8* out) {
     return 6;
 }
 
+cx_u32 cx_net_peer(cx_u64 h, cx_u32 id, cx_u8* out) {
+    net* n = net_enter(h);
+    cx_u32 family = peer(conn_of(n, id), out);
+    net_leave(n);
+    return family;
+}
+
+cx_i32 cx_net_listen(cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port) {
+    net* n = net_enter(h);
+    cx_i32 bound = net_listen(n, host, len, port);
+    net_leave(n);
+    return bound;
+}
+
+cx_u32 cx_net_connect(cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port) {
+    net* n = net_enter(h);
+    cx_u32 id = net_connect(n, host, len, port);
+    net_leave(n);
+    return id;
+}
+
+/* Why the last call that failed on this thread did: each thread has its own. */
 cx_u32 cx_net_error_kind(void) { return net_err_kind; }
 cx_i32 cx_net_error_code(void) { return net_err_code; }

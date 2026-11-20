@@ -1,0 +1,15 @@
+// A connection given to a `Net` that didn't open or accept it panics (CLX-386): its number can be
+// one of that `Net`'s own, as the first connection of each of two `Net`s has the same, and would
+// have been read from or written to in its place. A connection made from an id is any `Net`'s.
+import std.net.{Conn, Net}
+
+fn main() {
+    let a = Net.new()!
+    let b = Net.new()!
+    let c = a.connect("127.0.0.1", a.listen("127.0.0.1", 0)!)!
+    let d = b.connect("127.0.0.1", b.listen("127.0.0.1", 0)!)!
+    println("{c.id() == d.id()}")    // out: true
+    var nothing = List<u8>()
+    println("{b.read(Conn.from_id(c.id()), mut nothing)}")    // out: 0
+    b.write(c, [1, 2, 3])    // panic: the connection is another `Net`'s
+}

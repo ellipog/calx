@@ -1,0 +1,34 @@
+// Two threads using one `Net` at once panic, rather than tear its connections and buffers apart
+// (CLX-386): a `Net` is `Copy`, so a thread can be given a copy of one this thread keeps using.
+// The other thread waits in a poll while this one flushes, and whichever of the two finds the
+// other inside the `Net` panics.
+import std.net.{Event, Net}
+import std.thread.{Task, sleep}
+
+struct Poller {
+    net: Net
+    polling: Sender<bool>
+}
+
+impl Task for Poller {
+    fn run(own self) {
+        var polling = self.polling
+        var events = List<Event>()
+        polling.send(true)
+        self.net.poll(30000, mut events)
+    }
+}
+
+fn main() {
+    let net = Net.new()!
+    var polling = Receiver<bool>()
+    _ = unsafe { Thread.spawn(Poller { net: net, polling: polling.sender() }) }
+    _ = polling.wait()
+    // The other thread is in its poll now, or will be in a moment.
+    for _ in 0..2000 {
+        unsafe { sleep(10000000) }
+        net.flush()
+    }
+    println("never")
+}
+// panic: std.net: two threads used one `Net` at once

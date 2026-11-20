@@ -1,0 +1,48 @@
+// A `Net` moves from one thread to another as any value that's sent does (CLX-386): a server
+// listens on the main thread, which learns its address, then a thread of its own answers a
+// request on it and sends it back, and the main thread answers the next.
+import std.http.{Header, Request, get}
+import std.http.server.{Response, Server}
+import std.thread.{Task}
+
+struct Serving {
+    server: Server
+    back: Sender<Server>
+}
+
+impl Task for Serving {
+    fn run(own self) {
+        var server = self.server
+        var back = self.back
+        if let req = server.next(20000) {
+            server.respond(req, Response.text("{req.path} from the thread"))
+        }
+        back.send(server)
+    }
+}
+
+fn body(r: mut Request) -> String {
+    return match r.wait() {
+        ok(resp) => String.from_utf8(resp.body) ?? String("<not UTF-8>"),
+        err(e) => "{e}",
+    }
+}
+
+fn main() {
+    var server = Server.listen(0)!
+    server.log = false
+    let url = server.url()
+    var back = Receiver<Server>()
+    let t = unsafe { Thread.spawn(Serving { server: server, back: back.sender() }) }
+    var first = get("{url}a", List<Header>(), 10000, 1024)
+    println(body(mut first))    // out: /a from the thread
+    t.join()
+    var again = back.wait() ?? panic("the server didn't come back")
+    var second = get("{url}b", List<Header>(), 10000, 1024)
+    while not second.done() {
+        if let req = again.next(10) {
+            again.respond(req, Response.text("{req.path} from main"))
+        }
+    }
+    println(body(mut second))    // out: /b from main
+}
