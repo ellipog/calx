@@ -86,6 +86,8 @@ typedef struct {
 /* Startup and exit, called by the generated `main`. */
 CX_FN(void, cx_start, (int argc, char** argv));
 CX_FN(int, cx_finish, (void));
+/* The status a `main` that failed ends with, 1, for what runs as the program ends (std.signal). */
+CX_FN(void, cx_exit_status, (int code));
 /* A test program's start, for `calx test`: `cx_start`, then the test it's asked to run, or -1. */
 CX_FN(cx_i64, cx_test_start, (int argc, char** argv));
 
@@ -1006,6 +1008,8 @@ CX_FN(void, cx_net_close, (cx_u64 h, cx_u32 id));
 CX_FN(void, cx_net_flush, (cx_u64 h));
 CX_FN(cx_bool, cx_net_waker, (cx_u64 h));
 CX_FN(void, cx_net_wake, (cx_u64 h));
+CX_FN(cx_bool, cx_net_wake_on_signal, (cx_u64 h));
+CX_FN(cx_bool, cx_net_drain, (cx_u64 h, cx_i64 timeout_ms));
 CX_FN(cx_u32, cx_net_peer, (cx_u64 h, cx_u32 id, cx_u8* out));
 CX_FN(cx_u32, cx_net_error_kind, (void));
 CX_FN(cx_i32, cx_net_error_code, (void));
@@ -1321,6 +1325,14 @@ CX_FN(void, cx_term_cooked, (void));
 CX_FN(cx_u32, cx_term_raw, (void));
 CX_FN(cx_usize, cx_term_read, (cx_u8* p, cx_usize n));
 CX_FN(cx_u64, cx_term_size, (void));
+
+/* Signals the program handles, in calx_signal.c, behind std.signal (CLX-377). */
+CX_FN(void, cx_signal_handle, (cx_u32 kinds));
+CX_FN(cx_u32, cx_signal_take, (void));
+CX_FN(cx_bool, cx_signal_pending, (void));
+CX_FN(cx_u32, cx_signal_wait, (cx_i64 timeout_ms));
+CX_FN(cx_bool, cx_signal_raise, (cx_u32 kind));
+CX_FN(cx_bool, cx_signal_service, (void));
 CX_FN(void, cx_thread_sleep, (cx_u64 ns));
 
 /* Hashing, for `Map` and `Set` (D94). The same value hashes the same on every platform and in

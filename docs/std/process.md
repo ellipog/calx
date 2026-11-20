@@ -176,6 +176,7 @@ fn main() {
 - **What it started is ended even once it has exited itself**, as a launcher does once it has started the server. On Linux and macOS the group's ID stays its own while anything is in the group, and on Windows the job holds what's in it.
 - **The terminal's Ctrl+C doesn't reach it**, on any system: it isn't in the terminal's group, so this program decides when it ends. A panic in this program still ends it and its group, as [When this program ends](#when-this-program-ends) says.
 - **On Windows, Ctrl+Break** ends a program that doesn't handle it with the status `-1073741510`, `0xC000013A`. It's sent through the console the program runs in, so one that has no console of its own, such as a service, joins the child's console for as long as it takes. A program that can't be sent it keeps running, which is why `kill_tree` comes after.
+- **A Calx program hears `stop` as [`std.signal`](signal.md)'s `Terminate`**, on every system, so one that handles it can save its state and end as it means to.
 - **Signal numbers** are the system's. 1 `SIGHUP`, 2 `SIGINT`, 9 `SIGKILL` and 15 `SIGTERM` are the same everywhere, but others differ: `SIGUSR1` is 10 on Linux and 30 on macOS.
 - **On Windows, a program it starts may leave the job**, as one that starts something in the background with `CREATE_BREAKAWAY_FROM_JOB` does, and `kill_tree` doesn't reach that one. A program that starts one in a group of its own, a `setsid` on Linux, leaves the group the same way.
 

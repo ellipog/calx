@@ -1,0 +1,31 @@
+// std.http.server's `serve` stops at a signal after `wake_on_signal` (CLX-377): it closes its
+// connections and returns, and its workers end. The signal comes from another thread, while
+// `serve` waits.
+import std.fs.{remove_dir_all, temp_dir, write_text}
+import std.http.server.{Server}
+import std.signal.{Signal, handle, raise, take}
+import std.thread.{Task, sleep}
+
+struct Stopper {
+    after_ns: u64
+}
+
+impl Task for Stopper {
+    fn run(own self) {
+        unsafe { sleep(self.after_ns) }
+        _ = raise(Signal.Terminate)
+    }
+}
+
+fn main() {
+    handle()
+    let dir = temp_dir()!
+    write_text("{dir}/index.html", "hi")!
+    var server = Server.listen(0)!
+    server.log = false
+    server.wake_on_signal()!
+    _ = unsafe { Thread.spawn(Stopper { after_ns: 200000000 }) }
+    server.serve(dir)
+    println("stopped on {take() ?? Signal.Hangup}")    // out: stopped on terminate
+    remove_dir_all(dir)!
+}
