@@ -1,11 +1,17 @@
 # Builds the compiler and runs the test suite, including every example in the reference docs
 # (D41), in debug and release builds on Windows and Linux, on x64 and on Arm. A push that only
 # changes the website (site/) skips it; a change to docs/ still runs it, since the docs' examples
-# are tests.
+# are tests. A push runs it only on main and on v* tags, which the package and publish jobs need: a
+# pull request's branch is tested by the pull_request event alone, so each push to it runs it once,
+# not twice (CLX-392).
 name: ci
 
 on:
   push:
+    branches:
+      - main
+    tags:
+      - 'v*'
     paths-ignore:
       - 'site/**'
   pull_request:
