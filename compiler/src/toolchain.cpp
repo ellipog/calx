@@ -1618,6 +1618,9 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // The processor a release build counts on, in its compile and its link, and so in every key.
     const std::string march = cpu.empty() ? std::string(release_cpu_flag(kTarget)) : cpu;
     bool library = kind == BuildKind::library;
+    // CLX-334: a static library carries its own runtime, as a program does, and is archived rather
+    // than linked; its host links it, with its own linker.
+    bool staticlib = kind == BuildKind::staticlib;
     fs::path runtime = fs::path(tc.home) / "runtime";
     // Each of the runtime's files the keys hold, which a build's record names (CLX-242).
     auto read_runtime = [&](const fs::path& file, std::string& text) {
@@ -1682,24 +1685,30 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // default target: LLVM's release builds for Visual Studio's unless told, and loads the
     // configuration beside it named for the target. It writes DWARF unless asked for CodeView,
     // which the PDB holds and dbghelp reads for stack traces, as with Visual Studio's.
-    if (tc.mingw) {
+    if (tc.mingw && !staticlib) {
         flags.push_back(kMingwTarget);
         flags.push_back("-gcodeview");
     }
+    // A static library is for a host that links with Visual Studio's linker, as Rust's MSVC
+    // target and Visual Studio's own projects do, so it's built for Visual Studio's C runtime even
+    // by llvm-mingw's clang, whose own objects that linker can't take, and with its headers. It's
+    // the DLL C runtime in both modes, /MD, which such a host links by default (CLX-334).
+    if (tc.mingw && staticlib) flags.push_back(msvc_target_flag(kTarget.arch));
+    bool dll_crt = staticlib || (!tc.mingw && mode == BuildMode::debug);
 #endif
     if (mode == BuildMode::debug) {
         flags.push_back("-O0");
         flags.push_back("-DCX_DEBUG");  // the runtime checks that everything allocated is freed
-#ifdef _WIN32
-        // The DLL C runtime. Linking the static one copies its debug info into every PDB, which
-        // doubles the link time. Release builds link it statically, so they run anywhere. With
-        // mingw every build uses the UCRT's DLL, which every Windows from 10 on has.
-        if (!tc.mingw) flags.push_back("-fms-runtime-lib=dll");
-#endif
     } else {
         flags.push_back("-O3");
         flags.push_back(march);
     }
+#ifdef _WIN32
+    // The DLL C runtime in a debug build: linking the static one copies its debug info into
+    // every PDB, which doubles the link time. Release builds link it statically, so they run
+    // anywhere. With mingw every build uses the UCRT's DLL, which every Windows from 10 on has.
+    if (dll_crt) flags.push_back("-fms-runtime-lib=dll");
+#endif
     // `CALX_PROFILE=1` keeps every function's frame pointer, so a sampling profiler such as perf
     // walks the stack from its samples without unwind tables. It costs a register, so it's off.
     // The flags are part of every cache key, so such a build never mixes with another.
@@ -1713,7 +1722,8 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // (D99). `CALX_LTO=0` turns it off, for test runs that build many programs: each file is then
     // machine code, kept in the object cache, so a build that finds all its files there only
     // links, where ThinLTO makes the machine code again in every link.
-    bool lto = mode == BuildMode::release && tc.lld && env("CALX_LTO") != "0";
+    // A static library's objects are machine code, whatever linker its host has.
+    bool lto = mode == BuildMode::release && tc.lld && env("CALX_LTO") != "0" && !staticlib;
     if (lto) flags.push_back("-flto=thin");
     if (library) {
         flags.push_back("-DCX_LIBRARY");
@@ -1723,6 +1733,11 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         flags.push_back("-fvisibility=hidden");
 #endif
     }
+#ifndef _WIN32
+    // A host may link a static library into a position-independent program, as Rust and most
+    // systems' compilers build by default, or into a shared library.
+    if (staticlib) flags.push_back("-fPIC");
+#endif
     std::string flag_text;
     for (const std::string& f : flags) flag_text += f + " ";
 
@@ -1976,8 +1991,8 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     }
     std::string link_text;
     for (const std::string& f : link_flags) link_text += f + " ";
-    std::string exe_key = hash_hex({"exe", all_keys, link_text, tc.identity});
-    const char* suffix = library ? kLib : kExe;
+    std::string exe_key = hash_hex({"exe", all_keys, link_text, staticlib ? "staticlib" : "", tc.identity});
+    const char* suffix = staticlib ? staticlib_suffix() : library ? kLib : kExe;
     r.exe = (fs::path(tc.cache) / "bin" / (exe_key + suffix)).string();
     if (file_exists(r.exe)) {
         touch(r.exe);
@@ -2103,13 +2118,16 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         for (const auto& [file, obj] : parts) inputs.push_back(obj);
         if (!sqlite_obj.empty()) inputs.push_back(sqlite_obj);
     }
-    term::step(lto ? "Linking, and optimizing across modules" : "Linking");
-    bool linked = link_program(tc, inputs, temp_exe, link_flags, verbose);
+    term::step(staticlib ? "Making the static library" : lto ? "Linking, and optimizing across modules" : "Linking");
+    auto put_together = [&]() {
+        return staticlib ? archive_objects(tc, inputs, temp_exe, verbose) : link_program(tc, inputs, temp_exe, link_flags, verbose);
+    };
+    bool linked = put_together();
     if (!linked && std::any_of(inputs.begin(), inputs.end(), [](const std::string& f) { return !file_exists(f); })) {
-        linked = make_objects() && link_program(tc, inputs, temp_exe, link_flags, verbose);
+        linked = make_objects() && put_together();
     }
     if (!linked) {
-        std::fprintf(stderr, "calx: linking failed; `calx doctor` checks the linker and the system's libraries\n");
+        if (!staticlib) std::fprintf(stderr, "calx: linking failed; `calx doctor` checks the linker and the system's libraries\n");
         return r;
     }
     std::error_code ec;
@@ -2118,7 +2136,8 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // runtime's traces read and the cache trims with it: macOS's linker leaves it in the objects.
     // It goes in first, so a program in the cache always has its file. Without dsymutil, traces
     // name no lines.
-    if (!tc.dsymutil.empty()) {
+    // A static library's objects keep their own, for the host's link to gather.
+    if (!staticlib && !tc.dsymutil.empty()) {
         std::vector<std::string> gather = {tc.dsymutil, "--flat", "-o", temp_exe + ".dwarf", temp_exe};
         if (verbose) print_command(gather);
         if (run_to_file(gather, temp_exe + ".log") == 0) fs::rename(temp_exe + ".dwarf", r.exe + ".dwarf", ec);

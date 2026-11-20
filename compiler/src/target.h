@@ -107,6 +107,12 @@ constexpr const char* mingw_target_flag(Arch arch) {
     return arch == Arch::x86_64 ? "--target=x86_64-w64-windows-gnu" : "--target=aarch64-w64-windows-gnu";
 }
 
+// The target for Visual Studio's C runtime and linker, which a static library for a host such as
+// Rust's MSVC target is built for, whichever clang builds it (CLX-334).
+constexpr const char* msvc_target_flag(Arch arch) {
+    return arch == Arch::x86_64 ? "--target=x86_64-pc-windows-msvc" : "--target=aarch64-pc-windows-msvc";
+}
+
 // What a program's and a library's file names end in.
 constexpr const char* exe_suffix(Os os) { return os == Os::windows ? ".exe" : ""; }
 constexpr const char* lib_suffix(Os os) { return os == Os::windows ? ".dll" : os == Os::macos ? ".dylib" : ".so"; }

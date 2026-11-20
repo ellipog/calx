@@ -1,0 +1,11 @@
+// kind: staticlib
+// CLX-334: a static library's host calls in through `@export_c` functions, so it has no `main`.
+
+@export_c
+fn answer() -> i32 {
+    return 42
+}
+
+fn main() {                                   // error: a static library has no `main`
+    _ = answer()
+}

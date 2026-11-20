@@ -1,6 +1,7 @@
 #include "emit.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -116,6 +117,10 @@ public:
                         if (Item* h = hand(t, prop)) take(h);
                     }
                 }
+                // A `@handle` struct's drop glue calls its `drop` (CLX-332).
+                for (const Type* t : closure(p.all.types)) {
+                    if (t->kind == TypeKind::struct_ && t->item->drop_fn) take(t->item->drop_fn);
+                }
                 if (p.defs.size() == defs && p.externs.size() == externs) break;
             }
             plans.push_back(std::move(p));
@@ -155,6 +160,12 @@ public:
             for (Item* f : p.c_fns) out_ += c_declaration(f);
             for (Item* f : p.externs) out_ += fns_.at(f).sig + ";\n";
             for (Item* f : p.defs) out_ += linkage(f, external) + fns_.at(f).sig + ";\n";
+            for (Item* f : p.externs) {
+                if (f->export_c) out_ += export_c_declaration(f);
+            }
+            for (Item* f : p.defs) {
+                if (f->export_c) out_ += export_c_declaration(f);
+            }
             out_ += "\n";
             // After the functions' declarations, as a type's glue can call what it writes for itself.
             out_ += kNoDebugPush;
@@ -172,11 +183,15 @@ public:
                 out_ += linkage(f, external);
                 out_ += o.sig;
                 out_ += o.body;
+                if (f->export_c && !f->origin) out_ += export_c_definition(f);
             }
+            // C can call this program's functions on threads of its own (CLX-333).
+            const char* foreign = prog_.c_exports.empty() ? "" : "cx_foreign_threads();\n    ";
             if (has_main && opt_.tests) {
                 // CLX-87: `calx test` runs this program once for each test, naming it with a first
                 // argument the runtime takes out. Without one, it lists its tests.
-                out_ += "int main(int argc, char** argv) {\n    switch (cx_test_start(argc, argv)) {\n";
+                out_ += "int main(int argc, char** argv) {\n    cx_i64 cx_which = cx_test_start(argc, argv);\n    " +
+                        std::string(foreign) + "switch (cx_which) {\n";
                 for (std::size_t i = 0; i < prog_.tests.size(); i++) {
                     out_ += "    case " + std::to_string(i) + ": {\n    " + call_entry(prog_.tests[i]) + "break;\n    }\n";
                 }
@@ -186,8 +201,8 @@ public:
                 }
                 out_ += "        break;\n    }\n    return cx_finish();\n}\n";
             } else if (has_main) {
-                out_ += "int main(int argc, char** argv) {\n    cx_start(argc, argv);\n    " + call_entry(prog_.main) +
-                        "return cx_finish();\n}\n";
+                out_ += "int main(int argc, char** argv) {\n    cx_start(argc, argv);\n    " + std::string(foreign) +
+                        call_entry(prog_.main) + "return cx_finish();\n}\n";
             }
             if (p.has_exports) out_ += exports();
             files.push_back({std::string(p.module->prefix) + ".c", std::move(out_)});
@@ -315,6 +330,12 @@ private:
             all.merge(fns_.at(f).uses);
         }
         for (Item* f : p.externs) all.merge(fns_.at(f).sig_uses);
+        // A C function's declaration names its types, such as the `extern "C" fn` `qsort` takes,
+        // which nothing else in the file may (CLX-333).
+        for (Item* f : p.c_fns) {
+            all.add_type(f->result_type);
+            for (const Param& q : f->params) all.add_type(q.local->type);
+        }
         // A constant's value can name other constants.
         for (std::size_t i = 0; i < all.consts.size(); i++) all.merge(consts_.at(all.consts[i]).uses);
         // A `main` that fails shows its error. A file of tests may have none, and its C's `main`
@@ -447,6 +468,34 @@ private:
         return s + ") __asm__(CX_SYMBOL(\"" + std::string(text(f->name)) + "\"));\n";
     }
 
+    // CLX-333, CLX-334: the function C calls for an `@export_c` one, by the name it's exported as,
+    // which the linker gets from an asm label, as a C function's name is. It checks the runtime is
+    // running, then calls the Calx function, whose C types are C's own.
+    std::string export_c_name(const Item* f) const { return "cx_xc_" + std::string(f->export_name); }
+
+    std::string export_c_head(const Item* f) const {
+        std::string s = "CX_EXPORT_C " + ctype(f->result_type) + " " + export_c_name(f) + "(";
+        for (std::size_t i = 0; i < f->params.size(); i++) {
+            if (i) s += ", ";
+            s += ctype(f->params[i].local->type) + " cx_a" + std::to_string(i);
+        }
+        if (f->params.empty()) s += "void";
+        return s + ")";
+    }
+
+    std::string export_c_declaration(const Item* f) const {
+        return export_c_head(f) + " __asm__(CX_SYMBOL(\"" + std::string(f->export_name) + "\"));\n";
+    }
+
+    std::string export_c_definition(const Item* f) const {
+        std::string call = std::string(f->c_name) + "(";
+        for (std::size_t i = 0; i < f->params.size(); i++) call += (i ? ", cx_a" : "cx_a") + std::to_string(i);
+        call += ")";
+        bool unit = f->result_type->kind == TypeKind::unit;
+        return export_c_head(f) + " {\n    cx_export_enter(" + c_string_literal(f->export_name) + ");\n    " +
+               (unit ? call + ";\n" : "return " + call + ";\n") + "}\n";
+    }
+
     // Written functions are `static` unless another file calls them, which lets clang inline and
     // drop them freely. Instances are always `static`: each file has its own copy.
     static std::string linkage(const Item* f, const std::unordered_set<const Item*>& external) {
@@ -540,7 +589,7 @@ private:
             case TypeKind::set: s = table_prefix(t) + "set_" + part(t->elem); break;
             case TypeKind::fn_:
                 // `cx_fn_i32_mList_i32__bool`: each parameter with its mode, then the result.
-                s = t->unsafe_fn ? "cx_ufn" : "cx_fn";
+                s = t->c_abi ? "cx_cfn" : t->unsafe_fn ? "cx_ufn" : "cx_fn";
                 for (std::size_t i = 0; i < t->elems.size(); i++) {
                     s += std::string("_") + (t->modes[i] == 1 ? "m" : t->modes[i] == 2 ? "o" : "") + part(t->elems[i]);
                 }
@@ -2841,6 +2890,35 @@ $dropall    m->len = 0;
     // A struct's or enum's name as Calx code writes it, without a generic type's arguments.
     std::string item_name(const Type* t) const { return std::string(text((t->generic ? t->generic : t->item)->name)); }
 
+    // C that's true when the value `at` has a bit set in one of its fields, so a padding byte
+    // doesn't count: numbers, pointers and the like as they are, structs and tuples field by
+    // field, and anything else byte by byte.
+    std::string any_set(const Type* t, const std::string& at) {
+        switch (t->kind) {
+            case TypeKind::int_: case TypeKind::float_: case TypeKind::bool_: case TypeKind::char_: case TypeKind::rune:
+            case TypeKind::pointer: case TypeKind::fn_: return "(" + at + " != 0)";
+            case TypeKind::enum_:
+                if (!t->has_data) return "(" + at + " != 0)";
+                break;
+            case TypeKind::struct_: {
+                std::string s;
+                for (const FieldDecl& f : t->item->fields) s += (s.empty() ? "" : " || ") + any_set(f.resolved, at + "." + ident(f.name));
+                return s.empty() ? "0" : "(" + s + ")";
+            }
+            case TypeKind::tuple: {
+                std::string s;
+                for (std::size_t i = 0; i < t->elems.size(); i++) {
+                    s += (s.empty() ? "" : " || ") + any_set(t->elems[i], at + ".f" + std::to_string(i));
+                }
+                return "(" + s + ")";
+            }
+            case TypeKind::optional: return "(" + at + ".has)";
+            default: break;
+        }
+        return "({ const cx_u8* cx_b = (const cx_u8*)&" + at + "; cx_u8 cx_any = 0; for (cx_usize cx_i = 0; cx_i < sizeof(" + at +
+               "); cx_i++) cx_any |= cx_b[cx_i]; cx_any != 0; })";
+    }
+
     // Frees what the value at `p` owns.
     std::string drop_body(const Type* t) {
         std::string s;
@@ -2898,6 +2976,12 @@ $dropall    m->len = 0;
                 s += "    cx_table_free(p->ctrl, p->mask + 1, sizeof(" + slot_ctype(t) + "), " + table_extra(t, "p->mask + 1") + ");\n";
                 break;
             case TypeKind::struct_:
+                // A `@handle` struct's own `drop` first, which sees its fields as they are (CLX-332).
+                // A value that might have moved away is zeroed where it moves, and dropped all the
+                // same, so `drop` runs only on one with a field that isn't zero.
+                if (t->item->drop_fn) {
+                    s += "    if (" + any_set(t, "(*p)") + ") " + std::string(t->item->drop_fn->c_name) + "(p);\n";
+                }
                 for (const FieldDecl& f : t->item->fields) part_drop(f.resolved, "p->" + ident(f.name));
                 break;
             case TypeKind::tuple:
@@ -5275,8 +5359,10 @@ $dropall    m->len = 0;
             case ExprKind::self:
                 if (e->ref == Ref::const_) return const_value(e);
                 if (e->ref == Ref::fn) {
-                    // A function as a value is its address (D122).
+                    // A function as a value is its address (D122). As a C function's, an
+                    // `@export_c` one's is the function C calls, which checks the runtime first.
                     if (uses_) uses_->add_fn(e->item);
+                    if (e->type && e->type->c_abi && e->item->export_c) return export_c_name(e->item);
                     return std::string(e->item->c_name);
                 }
                 return place(e);
@@ -6862,7 +6948,7 @@ $dropall    m->len = 0;
                 s += ")";
                 return;
             case TypeKind::fn_:
-                s += t->unsafe_fn ? "unsafe_fn(" : "fn(";
+                s += t->c_abi ? "c_fn(" : t->unsafe_fn ? "unsafe_fn(" : "fn(";
                 for (std::size_t i = 0; i < t->elems.size(); i++) {
                     s += std::to_string(t->modes[i]);
                     shape(t->elems[i], s, seen);
@@ -7006,6 +7092,11 @@ $dropall    m->len = 0;
             return copy_fn(t) + "(" + address(recv) + ")";
         }
         if (e->bmethod == BMethod::opt_map) return optional_map(e);
+        // CLX-333: the box's memory, now C's to hold, as the box moved here and isn't dropped.
+        if (e->bmethod == BMethod::box_into_ptr) {
+            std::string b = tmp();
+            return "({ " + ctype(t) + " " + b + " = " + value(recv, t) + "; " + b + ".ptr; })";
+        }
         if (e->bmethod == BMethod::take || e->bmethod == BMethod::replace) {
             // The value moves out whole, and the place holds `none` or the new value, so nothing
             // is freed twice. A new value is made before the place is looked at.
@@ -7070,6 +7161,10 @@ $dropall    m->len = 0;
                            "; " + p + " + " + n + "; })";
                 }
                 case BMethod::ptr_is_null: return "(" + expr(recv) + " == 0)";
+                case BMethod::ptr_addr: return "((cx_usize)" + expr(recv) + ")";
+                // A box is a list of its one value (see `Box(v)`), whose memory `into_ptr` gave.
+                case BMethod::ptr_to_box: return "((" + ctype(e->type) + "){" + expr(recv) + ", 1, 1})";
+                case BMethod::ptr_cast: case BMethod::ptr_to_fn: return "((" + ctype(e->type) + ")(void*)" + expr(recv) + ")";
                 default: return "0";
             }
         }
@@ -7490,6 +7585,104 @@ $dropall    m->len = 0;
 std::vector<CFile> emit_c(const Program& program, const Sources& sources, const Names& names, const EmitOptions& options) {
     Emitter e(program, sources, names, options);
     return e.run();
+}
+
+namespace {
+
+// C's own name for a type of a C function's: the fixed-width integers, `size_t`, `float`, `double`
+// and `bool`, which are what calx_rt.h's are.
+std::string c_base(const Type* t) {
+    switch (t->kind) {
+        case TypeKind::int_: return t->is_usize ? "size_t" : std::string(t->is_signed ? "int" : "uint") + std::to_string(t->bits) + "_t";
+        case TypeKind::float_: return t->bits == 32 ? "float" : "double";
+        case TypeKind::bool_: return "bool";
+        default: return "void";
+    }
+}
+
+// C's declaration of `name` as a `t`, or of a parameter without one when `name` is "": a pointer
+// is `uint8_t* p` or `const uint8_t* p`, and an `extern "C" fn` is `void (*f)(uint8_t*)`.
+std::string c_decl(const Type* t, const std::string& name) {
+    auto join = [](const std::string& base, const std::string& d) {
+        return d.empty() ? base : d[0] == '*' ? base + d : base + " " + d;
+    };
+    switch (t->kind) {
+        case TypeKind::pointer: {
+            const Type* e = t->elem;
+            bool plain = e->kind == TypeKind::int_ || e->kind == TypeKind::float_ || e->kind == TypeKind::bool_;
+            std::string rest = name.empty() ? "" : " " + name;
+            if (plain) return (t->is_const ? "const " : "") + c_base(e) + "*" + rest;
+            return c_decl(e, (t->is_const ? "const*" : "*") + rest);
+        }
+        case TypeKind::fn_: {
+            std::string ps;
+            for (std::size_t i = 0; i < t->elems.size(); i++) ps += (i ? ", " : "") + c_decl(t->elems[i], "");
+            return c_decl(t->elem, "(*" + name + ")(" + (ps.empty() ? std::string("void") : ps) + ")");
+        }
+        default: return join(c_base(t), name);
+    }
+}
+
+bool c_word(std::string_view s) {
+    static const char* const words[] = {"auto", "break", "case", "char", "const", "continue", "default", "do", "double",
+                                        "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long",
+                                        "register", "restrict", "return", "short", "signed", "sizeof", "static", "struct",
+                                        "switch", "typedef", "union", "unsigned", "void", "volatile", "while", "bool",
+                                        "true", "false", "class", "new", "delete", "this", "template", "namespace"};
+    for (const char* w : words) {
+        if (s == w) return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+std::string c_header(const Program& program, const Names& names, const std::string& name) {
+    std::string guard = "CALX_";
+    for (char c : name) guard += std::isalnum(static_cast<unsigned char>(c)) ? static_cast<char>(std::toupper(static_cast<unsigned char>(c))) : '_';
+    guard += "_H";
+    std::string s =
+        "/* " + name + ".h: the C functions of the Calx static library " + name + ", which `calx build --staticlib` made.\n"
+        " * It's made again with the library, so edits to it don't last.\n"
+        " *\n"
+        " * The host calls calx_init() before anything else in the library, and calx_shutdown() after the\n"
+        " * last call, once the threads the library started have stopped. In between, any thread can call\n"
+        " * these functions, one the library started or one it didn't. A call before calx_init() or after\n"
+        " * calx_shutdown() ends the process, saying so, as a panic in the library does.\n"
+        " *\n"
+        " * Link it on Windows with Visual Studio's linker, as Rust's MSVC target does, and the DLL C\n"
+        " * runtime (/MD); it names the system libraries it needs itself. On Linux, add -lm -lpthread -ldl;\n"
+        " * on macOS, nothing more. */\n"
+        "#ifndef " + guard + "\n#define " + guard + "\n\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdint.h>\n\n"
+        "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n"
+        "/* Starts the library's runtime. Calling it again while it runs does nothing. */\n"
+        "void calx_init(void);\n\n"
+        "/* Ends it: what the library printed is written out. A debug build of the library then checks\n"
+        " * that everything it allocated was freed, and returns 102 if not, having said so; otherwise 0. */\n"
+        "int calx_shutdown(void);\n";
+    for (const Item* f : program.c_exports) {
+        s += "\n";
+        if (!f->doc.empty()) {
+            std::string_view doc = f->doc;
+            std::size_t at = 0;
+            while (at <= doc.size()) {
+                std::size_t end = doc.find('\n', at);
+                if (end == std::string_view::npos) end = doc.size();
+                std::string_view line = doc.substr(at, end - at);
+                s += line.empty() ? "///\n" : "/// " + std::string(line) + "\n";
+                at = end + 1;
+            }
+        }
+        std::string ps;
+        for (std::size_t i = 0; i < f->params.size(); i++) {
+            std::string n(names.text(f->params[i].name));
+            if (c_word(n)) n += "_";
+            ps += (i ? ", " : "") + c_decl(f->params[i].local->type, n);
+        }
+        s += c_decl(f->result_type, std::string(f->export_name) + "(" + (ps.empty() ? std::string("void") : ps) + ")") + ";\n";
+    }
+    s += "\n#ifdef __cplusplus\n}\n#endif\n\n#endif\n";
+    return s;
 }
 
 }  // namespace calx

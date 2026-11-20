@@ -1,0 +1,83 @@
+// CLX-332: a `@handle` struct that owns something of C's, such as `mpv_create`'s handle, gives
+// it back in its `drop`, which runs once, wherever the value ends: at the end of its scope, when
+// a variable gets another value, in a list that's freed, and in a function it moved to. One that
+// moved away isn't dropped where it was, and one whose fields are all zero has nothing to give back.
+
+extern "C" {
+    fn malloc(n: usize) -> *u8
+    fn free(p: *u8)
+}
+
+@handle
+struct Player {
+    handle: *u8
+    name: String
+}
+
+impl Player {
+    fn create(name: own String) -> Player {
+        return unsafe { Player { handle: malloc(16), name: name } }
+    }
+
+    fn drop(mut self) {
+        println("destroying {self.name}")
+        unsafe { free(self.handle) }
+    }
+}
+
+fn finish(p: own Player) {
+    println("finishing {p.name}")
+}
+
+fn pick(flag: bool) -> Player {
+    let a = Player.create("a")
+    let b = Player.create("b")
+    if flag {
+        return a
+    }
+    return b
+}
+
+fn main() {
+    {
+        let p = Player.create("scoped")
+        println("using {p.name}")
+    }
+    // out: using scoped
+    // out: destroying scoped
+
+    var q = Player.create("first")
+    q = Player.create("second")
+    // out: destroying first
+
+    finish(q)
+    // out: finishing second
+    // out: destroying second
+
+    var players: List<Player> = []
+    players.push(Player.create("one"))
+    players.push(Player.create("two"))
+    _ = players.pop()
+    // out: destroying two
+    players.clear()
+    // out: destroying one
+
+    let kept = pick(true)
+    // out: destroying b
+    println("kept {kept.name}")
+    // out: kept a
+
+    // Moved on one path only: dropped once, where it ends up.
+    let maybe = Player.create("maybe")
+    if kept.name.len() == 1 {
+        finish(maybe)
+    }
+    // out: finishing maybe
+    // out: destroying maybe
+
+    // Nothing to give back.
+    var nothing = List<u8>()
+    let empty = unsafe { Player { handle: nothing.as_mut_ptr(), name: String() } }
+    println("{empty.name.is_empty()}")    // out: true
+}
+// out: destroying a

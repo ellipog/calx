@@ -90,6 +90,19 @@ CX_FN(int, cx_finish, (void));
 CX_FN(void, cx_exit_status, (int code));
 /* A test program's start, for `calx test`: `cx_start`, then the test it's asked to run, or -1. */
 CX_FN(cx_i64, cx_test_start, (int argc, char** argv));
+/* What every `@export_c` function starts with: a check that the runtime is running, which ends
+ * the process, saying so, when it isn't (CLX-333). And what a program whose functions C can call
+ * does as it starts, since C can call them on threads of its own. */
+CX_FN(void, cx_export_enter, (const char* name));
+CX_FN(void, cx_foreign_threads, (void));
+/* An `@export_c` function's C name is for the linker to find, outside a static library too: a
+ * DLL's or a shared library's export when it's built as one (CX_CDYLIB), and otherwise just
+ * visible where everything else is hidden. */
+#if defined(_WIN32) && defined(CX_CDYLIB)
+#define CX_EXPORT_C __declspec(dllexport)
+#else
+#define CX_EXPORT_C __attribute__((visibility("default")))
+#endif
 
 /* The command line, in UTF-8, behind std.env. */
 CX_FN(cx_usize, cx_arg_count, (void));

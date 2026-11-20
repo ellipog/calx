@@ -39,7 +39,9 @@
 // - `// lib: NAME.calx` builds that file of the test, or that file next to it, with
 //   `calx build --lib` in the same mode, before the program runs. The path of each library it built,
 //   in order, goes to the program as its first arguments, before those `// args:` gives (D123).
-// - `// kind: library` checks a test that expects errors as a library, with `calx check --lib`.
+// - `// kind: library` checks a test that expects errors as a library, with `calx check --lib`, and
+//   `// kind: staticlib` as a static library, with `calx check --staticlib`, which is all that's done
+//   with one: it has no `main` to run.
 // - `// firewall: TEXT` marks a test that listens on every address, not just loopback, which makes
 //   Windows' firewall ask the person at the desktop whether to allow it, each time the program is
 //   new, as every build's is. On Windows such a test runs only in CI, whose runners don't ask, and
@@ -130,7 +132,7 @@ struct Test {
     args: List<String>
     status: i32
     libs: List<String>            // files to build as libraries first
-    library: bool                 // checked as a library
+    kind: String                  // what it's checked as: "library", "staticlib" or empty for a program
     firewall: String?             // why it listens on every address
     files: List<(String, String)> // (name, text) for a test of several modules, the main one first
 }
@@ -138,7 +140,7 @@ struct Test {
 fn parse_test(name: own String, source: String, file_path: own String?, p: mut Patterns) -> Test {
     var t = Test {
         name: name, source: source.copy(), file_path: file_path, out: [], errors: [], panics: none, trace: [], stderr: [],
-        stdin: [], args: [], status: 0, libs: [], library: false, firewall: none, files: [],
+        stdin: [], args: [], status: 0, libs: [], kind: String(), firewall: none, files: [],
     }
     let lines = source.lines()
     var starts: List<(usize, String)> = []
@@ -178,7 +180,7 @@ fn parse_test(name: own String, source: String, file_path: own String?, p: mut P
             } else if kind == "lib" {
                 t.libs.push(text.trim())
             } else if kind == "kind" {
-                t.library = text.trim() == "library"
+                t.kind = text.trim()
             } else if kind == "firewall" {
                 t.firewall = some(text.trim())
             } else if kind == "trace" {
@@ -372,8 +374,9 @@ fn main() {
                 test: ti, release: modes[mi] == "release", dir: dir.copy(), source: source.copy(), libs: [], lib_cmds: [],
                 main_cmd: 0, json_cmd: 0, problems: [],
             }
-            let lib_flag: List<String> = if t.library { ["--lib"] } else { [] }
-            if not t.errors.is_empty() {
+            let lib_flag: List<String> = if t.kind == "library" { ["--lib"] } else if t.kind == "staticlib" { ["--staticlib"] } else { [] }
+            // A static library has no `main` to run, so it's checked, for no errors if none are expected.
+            if not t.errors.is_empty() or t.kind == "staticlib" {
                 var check: List<String> = ["check"]
                 check.extend(lib_flag)
                 check.push(source.copy())

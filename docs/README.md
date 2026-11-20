@@ -61,11 +61,12 @@ What's built, one page per feature:
 32. [Comparing and printing](reference/comparing.md): the derived `Equal` and `Display`, `==` and `{x}` on every type, and their bounds
 33. [Modules](reference/modules.md): files as modules, imports, `pub`, one C file per module, and the modules of packages
 34. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, formats such as `{x:.2}` and `{n:>8}`, assert and panic, and `@track_caller`
-35. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers, and calling C
+35. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers in values and signatures, calling C, C function values, calling Calx from C with `@export_c`, callbacks on C's threads, and a handle's `drop`
 36. [Libraries](reference/libraries.md): `calx build --lib`, `@export`, opening a library while a program runs, types checked down to the fields, and the one runtime they share
-37. [Attributes](reference/attributes.md): attributes a library defines as Calx functions the compiler runs, their arguments, attributes on fields, the code they generate, the cache, and `calx expand`
-38. [Parallel loops](reference/parallel.md): `parallel for` over a range or a list's elements, the capture check, and the same result with any number of threads
-39. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
+37. [Static libraries](reference/embedding.md): `calx build --staticlib`, the C header, `calx_init` and `calx_shutdown`, and linking Calx into a C, C++ or Rust program on each platform
+38. [Attributes](reference/attributes.md): attributes a library defines as Calx functions the compiler runs, their arguments, attributes on fields, the code they generate, the cache, and `calx expand`
+39. [Parallel loops](reference/parallel.md): `parallel for` over a range or a list's elements, the capture check, and the same result with any number of threads
+40. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
 
 ### Standard library
 

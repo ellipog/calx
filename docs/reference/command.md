@@ -15,6 +15,7 @@ calx build hello.calx -o hello # build an executable
 calx build --release hello.calx
 calx build --release --cpu x86-64-v2 hello.calx   # for a processor without AVX2
 calx build --lib plugin.calx   # build a library, which a program opens while it runs
+calx build --staticlib core.calx  # build a static library, which a C, C++, Rust or Swift program links
 calx test tool.calx           # run its @test functions, each in a process of its own
 calx eval "1 << 20"           # run code given on the command line, and print its value
 calx fmt                       # format the .calx files here, in Calx's one format
@@ -41,6 +42,7 @@ Before it checks a program, each command runs the [attributes](attributes.md) th
 | `--cpu LEVEL` | The processor a release build counts on: `x86-64-v2` for one without AVX2, and the others [below](#processor-levels). `--cpu=LEVEL` is the same |
 | `-o PATH` | Where `build` writes the executable, or `emit-c` the C: a file for one module, a folder for several. Folders on the way are made if they aren't there. `build` defaults to the file's name in the current folder |
 | `--lib` | Build or check a [library](libraries.md): a `.dll` or `.so` with the functions marked `@export`, which a program opens while it runs. `calx run` doesn't take it |
+| `--staticlib` | Build or check a [static library](embedding.md): a `.lib` on Windows or a `.a` elsewhere, with the runtime and the functions marked `@export_c`, which a program in another language links, and a C header for them beside it. Only `build`, `check` and `emit-c` take it |
 | `--timings` | Print how long the front end, the C emitter, clang and the linker took, or that nothing had changed, so none of them ran ([fast builds](#fast-builds)) |
 | `--verbose` | Print the clang and linker commands |
 | `--no-line` | Leave `#line` directives out of the C |

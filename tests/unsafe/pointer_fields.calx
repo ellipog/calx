@@ -1,0 +1,82 @@
+// CLX-332, CLX-333: pointers in struct fields and in the signatures of `unsafe fn`s, C functions'
+// addresses as `extern "C" fn` values, which C calls back and Calx calls, and a box's value given
+// to C as a pointer and taken back.
+
+extern "C" {
+    fn malloc(n: usize) -> *u8
+    fn free(p: *u8)
+    fn qsort(base: *u8, n: usize, size: usize, cmp: extern "C" fn(*const u8, *const u8) -> i32)
+    fn abs(x: i32) -> i32
+}
+
+// Holds memory from C, which only `unsafe` code reads or writes through.
+struct Bytes {
+    p: *u8
+    len: usize
+}
+
+/// The `i`th byte at `p`. Callers promise there are more than `i`.
+unsafe fn byte(p: *const u8, i: usize) -> u8 {
+    return unsafe { p.add(i).read() }
+}
+
+unsafe fn ahead(p: *u8, n: usize) -> *u8 {
+    unsafe {
+        return p.add(n)
+    }
+}
+
+// C calls this, to sort.
+@export_c
+fn by_byte(a: *const u8, b: *const u8) -> i32 {
+    return unsafe { i32(a.read()) - i32(b.read()) }
+}
+
+// And this, by another name.
+@export_c("descending_bytes")
+fn descending(a: *const u8, b: *const u8) -> i32 {
+    return unsafe { i32(b.read()) - i32(a.read()) }
+}
+
+struct Counter {
+    n: i32
+}
+
+fn main() {
+    let b = unsafe { Bytes { p: malloc(4), len: 4 } }
+    unsafe {
+        for (i, v) in [9u8, 3, 7, 1].enumerate() {
+            b.p.add(i).write(v)
+        }
+        qsort(b.p, b.len, 1, by_byte)
+        println("{byte(b.p, 0)} {byte(b.p, 1)} {byte(b.p, 2)} {byte(b.p, 3)}")    // out: 1 3 7 9
+        qsort(b.p, b.len, 1, descending)
+        println("{byte(b.p, 0)} {byte(ahead(b.p, 3), 0)}")    // out: 9 1
+        // A struct with a pointer is `Copy`, and compares by address.
+        let c = b
+        println("{c == b} {c.len}")    // out: true 4
+        println("{b.p.addr() != 0}")    // out: true
+        free(b.p)
+    }
+
+    // A C function's address, as a value Calx calls, and a pointer's address as one.
+    let cmp: extern "C" fn(*const u8, *const u8) -> i32 = by_byte
+    let magnitude: extern "C" fn(i32) -> i32 = abs
+    let xs: List<u8> = [5, 2]
+    unsafe {
+        println("{cmp(xs.as_ptr(), xs.as_ptr().add(1))} {magnitude(-6)}")    // out: 3 6
+        let p = xs.as_ptr()
+        // An address C gave, such as `dlsym`'s, as the function it is; this one is only looked at.
+        _ = p.cast<u8>().to_fn<extern "C" fn(*const u8, *const u8) -> i32>()
+        let wide: List<u32> = [0x01020304]
+        println("{wide.as_ptr().cast<u8>().read() == 4 or wide.as_ptr().cast<u8>().read() == 1}")    // out: true
+    }
+
+    // A box's value, held by C as a pointer, and taken back.
+    unsafe {
+        let p = Box(Counter { n: 41 }).into_ptr()
+        var back = p.to_box()
+        back.value.n += 1
+        println("{back.value.n}")    // out: 42
+    }
+}

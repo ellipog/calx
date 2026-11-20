@@ -1,0 +1,7 @@
+// error: a static library exports at least one function to C: mark it `@export_c`
+// kind: staticlib
+// CLX-334: a static library's host calls in through what it exports to C, so it needs one.
+
+pub fn helper() -> i32 {
+    return 1
+}

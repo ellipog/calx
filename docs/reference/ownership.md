@@ -55,6 +55,8 @@ fn main() {
 }
 ```
 
+A handle can also have a `drop`, `fn drop(mut self)`, which runs once wherever the value ends, as Rust's `Drop` does: at the end of its scope, when its variable gets another value, in a list that's freed, or in the function it moved to. A struct that owns what a C library gave, such as a player's handle, frees it there ([owning what C gave](unsafe.md#owning-what-c-gave)).
+
 ## Moves
 
 An owning value moves when it's given a new owner:

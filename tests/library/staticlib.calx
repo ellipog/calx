@@ -1,0 +1,294 @@
+// CLX-334: a static library linked into a C program, the way a Rust, Swift or C++ app links one.
+// `core.calx` has the shape of an app's core: `core_start` takes JSON as a pointer and a length,
+// and a function to call back with a context pointer, and starts a thread that runs a std.net
+// event loop of its own and calls it back from there; `core_send` queues a message for that
+// thread, and `core_stop` joins it. The host, `host.c`, calls `calx_init` first and
+// `calx_shutdown` last, as its header says. It's built in debug and release, and compiled and
+// linked with clang, which on Windows uses Visual Studio's linker and DLL C runtime, as Rust's
+// MSVC target does. Then the host runs without `calx_init`, which the library refuses, saying so.
+// file: main.calx
+import std.env.{arch, os, script, variable}
+import std.fs.{read_text}
+import std.path.{join, parent_dir}
+import std.process.{Command}
+
+fn run(exe: String, args: List<String>, dir: String) -> String {
+    match Command.new(exe).args(args).dir(dir).output() {
+        ok(o) => {
+            let text = "{o.text()}{o.error_text()}".trim_end()
+            return if o.status.success() { text } else { "{text} [{o.status}]" }
+        },
+        err(e) => return "can't run {exe}: {e}",
+    }
+}
+
+fn main() {
+    let calx = variable("CALX") ?? String("calx")
+    let clang = variable("CALX_CC") ?? String("clang")
+    let dir = parent_dir(script()!)!
+    let windows = os() == "windows"
+    for mode in ["debug", "release"] {
+        var words: List<String> = ["build", "--staticlib"]
+        if mode == "release" {
+            words.push("--release")
+        }
+        let out = if windows { "out/{mode}/core.lib" } else { "out/{mode}/libcore.a" }
+        words.push("core.calx")
+        words.push("-o")
+        words.push(out.copy())
+        let built = run(calx.copy(), words, dir.copy())
+        if not built.is_empty() {
+            println("building the {mode} library: {built}")
+            continue
+        }
+        // The header beside it, made for it.
+        let header = read_text(join(dir.copy(), "out/{mode}/core.h"))! ?? String()
+        println("{header.contains("void calx_init(void);")} {header.contains("uint8_t* core_start(const uint8_t* config, size_t len, void (*on_event)(uint8_t*, const uint8_t*, size_t), uint8_t* ctx);")}")
+        var cc: List<String> = ["host.c", "-I", "out/{mode}", out.copy(), "-o", "out/{mode}/host{if windows { ".exe" } else { "" }}"]
+        if windows {
+            // Visual Studio's linker and its C runtime, the DLL one, which the library is built for,
+            // as Rust's MSVC target links. clang's driver names the static C runtime in every link,
+            // which a host built for the DLL one leaves out.
+            cc.push("--target={if arch() == "aarch64" { "aarch64" } else { "x86_64" }}-pc-windows-msvc")
+            cc.push("-fms-runtime-lib=dll")
+            cc.push("-fuse-ld=link")
+            cc.push("-Wl,-nodefaultlib:libcmt")
+        } else if os() == "linux" {
+            for lib in ["-lm", "-lpthread", "-ldl"] {
+                cc.push(String(lib))
+            }
+        }
+        let compiled = run(clang.copy(), cc, dir.copy())
+        if not compiled.is_empty() {
+            println("linking the {mode} host: {compiled}")
+            continue
+        }
+        let host = join(dir.copy(), "out/{mode}/host{if windows { ".exe" } else { "" }}")
+        println(run(host.copy(), [], dir.copy()))
+        println(run(host, ["--no-init"], dir.copy()))
+    }
+    // out: true true
+    // out: event on the host's thread: started loom, 2 tasks
+    // out: event on another thread: worker's event loop echoed hello
+    // out: event on another thread: worker started
+    // out: event on another thread: worker got {"n":1}
+    // out: event on another thread: worker got {"n":2}
+    // out: event on another thread: worker stopped after 2
+    // out: core_send gave 0, then 0, and -1 for text that isn't UTF-8
+    // out: the core says goodbye
+    // out: calx_shutdown gave 0
+    // out: calx: C called `core_start` before `calx_init`, so the runtime hasn't started; call `calx_init` first [exited with status 101]
+    // out: true true
+    // out: event on the host's thread: started loom, 2 tasks
+    // out: event on another thread: worker's event loop echoed hello
+    // out: event on another thread: worker started
+    // out: event on another thread: worker got {"n":1}
+    // out: event on another thread: worker got {"n":2}
+    // out: event on another thread: worker stopped after 2
+    // out: core_send gave 0, then 0, and -1 for text that isn't UTF-8
+    // out: the core says goodbye
+    // out: calx_shutdown gave 0
+    // out: calx: C called `core_start` before `calx_init`, so the runtime hasn't started; call `calx_init` first [exited with status 101]
+}
+
+// file: core.calx
+import std.json
+import std.json.{Json}
+import std.net.{Event, Net, NetError}
+import std.thread.{Task}
+
+/// Where the core tells its host what happened: the host's function, and the context it gave,
+/// which the host lets any thread use.
+struct Sink {
+    on_event: extern "C" fn(*u8, *const u8, usize)
+    ctx: *u8
+}
+
+unsafe impl Send for Sink {}
+
+impl Sink {
+    fn tell(self, message: String) {
+        unsafe { (self.on_event)(self.ctx, message.as_ptr(), message.len()) }
+    }
+}
+
+/// The thread the core runs its work on, which calls the host back from there.
+struct Worker {
+    sink: Sink
+    inbox: Receiver<String>
+}
+
+/// Text sent to a server of the thread's own over loopback, and echoed back, with an event loop
+/// that thread polls, as a network library's would.
+fn echo(text: String) -> String ! NetError {
+    let net = try Net.new()
+    let port = try net.listen("127.0.0.1", 0)
+    let client = try net.connect("127.0.0.1", port)
+    var events = List<Event>()
+    var got = List<u8>()
+    var done = false
+    while not done {
+        net.poll(5000, mut events)
+        if events.is_empty() {
+            break
+        }
+        for e in events {
+            match e {
+                Connected(c) => net.write(c, text.to_bytes()),
+                Received(c) => {
+                    if c.slot() == client.slot() {
+                        _ = net.read(c, mut got)
+                        if got.len() == text.len() {
+                            net.close(c)
+                        }
+                    } else {
+                        var bytes = List<u8>()
+                        _ = net.read(c, mut bytes)
+                        net.write(c, bytes)
+                    }
+                },
+                Closed(c) => {
+                    if c.slot() == client.slot() {
+                        done = true
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+    return String.from_utf8(got) ?? String("?")
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        match echo("hello") {
+            ok(s) => self.sink.tell("worker's event loop echoed {s}"),
+            err(e) => self.sink.tell("worker's event loop failed: {e}"),
+        }
+        self.sink.tell("worker started")
+        var n = 0
+        while let m = self.inbox.wait() {
+            self.sink.tell("worker got {m}")
+            n += 1
+        }
+        self.sink.tell("worker stopped after {n}")
+    }
+}
+
+/// What `core_start` gives the host, which it hands back to the others. `core_stop` takes its
+/// parts, since a value that owns memory stays in its box.
+struct Core {
+    outbox: Sender<String>?
+    worker: Thread?
+}
+
+/// The `len` bytes at `p`, as text, or none if they aren't UTF-8.
+unsafe fn text_at(p: *const u8, len: usize) -> String? {
+    var bytes = List<u8>()
+    bytes.reserve(len)
+    for i in 0..len {
+        bytes.push(unsafe { p.add(i).read() })
+    }
+    return String.from_utf8(bytes)
+}
+
+/// Starts the core with its configuration, JSON in the `len` bytes at `config`, and tells
+/// `on_event`, with `ctx`, what happens from then on. Gives back the core, for the other calls.
+@export_c
+fn core_start(config: *const u8, len: usize, on_event: extern "C" fn(*u8, *const u8, usize), ctx: *u8) -> *u8 {
+    let sink = unsafe { Sink { on_event: on_event, ctx: ctx } }
+    var name = String("?")
+    var tasks: i64 = 0
+    if let given = unsafe { text_at(config, len) } {
+        if let ok(Json.Object(o)) = json.parse(given) {
+            if let Json.Str(s) = o.find("name") {
+                name = s.copy()
+            }
+            if let Json.Int(t) = o.find("tasks") {
+                tasks = t
+            }
+        }
+    }
+    sink.tell("started {name}, {tasks} tasks")
+    let inbox = Receiver<String>()
+    let core = Core { outbox: some(inbox.sender()), worker: some(unsafe { Thread.spawn(Worker { sink: sink, inbox: inbox }) }) }
+    unsafe {
+        return Box(core).into_ptr().cast<u8>()
+    }
+}
+
+/// Gives the core's thread the JSON in the `len` bytes at `message`. 0 if it went, -1 if it isn't
+/// UTF-8.
+@export_c
+fn core_send(core: *u8, message: *const u8, len: usize) -> i32 {
+    var c = unsafe { core.cast<Core>().to_box() }
+    var status: i32 = -1
+    if let m = unsafe { text_at(message, len) } {
+        if let o = mut c.value.outbox {
+            o.send(m)
+        }
+        status = 0
+    }
+    // C keeps the core.
+    unsafe {
+        _ = c.into_ptr()
+    }
+    return status
+}
+
+/// Stops the core's thread, waits for it, and frees the core.
+@export_c
+fn core_stop(core: *u8) {
+    var c = unsafe { core.cast<Core>().to_box() }
+    if let o = c.value.outbox.take() {
+        o.close()
+    }
+    if let w = c.value.worker.take() {
+        w.join()
+    }
+    println("the core says goodbye")
+}
+
+// file: host.c
+#include <stdio.h>
+#include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+static DWORD host_thread;
+static void remember_thread(void) { host_thread = GetCurrentThreadId(); }
+static int on_host_thread(void) { return GetCurrentThreadId() == host_thread; }
+#else
+#include <pthread.h>
+static pthread_t host_thread;
+static void remember_thread(void) { host_thread = pthread_self(); }
+static int on_host_thread(void) { return pthread_equal(pthread_self(), host_thread); }
+#endif
+#include "core.h"
+
+struct events {
+    int count;
+};
+
+static void on_event(uint8_t* ctx, const uint8_t* text, size_t len) {
+    struct events* e = (struct events*)ctx;
+    e->count++;
+    printf("event on %s: %.*s\n", on_host_thread() ? "the host's thread" : "another thread", (int)len, (const char*)text);
+    fflush(stdout);
+}
+
+int main(int argc, char** argv) {
+    remember_thread();
+    int init = !(argc > 1 && strcmp(argv[1], "--no-init") == 0);
+    if (init) calx_init();
+    struct events e = {0};
+    const char* config = "{\"name\": \"loom\", \"tasks\": 2}";
+    uint8_t* core = core_start((const uint8_t*)config, strlen(config), on_event, (uint8_t*)&e);
+    int a = core_send(core, (const uint8_t*)"{\"n\":1}", 7);
+    int b = core_send(core, (const uint8_t*)"{\"n\":2}", 7);
+    int c = core_send(core, (const uint8_t*)"\xff", 1);
+    core_stop(core);
+    printf("core_send gave %d, then %d, and %d for text that isn't UTF-8\n", a, b, c);
+    fflush(stdout);
+    printf("calx_shutdown gave %d\n", calx_shutdown());
+    return e.count == 6 ? 0 : 1;
+}

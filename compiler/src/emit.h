@@ -23,4 +23,8 @@ struct CFile {
 // The C files for a checked program, one per module that has functions, the main module last.
 std::vector<CFile> emit_c(const Program& program, const Sources& sources, const Names& names, const EmitOptions& options);
 
+// CLX-334: the C header of a static library named `name`, which declares `calx_init`,
+// `calx_shutdown` and each function the program exports with `@export_c`, in C's own types.
+std::string c_header(const Program& program, const Names& names, const std::string& name);
+
 }  // namespace calx
