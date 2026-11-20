@@ -1,6 +1,6 @@
 ---
 title: std.hash
-description: MD5, SHA-1, SHA-256, SHA-384 and SHA-512, at once or in pieces, and HMAC with any of them, giving what Java's MessageDigest and Mac and Python's hashlib and hmac give, at or near OpenSSL's speed.
+description: MD5, SHA-1, SHA-256, SHA-384 and SHA-512, at once or in pieces, HMAC with any of them, and BLAKE2b of any length with a key or none, giving what Java's MessageDigest and Mac and Python's hashlib and hmac give, at or near OpenSSL's speed.
 ---
 
 # `std.hash`
@@ -11,6 +11,7 @@ Common hashes, giving the bytes Java's `MessageDigest` and `Mac` and Python's `h
 - SHA-1, for the server hash a login sends the session server.
 - SHA-256, for the hashed seed in the join packet, and with SHA-512 for checking what a script downloads.
 - HMAC-SHA256, which Velocity signs the player data it forwards with, and HMAC with any of the others.
+- [BLAKE2b](#blake2b), of 1 to 64 bytes and with a key or none, as Python's `hashlib.blake2b` gives it, which password hashing in [`std.crypto`](crypto.md) is built on.
 
 On a modern x86-64 processor SHA-1 and SHA-256 run on its SHA instructions, as OpenSSL's do, and every hash is as fast as Python's or close ([below](#speed)).
 
@@ -61,15 +62,49 @@ fn main() {
 - The [tests](../../tests/std/hash.calx) hold Java's and Python's hashes for the lengths around where the padding takes another block.
 - To turn a hash into the hex Mojang's session server takes, which is the hash as a signed number, a program does what Java's `new BigInteger(hash).toString(16)` does: the bytes are two's complement, so a hash whose first byte is 0x80 or more is written as `-` and its negation.
 
+## BLAKE2b
+
+BLAKE2b, as RFC 7693 makes it and Python's `hashlib.blake2b` gives it: a hash of any length from 1 to 64 bytes, and with a key it's a MAC with no HMAC around it. It's what argon2, [`std.crypto`](crypto.md#passwords)'s password hashing, is built on, and what libsodium's `crypto_generichash` and `b2sum` give.
+
+```calx
+import std.bytes.{hex}
+import std.hash.{Blake2b, blake2b}
+
+fn main() {
+    // hashlib.blake2b(b"abc").hexdigest()[:32]
+    println(hex(blake2b("abc".to_bytes()))[..32])    // out: ba80a53f981c4d0d6a2797b69f12f6e9
+
+    // hashlib.blake2b(b"abc", digest_size=16, key=b"secret").hexdigest()
+    println(hex(blake2b("abc".to_bytes(), 16, key: "secret".to_bytes())))    // out: b728f0c8cb10089e9c7b3549c0cdea97
+
+    // In pieces, which give the hash of them all at once.
+    var h = Blake2b.new(32)
+    h.add_text("a")
+    h.add_text("bc")
+    println("{h.finish() == blake2b("abc".to_bytes(), 32)}")    // out: true
+}
+```
+
+| Item | Gives |
+| --- | --- |
+| `blake2b(bytes: List<u8>, len: usize = 64, key: List<u8> = []) -> List<u8>` | The BLAKE2b of the bytes, `len` of them, under the key if there's one, as Python's `hashlib.blake2b(bytes, digest_size=len, key=key).digest()`. Panics unless `len` is 1 to 64 and the key 64 bytes or fewer |
+| `Blake2b.new(len: usize = 64, key: List<u8> = []) -> Blake2b` | A BLAKE2b to work out in pieces, with the same panics |
+| `h.add(bytes: List<u8>)`, `h.add_text(text: String)` | Adds the bytes, or the text's UTF-8 bytes |
+| `h.finish() -> List<u8>` | The hash of everything added, `len` bytes. It takes the `Blake2b` |
+
+- A hash of another length isn't the 64-byte one cut short: the length goes into the first block, as Python's `digest_size` does, so `blake2b(b, 32)` and `blake2b(b)[..32]` differ.
+- The [tests](../../tests/std/blake2b.calx) hold RFC 7693's "abc" and its Appendix E self-test, whose grand hash covers 48 hashes, keyed and not, of 20 to 64 bytes over inputs of 0 to 1024 bytes, and `b2sum`'s hash of a one-byte length. The keyed hash above is OpenSSL 3.5's BLAKE2BMAC's. Pieces cut at every place around a block's end give the hash of the whole.
+
 ## How it's built
 
-[runtime/calx_digest.c](../../runtime/calx_digest.c), written from RFC 1321 (MD5), FIPS 180-4 (SHA-1 and SHA-2) and RFC 2104 (HMAC). The constants are worked out from their definitions: MD5's from sines, SHA-2's from the square and cube roots of the first primes. It's linked only into programs that call it.
+[runtime/calx_digest.c](../../runtime/calx_digest.c), written from RFC 1321 (MD5), FIPS 180-4 (SHA-1 and SHA-2), RFC 2104 (HMAC) and RFC 7693 (BLAKE2b). The constants are worked out from their definitions: MD5's from sines, SHA-2's from the square and cube roots of the first primes. It's linked only into programs that call it.
 
 - **SHA-1 and SHA-256** use the processor's SHA instructions where `cpuid` says it has them, which most x86-64 processors made since 2017 do: four rounds an instruction. The plain code is the fallback. `cpuid` is asked once per program, since under a hypervisor, as Windows with virtualization-based security runs, each one costs about a microsecond, which made hashing 50 bytes 8 times slower when it was asked every time. On Arm64 they use ARMv8's SHA-1 and SHA-256 instructions, which the system says it has: `sysctl` on macOS, `getauxval` on Linux and `IsProcessorFeaturePresent` on Windows.
 - **MD5** is written out round by round. Each round adds its message word and constant before the function of the round before's result, and an empty `asm` keeps clang from moving the constant back onto that chain.
 - **SHA-512 and SHA-384** use Arm64's SHA-512 instructions where it has them, as every Apple Silicon Mac does: two rounds an instruction, and the schedule two words at a time. Elsewhere they compute the message schedule two words at a time in SSE2's 64-bit lanes, sixteen rounds ahead, inside the round loop, so it fills the gaps in the rounds' chain. Where the processor has AVX2, they work out two blocks' schedules at once, one block in each half of a 256-bit register, as OpenSSL does: during the first block's rounds, after which the second block's rounds run on words already made. Each round sums its parts in the order they're ready, with the same empty `asm` as MD5's holding each partial sum where it is, so each round waits on the one before only for Sigma1 and an add. On the AVX2 path, which has BMI too, the majority function is `(a & bxc) + (b & ~bxc)`, where `bxc` is `b ^ c`, the round before's `a ^ b`: where `b` and `c` differ the majority is `a`'s bit, and where they agree it's `b`'s. The second half doesn't wait on `a` and is one `andn`, and it takes two moves a round fewer than carrying `b | c` and `b & c`, which the other paths still do. The first block's first 64 rounds are a loop of their own, so the schedule's vector work mixes in with the rounds' instead of coming all at once, as it did behind an `i < 64` test in the loop.
 - A `Digest` holds its state in a `List<u8>` of 224 bytes, which the runtime copies into a struct and back, so it needs no alignment and `std.hash` needs no unsafe types.
 - Whole blocks are hashed straight from the caller's bytes. Only a part block at the end of an `add` is copied, to wait for the next.
+- **BLAKE2b** is RFC 7693's plain C: twelve rounds of the quarter-round on 64-bit words, the message words taken in the order its table gives, with SHA-512's starting values. It keeps the last full block back until more comes or `finish`, since the last block is compressed with a flag of its own. It's in a context of the same 224 bytes as `Digest`'s, behind runtime calls of its own.
 - `hmac` is written in Calx over `Digest`. `hmac_sha256`, which Calcite checks Velocity's forwarding with, is one runtime call.
 
 ## Speed

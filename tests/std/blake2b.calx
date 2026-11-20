@@ -1,0 +1,51 @@
+// BLAKE2b against RFC 7693: Appendix A's "abc", and Appendix E's self-test, whose grand hash is
+// the BLAKE2b-256 of 48 hashes, keyed and not, of 20, 32, 48 and 64 bytes over inputs of 0, 3,
+// 128, 129, 255 and 1024 bytes. The rest are Python 3.14's hashlib.blake2b and b2sum's, around a
+// block's end and in pieces (CLX-384).
+
+import std.bytes.{hex}
+import std.hash.{Blake2b, blake2b}
+
+// RFC 7693's selftest_seq: a Fibonacci sequence's top bytes, from a seed.
+fn seq(len: usize, seed: u32) -> List<u8> {
+    var out: List<u8> = []
+    var a = u32.wrap(u64(0xDEAD4BADu32) * u64(seed))
+    var b: u32 = 1
+    for _ in 0..len {
+        let t = a + b
+        a = b
+        b = t
+        out.push(u8.wrap(t >> 24))
+    }
+    return out
+}
+
+fn main() {
+    println(hex(blake2b("abc".to_bytes())))    // out: ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923
+    println(hex(blake2b([])))    // out: 786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce
+
+    var grand = Blake2b.new(32)
+    for outlen in [20usize, 32, 48, 64] {
+        for inlen in [0usize, 3, 128, 129, 255, 1024] {
+            let input = seq(inlen, u32.wrap(inlen))
+            grand.add(blake2b(input.copy(), outlen))
+            grand.add(blake2b(input, outlen, key: seq(outlen, u32.wrap(outlen))))
+        }
+    }
+    println(hex(grand.finish()))    // out: c23a7800d98123bd10f506c61e29da5603d763b8bbad2e737f5e765a7bccd475
+
+    // In pieces, across where a block ends, give the hash of them all at once.
+    let all = seq(1000, 7)
+    for cut in [0usize, 1, 127, 128, 129, 256, 999, 1000] {
+        var d = Blake2b.new(48, key: "secret".to_bytes())
+        d.add(all[..cut])
+        d.add(all[cut..])
+        if d.finish() != blake2b(all.copy(), 48, key: "secret".to_bytes()) {
+            println("pieces cut at {cut} differ")
+        }
+    }
+
+    var t = Blake2b.new(1)
+    t.add_text("Grüße")
+    println(hex(t.finish()))    // out: 9e
+}

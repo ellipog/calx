@@ -934,6 +934,26 @@ CX_FN(void, cx_digest_start, (cx_u8* ctx, cx_u32 kind));
 CX_FN(void, cx_digest_add, (cx_u8* ctx, const cx_u8* p, cx_usize n));
 CX_FN(cx_usize, cx_digest_finish, (cx_u8* ctx, cx_u8* out));
 CX_FN(void, cx_digest_hmac_sha256, (const cx_u8* key, cx_usize key_len, const cx_u8* msg, cx_usize msg_len, cx_u8* out));
+/* BLAKE2b, in calx_digest.c too (CLX-384): a digest of `outlen` bytes, 1 to 64, under a key of up
+ * to 64 bytes, in a context of CX_DIGEST_CTX bytes. */
+CX_FN(void, cx_digest_blake2b_start, (cx_u8* ctx, cx_usize outlen, const cx_u8* key, cx_usize keylen));
+CX_FN(void, cx_digest_blake2b_add, (cx_u8* ctx, const cx_u8* p, cx_usize n));
+CX_FN(cx_usize, cx_digest_blake2b_finish, (cx_u8* ctx, cx_u8* out));
+
+/* argon2d, argon2i and argon2id (type 0, 1 and 2), version 0x13, in calx_argon2.c (CLX-384).
+ * Writes `outlen` bytes of tag, and returns false if the parameters are out of RFC 9106's range
+ * or the memory couldn't be had. */
+CX_FN(cx_bool, cx_argon2_hash, (cx_u32 type, cx_u32 memory, cx_u32 passes, cx_u32 lanes, const cx_u8* pwd, cx_usize pwdlen,
+                                const cx_u8* salt, cx_usize saltlen, const cx_u8* secret, cx_usize secretlen, const cx_u8* ad,
+                                cx_usize adlen, cx_u8* out, cx_usize outlen));
+
+/* Ed25519, RFC 8032, in calx_ed25519.c (CLX-379). A private key is its 32-byte seed, a public key
+ * 32 bytes, a signature 64. `cx_ed25519_check` says whether 32 bytes are a public key: a point
+ * on the curve in its one encoding. */
+CX_FN(void, cx_ed25519_public, (const cx_u8* seed, cx_u8* out));
+CX_FN(void, cx_ed25519_sign, (const cx_u8* seed, const cx_u8* pub, const cx_u8* msg, cx_usize len, cx_u8* out));
+CX_FN(cx_bool, cx_ed25519_check, (const cx_u8* pub));
+CX_FN(cx_bool, cx_ed25519_verify, (const cx_u8* pub, const cx_u8* msg, cx_usize len, const cx_u8* sig));
 
 /* Random bytes from the system, AES-128-CFB8 and RSA, in calx_crypto.c (D118). The contexts are
  * CX_CFB8_CTX, CX_RSA_CTX and CX_RSA_PUBLIC_CTX bytes, with no alignment needed. */

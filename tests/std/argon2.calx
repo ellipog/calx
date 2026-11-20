@@ -1,0 +1,63 @@
+// argon2 against RFC 9106's test vectors for argon2d, argon2i and argon2id (section 5), and the
+// reference implementation's PHC strings for "password" with "somesalt", which OpenSSL 3.5's
+// ARGON2 KDFs give too, as they do for the other two tags. Then PasswordHasher's strings,
+// verify_password and needs_rehash (CLX-384).
+
+import std.bytes.{hex}
+import std.crypto.{Argon2Type, PasswordHasher, argon2, compare_digest, verify_password}
+
+fn main() {
+    let password: List<u8> = [1; 32]
+    let salt: List<u8> = [2; 16]
+    let secret: List<u8> = [3; 8]
+    let data: List<u8> = [4; 12]
+    let d = argon2(password.copy(), salt.copy(), memory_kib: 32, iterations: 3, parallelism: 4, secret: secret.copy(), data: data.copy(), kind: Argon2Type.D)
+    println(hex(d))    // out: 512b391b6f1162975371d30919734294f868e3be3984f3c1a13a4db9fabe4acb
+    let i = argon2(password.copy(), salt.copy(), memory_kib: 32, iterations: 3, parallelism: 4, secret: secret.copy(), data: data.copy(), kind: Argon2Type.I)
+    println(hex(i))    // out: c814d9d1dc7f37aa13f0d77f2494bda1c8de6b016dd388d29952a4c4672b6ce8
+    let id = argon2(password.copy(), salt.copy(), memory_kib: 32, iterations: 3, parallelism: 4, secret: secret, data: data)
+    println(hex(id))    // out: 0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659
+
+    // The reference implementation's tests: 64 MiB, 2 passes, one lane and four.
+    let pw = "password".to_bytes()
+    let ss = "somesalt".to_bytes()
+    println(hex(argon2(pw.copy(), ss.copy(), memory_kib: 65536, iterations: 2, parallelism: 1, kind: Argon2Type.I)))    // out: c1628832147d9720c5bd1cfd61367078729f6dfb6f8fea9ff98158e0d7816ed0
+    println(hex(argon2(pw.copy(), ss.copy(), memory_kib: 65536, iterations: 2, parallelism: 1)))    // out: 09316115d5cf24ed5a15a31a3ba326e5cf32edc24702987c02b6566f61913cf7
+    println(hex(argon2(pw.copy(), ss.copy(), memory_kib: 256, iterations: 2, parallelism: 2, len: 24)))    // out: e5c9a33c83899d2f5c89bb9da84f83377a0290539f87632f
+    // A memory that isn't a multiple of 4 lanes is rounded down to one.
+    println(hex(argon2(pw.copy(), ss.copy(), memory_kib: 37, iterations: 1, parallelism: 1, len: 100)))    // out: 82e3b828f892c53de9f82ffb4d0ca843ffe17e97617f5ceaee2f2e6e4af61b5c1c31b36b5867fba688ccf5e2918ee4101f656e78da2711fff428aef08af04aa6393e076df7767acd523bc7774761666a2de8ba4e88f8f104c7073dbf8303b899d9cc2278
+
+    println("{verify_password("$argon2i$v=19$m=65536,t=2,p=1$c29tZXNhbHQ$wWKIMhR9lyDFvRz9YTZweHKfbftvj+qf+YFY4NeBbtA", "password")}")    // out: true
+    println("{verify_password("$argon2id$v=19$m=65536,t=2,p=1$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc", "password")}")    // out: true
+    println("{verify_password("$argon2id$v=19$m=65536,t=2,p=1$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc", "Password")}")    // out: false
+
+    let fast = PasswordHasher { memory_kib: 1024, iterations: 2, parallelism: 2 }
+    let h = fast.hash("hunter2")
+    println("{h.starts_with("$argon2id$v=19$m=1024,t=2,p=2$")}")    // out: true
+    println("{h.len()} {h != fast.hash("hunter2")}")    // out: 96 true
+    println("{verify_password(h, "hunter2")} {verify_password(h, "hunter3")} {verify_password(h, "")}")    // out: true false false
+    println("{fast.needs_rehash(h)} {PasswordHasher().needs_rehash(h)}")    // out: false true
+    println("{PasswordHasher { memory_kib: 1024, iterations: 2, parallelism: 2, hash_len: 16 }.needs_rehash(h)}")    // out: true
+    println("{fast.needs_rehash(h.replace("argon2id", "argon2i"))}")    // out: true
+
+    // What isn't a hash is no match, and needs making again.
+    for bad in [
+        "",
+        "$argon2id$v=19$m=1024,t=2,p=2",
+        "$argon2id$v=18$m=1024,t=2,p=2$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc",
+        "$argon2x$v=19$m=1024,t=2,p=2$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc",
+        "$argon2id$v=19$t=2,m=1024,p=2$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc",
+        "$argon2id$v=19$m=15,t=2,p=2$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc",
+        "$argon2id$v=19$m=1024,t=0,p=2$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc",
+        "$argon2id$v=19$m=1024,t=2,p=2$c29tZQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc",
+        "$argon2id$v=19$m=1024,t=2,p=2$c29tZXNhbHQ=$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc",
+        "$argon2id$v=19$m=1024,t=2,p=2$c29tZXNhbHQ$!!!",
+        "$argon2id$v=19$m=1024,t=2,p=2$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc$",
+    ] {
+        if verify_password(bad, "password") or not fast.needs_rehash(bad) {
+            println("took {bad}")
+        }
+    }
+
+    println("{compare_digest([1, 2, 3], [1, 2, 3])} {compare_digest([1, 2, 3], [1, 2, 4])} {compare_digest([1, 2], [1, 2, 3])}")    // out: true false false
+}

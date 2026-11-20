@@ -1,6 +1,6 @@
 ---
 title: std.crypto
-description: Random bytes from the system, AES-128 in CFB8 mode, and RSA with PKCS#1 v1.5 padding and signatures - what Minecraft's online-mode login and signed chat use.
+description: Random bytes from the system, AES-128 in CFB8 mode, RSA with PKCS#1 v1.5 padding and signatures - what Minecraft's online-mode login and signed chat use - and argon2id password hashing in PHC strings and Ed25519 signatures, as Python's argon2-cffi and cryptography give them.
 ---
 
 # `std.crypto`
@@ -14,6 +14,8 @@ What Minecraft's online-mode login is made of:
 Each gives what Java's `Cipher`, `KeyPairGenerator` and `SecureRandom` give for the same inputs, so a Java program on the other end of a connection gets what it expects.
 
 Signed chat uses RSA signatures. Mojang's key signs each player's key, and the player's key signs each of their messages. The server checks both as Java's `Signature` checks `SHA1withRSA` and `SHA256withRSA`.
+
+For everything else there are [passwords](#passwords), hashed with argon2id into the PHC strings Python's argon2-cffi writes, and [Ed25519](#ed25519) signatures, which minisign and SSH keys are, as Python's `cryptography` makes and checks them.
 
 ```calx
 import std.crypto.{Cfb8, RsaKey, random_bytes}
@@ -78,6 +80,106 @@ fn main() {
 - The padding is random, so the same message encrypts to different bytes each time. A signature's isn't, so the same message signs the same.
 - `from_der` takes keys of up to 4096 bits, Mojang's size; Java's `KeyFactory` takes up to 16384.
 
+## Passwords
+
+A password is stored as its argon2id hash, as RFC 9106 makes it and Python's argon2-cffi does: a random salt, then a pass over 64 MiB of memory three times, so each guess costs someone with a copy of the hashes that memory and about 65 ms of a core's time. The hash is a PHC string, `$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>`, which holds its parameters and salt, so it's all a database keeps, and argon2-cffi, libsodium and the reference implementation read it as `std.crypto` does.
+
+```calx
+import std.crypto.{PasswordHasher, verify_password}
+
+fn main() {
+    // argon2-cffi's PasswordHasher(): 64 MiB, 3 passes, 4 lanes. The test asks for less.
+    let ph = PasswordHasher { memory_kib: 1024, iterations: 2, parallelism: 2 }
+    let stored = ph.hash("hunter2")
+    println(stored[..30])    // out: $argon2id$v=19$m=1024,t=2,p=2$
+
+    println("{verify_password(stored, "hunter2")} {verify_password(stored, "hunter3")}")    // out: true false
+
+    // A login whose hash was made with other parameters makes it again from the password.
+    let now = PasswordHasher()
+    if verify_password(stored, "hunter2") and now.needs_rehash(stored) {
+        println("rehash")    // out: rehash
+    }
+
+    // The reference implementation's hash of "password" with the salt "somesalt".
+    println("{verify_password("$argon2id$v=19$m=65536,t=2,p=1$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc", "password")}")    // out: true
+}
+```
+
+```calx
+import std.bytes.{hex}
+import std.crypto.{Argon2Type, argon2}
+
+fn main() {
+    // argon2.low_level.hash_secret_raw(b"password", b"somesalt", time_cost=2, memory_cost=256,
+    // parallelism=2, hash_len=24, type=Type.ID)
+    let tag = argon2("password".to_bytes(), "somesalt".to_bytes(), memory_kib: 256, iterations: 2, parallelism: 2, len: 24)
+    println(hex(tag))    // out: e5c9a33c83899d2f5c89bb9da84f83377a0290539f87632f
+
+    // RFC 9106's argon2d vector: a secret and associated data mixed in.
+    let d = argon2([1; 32], [2; 16], memory_kib: 32, iterations: 3, parallelism: 4, secret: [3; 8], data: [4; 12], kind: Argon2Type.D)
+    println(hex(d)[..16])    // out: 512b391b6f116297
+}
+```
+
+| Item | Gives |
+| --- | --- |
+| `PasswordHasher` | `memory_kib: u32 = 65536`, `iterations: u32 = 3`, `parallelism: u32 = 4`, `hash_len: usize = 32` and `salt_len: usize = 16`, argon2-cffi's defaults, RFC 9106's second recommendation. `PasswordHasher()` takes them all; `PasswordHasher { memory_kib: 19456, iterations: 2, parallelism: 1 }` changes some |
+| `ph.hash(password: String) -> String` | The password's argon2id hash with a new salt from the system's random source, as a PHC string, as argon2-cffi's `ph.hash(password)`. Panics if the parameters are out of argon2's range, as `argon2` says |
+| `verify_password(hash: String, password: String) -> bool` | Whether the password is the one the PHC string was made from, with the string's own parameters, so it takes hashes made with any. It takes argon2id, argon2i and argon2d of version 19, and compares in constant time. `false` for a string that isn't a hash, where argon2-cffi's `ph.verify` raises |
+| `ph.needs_rehash(hash: String) -> bool` | Whether the hash was made with another type, version, memory, passes, lanes, salt length or hash length than `ph` would use now, as argon2-cffi's `check_needs_rehash`; `true` for one that isn't a hash |
+| `argon2(password: List<u8>, salt: List<u8>, memory_kib: u32 = 65536, iterations: u32 = 3, parallelism: u32 = 4, len: usize = 32, secret: List<u8> = [], data: List<u8> = [], kind: Argon2Type = Argon2Type.Id) -> List<u8>` | The raw tag, `len` bytes, as argon2-cffi's `hash_secret_raw`, with RFC 9106's secret key and associated data. Panics unless the salt is 8 bytes or more, `len` 4 or more, `iterations` 1 or more, `parallelism` 1 to 16777215 and `memory_kib` at least 8 for each lane, or if the memory can't be had |
+| `Argon2Type` | `D`, `I` or `Id`; `t.name()` is `argon2d`, `argon2i` or `argon2id` |
+| `compare_digest(a: List<u8>, b: List<u8>) -> bool` | Whether they're the same bytes, in a time that depends only on their lengths, as Python's `hmac.compare_digest`: for checking tokens and MACs without telling someone timing it how much of a guess was right |
+
+- Hashing takes about 65 ms with the defaults on a desktop's core, on purpose. A server hashes on a worker thread from [`std.thread`](thread.md), so its other requests carry on.
+- The lanes of each slice of memory run at once, each on a thread of its own, up to 16, and meet at the slice's end, as the reference implementation's threads do; the result is the same as running them one after another. With `parallelism: 1` it's one thread, about 145 ms for 64 MiB and 3 passes.
+- `memory_kib` that isn't a multiple of 4 lanes is rounded down to one, as the RFC says.
+- `verify_password` works out what the string asks for, so a string from someone else asking for a terabyte makes the program try to have it. Hashes come from a program's own database.
+- The memory is zeroed before it's freed, and so is what the password was hashed into.
+- The [tests](../../tests/std/argon2.calx) hold RFC 9106's vectors for all three types, and the reference implementation's PHC strings for argon2i and argon2id, which OpenSSL 3.5's `ARGON2I` and `ARGON2ID` KDFs give too, as they do for the other tags there.
+
+## Ed25519
+
+Ed25519 signatures, as RFC 8032 makes them and Python's `cryptography` signs and checks them: a key is a 32-byte seed, its public key 32 bytes, and a signature 64. They're what minisign, signify, SSH's `ssh-ed25519` and most signed updates use, and the same message always signs the same.
+
+```calx
+import std.bytes.{from_hex, hex}
+import std.crypto.{Ed25519Key, Ed25519PublicKey}
+
+fn main() {
+    // RFC 8032's first test: its seed, public key and signature of the empty message.
+    let key = Ed25519Key.from_seed(from_hex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")!)!
+    println(hex(key.public_key().bytes()))    // out: d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
+    let sig = key.sign([])
+    println(hex(sig.copy())[..32])    // out: e5564300c360ac729086e2cc806e828a
+
+    // What a program that checks an update holds: the public key's bytes.
+    let public = Ed25519PublicKey.from_bytes(from_hex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")!)!
+    println("{public.verify([], sig.copy())} {public.verify([0], sig)}")    // out: true false
+
+    let fresh = Ed25519Key.generate()
+    let note = "release 1.2".to_bytes()
+    println("{fresh.public_key().verify(note.copy(), fresh.sign(note.copy()))}")    // out: true
+}
+```
+
+| Item | Gives |
+| --- | --- |
+| `Ed25519Key.generate() -> Ed25519Key` | A new key from 32 bytes of the system's random source, as `Ed25519PrivateKey.generate()` |
+| `Ed25519Key.from_seed(seed: List<u8>) -> Ed25519Key?` | The key with that seed, as `Ed25519PrivateKey.from_private_bytes(seed)`; `none` unless it's 32 bytes, all of which are seeds |
+| `k.seed() -> List<u8>` | The 32-byte seed, as `private_bytes_raw()`. Anyone with it can sign as the key |
+| `k.public_key() -> Ed25519PublicKey` | The public key, which checks what `k` signs |
+| `k.sign(message: List<u8>) -> List<u8>` | The 64-byte signature, as `k.sign(message)` gives it |
+| `Ed25519PublicKey.from_bytes(bytes: List<u8>) -> Ed25519PublicKey?` | The key in 32 bytes, as `Ed25519PublicKey.from_public_bytes(bytes)`; `none` unless they're a point on the curve in its one encoding |
+| `p.bytes() -> List<u8>` | The key's 32 bytes, as `public_bytes_raw()` |
+| `p.verify(message: List<u8>, signature: List<u8>) -> bool` | Whether the signature is the key's of the message, as `cryptography`'s `verify` decides, where it raises `InvalidSignature` for no. One that isn't 64 bytes isn't |
+
+- `verify` decides as OpenSSL, which `cryptography` is, and Go decide: S must be below the group's order L, so no second form of a signature passes, the key must be a point in its one encoding, and [S]B − [k]A must encode to the signature's R, byte for byte.
+- A minisign signature is Ed25519 of the file's BLAKE2b-512, `blake2b(bytes)` from [`std.hash`](hash.md#blake2b), for its prehashed `ED` form, or of the file itself for the legacy `Ed`.
+- There's no X25519 key exchange yet.
+- The [tests](../../tests/std/ed25519.calx) hold RFC 8032's five Ed25519 vectors, each signed and verified, and not verified with a bit flipped in R or S or a byte added to the message, then keys that aren't points or aren't in their one encoding, and an S of L more than a good one.
+
 ## Checked against Java
 
 - AES-CFB8: 300 random streams of up to 699 bytes, encrypted in random pieces, gave the same bytes as Java 25's `Cipher` gave for each whole stream, and decrypting them in other random pieces gave them back. The portable version gave the same as AES-NI on 2000 more.
@@ -113,5 +215,28 @@ On our benchmark, an i9-13900K. The decrypt and verify rows are the best of 60 r
 The ciphers run for every byte a player sends or gets, so they're what counts. RSA runs once for each login, and a verify once for each signed chat message. Java's best rounds come after its JIT has warmed up. Interleaving the multiply's two carry chains with ADX would make RSA about twice as fast again.
 
 On GitHub's Arm runners, with Arm64's AES instructions, from the [bench workflow](../../.github/workflows/bench.yml) with the nightly of 2026-11-12 (5847f42), rough: CFB8 encrypted at 101 MiB/s and decrypted at 463 MiB/s on a Neoverse N2, Azure's Cobalt 100, on Linux and on Windows alike. A virtual Apple M1 did 69 and 893 MiB/s. In the units of the table above, 101 MiB/s is 106 MB/s.
+
+argon2 is [runtime/calx_argon2.c](../../runtime/calx_argon2.c), written from RFC 9106, and Ed25519 [runtime/calx_ed25519.c](../../runtime/calx_ed25519.c), written from RFC 8032 and the curve's papers. Each is linked only into programs that call it, with [`std.hash`](hash.md)'s runtime for BLAKE2b and SHA-512.
+
+| Part | How |
+| --- | --- |
+| argon2's blocks | G, BLAKE2b's round with a multiply in each add, over the 1 KiB block as eight rows of 16 words then eight columns, in plain 64-bit C. The block before and the one referenced are xored, permuted and xored back, and from the second pass on the block being overwritten is xored in too, as version 0x13 says |
+| argon2's lanes | Each slice of each pass starts a thread for each lane but the first, up to 16 threads with lanes shared out among them, and waits for them at its end: that's where the RFC lets lanes look at each other's blocks. A thread that can't be started has its lanes run on the calling one, which gives the same hash |
+| argon2's references | argon2id takes the first half of the first pass's references from a counter run through G, so they don't depend on the password, and the rest from each block before's first word |
+| Ed25519's numbers | Mod 2^255 - 19 in five 51-bit limbs, multiplied through 128-bit products with the top's carry folded back in times 19. Inverses and square roots are powers, by RFC 8032's chains of squarings |
+| Ed25519's points | Extended coordinates, with the complete sum and doubling of Hisil, Wong, Carter and Dawson's paper: one formula for every pair of points, so nothing branches on them |
+| Signing | [a]B four bits at a time from a table of B's first 16 multiples, each entry picked by reading all 16 under masks, and scalars mod L reduced a bit at a time with a subtraction kept or dropped by a mask, so neither the time nor the memory touched depends on the key |
+| Verifying | [S]B − [k]A with both tables, four bits at a time, picked directly, since everything in it is public |
+
+On the same desktop, an i9-13900K, the best of several runs, against OpenSSL 3.5 in WSL, the library under Python's `cryptography`:
+
+| | Calx | OpenSSL 3.5 |
+| --- | --- | --- |
+| argon2id, 64 MiB, 3 passes, 4 lanes | 67 ms, on 4 threads | 320 ms, one thread |
+| argon2id, 64 MiB, 3 passes, 1 lane | 145 ms | |
+| An Ed25519 signature | 66 µs | 44 µs |
+| An Ed25519 verify | 87 µs | 127 µs |
+
+OpenSSL's `kdf` command ran argon2's lanes one after another, as it had no thread pool to run them on. Working G out in vector registers, as the reference implementation's AVX2 code does, would make each lane faster still.
 
 `std.crypto` is written in Calx over those runtime calls: [std/crypto.calx](../../std/crypto.calx).

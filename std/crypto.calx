@@ -6,8 +6,13 @@
 /// gives what Java's `SecureRandom`, `Cipher` and `KeyPairGenerator` give, for the same inputs.
 /// Signatures are what signed chat uses: a player's key, which Mojang's key signs, signs each of
 /// their messages, and each is checked as Java's `Signature` checks `SHA256withRSA`.
+///
+/// Beside those, argon2id for storing passwords (CLX-384), as Python's argon2-cffi does, in the
+/// PHC strings it writes, and Ed25519 signatures (CLX-379), which minisign and SSH keys are, as
+/// Python's `cryptography` signs and checks them.
 module std.crypto
 
+import std.bytes.{base64, from_base64}
 import std.hash.{Algorithm, Digest}
 
 extern "C" {
@@ -25,6 +30,26 @@ extern "C" {
     fn cx_rsa_private_op(ctx: *const u8, bytes: *const u8, len: usize, out: *u8) -> bool
     fn cx_rsa_public_setup(ctx: *u8, modulus: *const u8, len: usize, exponent: *const u8, elen: usize) -> bool
     fn cx_rsa_public_op(ctx: *const u8, bytes: *const u8, out: *u8) -> bool
+    fn cx_argon2_hash(
+        kind: u32,
+        memory: u32,
+        passes: u32,
+        lanes: u32,
+        pwd: *const u8,
+        pwd_len: usize,
+        salt: *const u8,
+        salt_len: usize,
+        secret: *const u8,
+        secret_len: usize,
+        data: *const u8,
+        data_len: usize,
+        out: *u8,
+        out_len: usize,
+    ) -> bool
+    fn cx_ed25519_public(seed: *const u8, out: *u8)
+    fn cx_ed25519_sign(seed: *const u8, public: *const u8, msg: *const u8, len: usize, out: *u8)
+    fn cx_ed25519_check(public: *const u8) -> bool
+    fn cx_ed25519_verify(public: *const u8, msg: *const u8, len: usize, sig: *const u8) -> bool
 }
 
 /// `n` random bytes from the system's generator, which is good for keys, secrets and tokens.
@@ -263,6 +288,300 @@ impl RsaPublicKey {
         var got: List<u8> = [0; size]
         let done = unsafe { cx_rsa_public_op(self.ctx.as_ptr(), signature.as_ptr(), got.as_mut_ptr()) }
         return done and got == want
+    }
+}
+
+/// Whether the two are the same bytes, in a time that depends only on their lengths, not on where
+/// they first differ, as Python's `hmac.compare_digest` decides. A tag or token checked with `==`
+/// tells someone timing the answers how much of their guess was right.
+pub fn compare_digest(a: List<u8>, b: List<u8>) -> bool {
+    if a.len() != b.len() {
+        return false
+    }
+    var diff: u8 = 0
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i]
+    }
+    return diff == 0
+}
+
+/// Which of RFC 9106's three argon2s: `Id`, for passwords, chooses blocks as `I` does for the first
+/// half of the first pass, which shows nothing of the password to someone timing the memory, and
+/// as `D` does after, which makes it costly to trade memory for time.
+pub enum Argon2Type {
+    /// Blocks chosen by what's in memory: the costliest to attack with less of it, but open to
+    /// someone timing which memory is read.
+    D
+    /// Blocks chosen by a counter: open to nothing that watches the memory, but less costly to
+    /// attack with less of it.
+    I
+    /// The two together, which RFC 9106 says to use.
+    Id
+}
+
+impl Argon2Type {
+    /// Its name in a PHC string: `argon2d`, `argon2i` or `argon2id`.
+    pub fn name(self) -> str {
+        return match self {
+            D => "argon2d",
+            I => "argon2i",
+            Id => "argon2id",
+        }
+    }
+
+    fn code(self) -> u32 {
+        return match self {
+            D => 0,
+            I => 1,
+            Id => 2,
+        }
+    }
+}
+
+/// The argon2 tag of the password with the salt, version 0x13, as RFC 9106 makes it and Python's
+/// `argon2.low_level.hash_secret_raw` gives it: `len` bytes, from `memory_kib` KiB of memory
+/// passed over `iterations` times in `parallelism` lanes, which run on threads of their own.
+/// `secret` is a key mixed in that isn't stored beside the hash, a pepper, and `data` more that's
+/// tied to it; both are empty unless given. The defaults are RFC 9106's second recommendation,
+/// argon2-cffi's: 64 MiB, 3 passes and 4 lanes. Panics unless the salt is 8 bytes or more, `len`
+/// 4 or more, `iterations` 1 or more, `parallelism` 1 to 16777215 and `memory_kib` at least 8
+/// for each lane, or if the memory can't be had.
+@track_caller
+pub fn argon2(
+    password: List<u8>,
+    salt: List<u8>,
+    memory_kib: u32 = 65536,
+    iterations: u32 = 3,
+    parallelism: u32 = 4,
+    len: usize = 32,
+    secret: List<u8> = [],
+    data: List<u8> = [],
+    kind: Argon2Type = Argon2Type.Id,
+) -> List<u8> {
+    if salt.len() < 8 {
+        panic("an argon2 salt is 8 bytes or more, not {salt.len()}")
+    }
+    if len < 4 {
+        panic("an argon2 tag is 4 bytes or more, not {len}")
+    }
+    if iterations < 1 {
+        panic("argon2 makes 1 pass or more, not 0")
+    }
+    if parallelism < 1 or parallelism > 16777215 {
+        panic("argon2 has 1 to 16777215 lanes, not {parallelism}")
+    }
+    if u64(memory_kib) < 8 * u64(parallelism) {
+        panic("argon2 takes 8 KiB or more for each lane, so {parallelism} lanes take {8 * u64(parallelism)}, not {memory_kib}")
+    }
+    return argon2_raw(kind, password, salt, memory_kib, iterations, parallelism, len, secret, data) ?? panic("argon2 couldn't have {memory_kib} KiB of memory")
+}
+
+// The tag, or none if the parameters are out of range or the memory couldn't be had.
+fn argon2_raw(kind: Argon2Type, password: List<u8>, salt: List<u8>, memory: u32, passes: u32, lanes: u32, len: usize, secret: List<u8>, data: List<u8>) -> List<u8>? {
+    var out: List<u8> = [0; len]
+    let done = unsafe {
+        cx_argon2_hash(
+            kind.code(),
+            memory,
+            passes,
+            lanes,
+            password.as_ptr(),
+            password.len(),
+            salt.as_ptr(),
+            salt.len(),
+            secret.as_ptr(),
+            secret.len(),
+            data.as_ptr(),
+            data.len(),
+            out.as_mut_ptr(),
+            len,
+        )
+    }
+    if not done {
+        return none
+    }
+    return some(out)
+}
+
+/// Hashes passwords with argon2id for storing, as Python's `argon2.PasswordHasher` does, in the
+/// PHC string format it and the reference implementation write, which `verify_password` checks:
+/// `$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>`, the salt and hash in base64 without padding.
+/// `PasswordHasher()` has argon2-cffi's defaults, RFC 9106's second recommendation; give fields
+/// to change them, as `PasswordHasher { memory_kib: 19456, iterations: 2, parallelism: 1 }`.
+pub struct PasswordHasher {
+    /// The memory each hash takes, in KiB: 64 MiB.
+    pub memory_kib: u32 = 65536
+    /// How many passes over that memory.
+    pub iterations: u32 = 3
+    /// How many lanes, run on threads of their own.
+    pub parallelism: u32 = 4
+    /// How many bytes of hash.
+    pub hash_len: usize = 32
+    /// How many bytes of salt, which `hash` takes from the system's random source.
+    pub salt_len: usize = 16
+}
+
+impl PasswordHasher {
+    /// The password hashed with a new random salt, as a PHC string to store, which is different
+    /// each time. Panics if the parameters are out of argon2's range, as `argon2` says.
+    @track_caller
+    pub fn hash(self, password: String) -> String {
+        let salt = random_bytes(self.salt_len)
+        let tag = argon2(password.to_bytes(), salt.copy(), memory_kib: self.memory_kib, iterations: self.iterations, parallelism: self.parallelism, len: self.hash_len)
+        return "$argon2id$v=19$m={self.memory_kib},t={self.iterations},p={self.parallelism}${phc64(salt)}${phc64(tag)}"
+    }
+
+    /// Whether `hash` was made other than this hasher would make it now, by type, version,
+    /// memory, passes, lanes or the salt's or hash's length, so it should be made again from the
+    /// password, which a program has just after `verify_password` takes it, as argon2-cffi's
+    /// `check_needs_rehash` decides. A string that isn't a hash needs it too.
+    pub fn needs_rehash(self, hash: String) -> bool {
+        let phc = Phc.parse(hash) else return true
+        return phc.kind != Argon2Type.Id or phc.memory != self.memory_kib or phc.iterations != self.iterations or phc.parallelism != self.parallelism or phc.salt.len() != self.salt_len or phc.hash.len() != self.hash_len
+    }
+}
+
+/// Whether `password` is the one `hash`, a PHC string, was made from, as argon2-cffi's
+/// `PasswordHasher.verify` decides, with the parameters in the string, so it checks hashes made
+/// with any `PasswordHasher`'s, before they changed too. It takes argon2id, argon2i and argon2d,
+/// of version 19. The hashes are compared in constant time. A string that isn't such a hash is
+/// `false`, where argon2-cffi raises.
+pub fn verify_password(hash: String, password: String) -> bool {
+    let phc = Phc.parse(hash) else return false
+    let tag = argon2_raw(phc.kind, password.to_bytes(), phc.salt.copy(), phc.memory, phc.iterations, phc.parallelism, phc.hash.len(), [], []) else return false
+    return compare_digest(tag, phc.hash.copy())
+}
+
+// Base64 without its padding, as PHC strings write it.
+fn phc64(bytes: List<u8>) -> String {
+    return base64(bytes).replace("=", "")
+}
+
+// An argon2 hash read from a PHC string: `$argon2id$v=19$m=…,t=…,p=…$salt$hash`, with the
+// parameters in that order, as the reference implementation reads it, and in range.
+struct Phc {
+    kind: Argon2Type,
+    memory: u32,
+    iterations: u32,
+    parallelism: u32,
+    salt: List<u8>,
+    hash: List<u8>,
+}
+
+impl Phc {
+    fn parse(text: String) -> Phc? {
+        let parts = text.split("$")
+        if parts.len() != 6 or parts[0] != "" or parts[2] != "v=19" {
+            return none
+        }
+        let kind = if parts[1] == "argon2id" {
+            Argon2Type.Id
+        } else if parts[1] == "argon2i" {
+            Argon2Type.I
+        } else if parts[1] == "argon2d" {
+            Argon2Type.D
+        } else {
+            return none
+        }
+        let params = parts[3].split(",")
+        if params.len() != 3 {
+            return none
+        }
+        let memory = u32.parse(params[0].trim_prefix("m=")) else return none
+        let iterations = u32.parse(params[1].trim_prefix("t=")) else return none
+        let parallelism = u32.parse(params[2].trim_prefix("p=")) else return none
+        if not params[0].starts_with("m=") or not params[1].starts_with("t=") or not params[2].starts_with("p=") {
+            return none
+        }
+        if parts[4].contains("=") or parts[5].contains("=") {
+            return none
+        }
+        let salt = from_base64(parts[4]) else return none
+        let hash = from_base64(parts[5]) else return none
+        if salt.len() < 8 or hash.len() < 4 or iterations < 1 or parallelism < 1 or parallelism > 16777215 or u64(memory) < 8 * u64(parallelism) {
+            return none
+        }
+        return some(Phc { kind: kind, memory: memory, iterations: iterations, parallelism: parallelism, salt: salt, hash: hash })
+    }
+}
+
+/// An Ed25519 private key, RFC 8032's: a 32-byte seed, from which its public key and every
+/// signature are worked out, as Python's `cryptography` `Ed25519PrivateKey` holds it.
+pub struct Ed25519Key {
+    secret: List<u8>,
+    public: List<u8>,
+}
+
+impl Ed25519Key {
+    /// A new key, from 32 bytes of the system's random source, as `Ed25519PrivateKey.generate()`.
+    pub fn generate() -> Ed25519Key {
+        return Ed25519Key.from_seed(random_bytes(32)) ?? panic("32 random bytes are a seed")
+    }
+
+    /// The key whose seed this is, as `Ed25519PrivateKey.from_private_bytes(seed)` makes it, or
+    /// `none` unless it's 32 bytes. Every 32 bytes are a seed.
+    pub fn from_seed(seed: List<u8>) -> Ed25519Key? {
+        if seed.len() != 32 {
+            return none
+        }
+        var public: List<u8> = [0; 32]
+        unsafe {
+            cx_ed25519_public(seed.as_ptr(), public.as_mut_ptr())
+        }
+        return some(Ed25519Key { secret: seed.copy(), public: public })
+    }
+
+    /// The 32-byte seed, which `from_seed` makes the same key from, as `private_bytes_raw()` gives
+    /// it. Anyone with it can sign as the key.
+    pub fn seed(self) -> List<u8> {
+        return self.secret.copy()
+    }
+
+    /// The public key, which checks what this key signs.
+    pub fn public_key(self) -> Ed25519PublicKey {
+        return Ed25519PublicKey { encoded: self.public.copy() }
+    }
+
+    /// The 64-byte signature of the message, the same each time for the same message, as
+    /// `Ed25519PrivateKey.sign(message)` gives it.
+    pub fn sign(self, message: List<u8>) -> List<u8> {
+        var out: List<u8> = [0; 64]
+        unsafe {
+            cx_ed25519_sign(self.secret.as_ptr(), self.public.as_ptr(), message.as_ptr(), message.len(), out.as_mut_ptr())
+        }
+        return out
+    }
+}
+
+/// An Ed25519 public key: 32 bytes, a point on the curve, as Python's `cryptography`
+/// `Ed25519PublicKey` holds it. It checks signatures.
+pub struct Ed25519PublicKey {
+    encoded: List<u8>,
+}
+
+impl Ed25519PublicKey {
+    /// The key in these 32 bytes, as `Ed25519PublicKey.from_public_bytes(bytes)` reads it, or
+    /// `none` unless they're 32 bytes that encode a point on the curve, in its one encoding.
+    pub fn from_bytes(bytes: List<u8>) -> Ed25519PublicKey? {
+        if bytes.len() != 32 or not unsafe { cx_ed25519_check(bytes.as_ptr()) } {
+            return none
+        }
+        return some(Ed25519PublicKey { encoded: bytes.copy() })
+    }
+
+    /// The key's 32 bytes, as `public_bytes_raw()` gives them.
+    pub fn bytes(self) -> List<u8> {
+        return self.encoded.copy()
+    }
+
+    /// Whether `signature` is the key's signature of `message`, as `cryptography`'s `verify`
+    /// decides it, where that raises `InvalidSignature` for no: 64 bytes, its R a point in its one
+    /// encoding and its S below the group's order, with [S]B - [k]A giving R.
+    pub fn verify(self, message: List<u8>, signature: List<u8>) -> bool {
+        if signature.len() != 64 {
+            return false
+        }
+        return unsafe { cx_ed25519_verify(self.encoded.as_ptr(), message.as_ptr(), message.len(), signature.as_ptr()) }
     }
 }
 
