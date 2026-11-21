@@ -42,6 +42,13 @@ typedef struct {
 #define CX_SPIN_PAUSE() ((void)0)
 #endif
 
+/* iOS, on an iPhone or the simulator (CLX-408), which is Apple's, so __APPLE__ too, but whose SDK
+ * leaves out what an app in its sandbox can't use, such as starting programs. clang names the
+ * oldest iOS a build is for, which no other target has. */
+#if defined(__APPLE__) && defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)
+#define CX_IOS 1
+#endif
+
 /* The runtime's functions (D123). In a program each is a function. In a library, built with
  * `calx build --lib`, each is a pointer to the program's own, filled in when the program opens
  * the library, so the two share one allocator, one output and one way to panic. The compiler

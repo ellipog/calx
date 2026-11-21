@@ -17,6 +17,7 @@ calx build --release --cpu x86-64-v2 hello.calx   # for a processor without AVX2
 calx build --lib plugin.calx   # build a library, which a program opens while it runs
 calx build --staticlib core.calx  # build a static library, which a C, C++, Rust or Swift program links
 calx build --staticlib --target aarch64-ios core.calx  # the same for an iPhone, from a Mac
+calx build --xcframework core.calx  # for an iPhone and the simulator, in an XCFramework Xcode links
 calx test tool.calx           # run its @test functions, each in a process of its own
 calx eval "1 << 20"           # run code given on the command line, and print its value
 calx fmt                       # format the .calx files here, in Calx's one format
@@ -45,6 +46,7 @@ Before it checks a program, each command runs the [attributes](attributes.md) th
 | `-o PATH` | Where `build` writes the executable, or `emit-c` the C: a file for one module, a folder for several. Folders on the way are made if they aren't there. `build` defaults to the file's name in the current folder |
 | `--lib` | Build or check a [library](libraries.md): a `.dll` or `.so` with the functions marked `@export`, which a program opens while it runs. `calx run` doesn't take it |
 | `--staticlib` | Build or check a [static library](embedding.md): a `.lib` on Windows or a `.a` elsewhere, with the runtime and the functions marked `@export_c`, which a program in another language links, and a C header for them beside it. Only `build`, `check` and `emit-c` take it |
+| `--xcframework` | Build a static library for an iPhone and one for the iOS simulator, and put them in an [XCFramework](embedding.md#ios-and-swift) with the header and a module map, for an Xcode project or a Swift package to link. It takes a Mac with Xcode, and `build` and `check` take it |
 | `--timings` | Print how long the front end, the C emitter, clang and the linker took, or that nothing had changed, so none of them ran ([fast builds](#fast-builds)) |
 | `--verbose` | Print the clang and linker commands |
 | `--no-line` | Leave `#line` directives out of the C |
@@ -333,7 +335,7 @@ calx build --staticlib --target aarch64-ios-sim core.calx  # for the iOS simulat
 
 Every calx builds for the machine it runs on, and a Mac builds for iOS too, an iPhone or the simulator, with the SDKs Xcode installs, which `xcrun` finds. A build for any other system needs that system's C library and SDK, which nothing gives calx yet, so it's an error that says where to build instead: build for Linux on Arm64 on an Arm64 Linux machine, for one. A name that isn't a target is an error too.
 
-What's built for another system runs there, so with another target `run`, `test` and `eval` are errors, and `build`, `check` and `emit-c` work. iOS lets an app open no library it didn't come with, so `--lib` is an error for it, and an app links Calx as a [static library](embedding.md). A build for iOS runs on iOS 18 and later, which runs on the iPhone XS and XR and every iPhone since. The target is part of every key in the [object cache](#fast-builds), with the SDK's path for iOS, so builds for two targets, or against two Xcodes, never share a compiled file, and `--verbose` shows the `--target` and `-isysroot` clang gets.
+What's built for another system runs there, so with another target `run`, `test` and `eval` are errors, and `build`, `check` and `emit-c` work. iOS lets an app open no library it didn't come with, so `--lib` is an error for it, and an app links Calx as a [static library](embedding.md#ios-and-swift), which `--xcframework` builds for both. A build for iOS runs on iOS 18 and later, which runs on the iPhone XS and XR and every iPhone since, and the runtime there leaves out what iOS doesn't let an app do, such as starting programs. The target is part of every key in the [object cache](#fast-builds), with the SDK's path for iOS, so builds for two targets, or against two Xcodes, never share a compiled file, and `--verbose` shows the `--target` and `-isysroot` clang gets.
 
 ## Fast builds
 
@@ -417,7 +419,7 @@ calx doctor
 Everything works.
 ```
 
-The target is the system and processor it builds programs for, which is the one it runs on, and the processor a release build counts on: x86-64-v3, with AVX2, on x86; the M1's, which every Apple Silicon Mac has, on macOS; and ARMv8.2 on Arm Linux and Windows. With `CALX_CPU` set, it says that level, and fails if it isn't one the target has. It finds clang as a build does: `CALX_CC`, then the toolchain the installation carries, then `PATH`, and says if the toolchain the release builds with isn't the one installed, which `calx update --toolchain` mends. The real test is building a program, in debug and release, which is what everything else is for. When that fails, it shows what clang said and names what's missing: on Windows, mingw-w64's headers and libraries beside the toolchain's clang, or with another clang, the C runtime and SDK from Visual Studio's Build Tools; on Linux, the C library's headers. It exits with 1 if something needs fixing, and 0 if not. A failed build points at it too.
+The target is the system and processor it builds programs for, which is the one it runs on, and the processor a release build counts on: x86-64-v3, with AVX2, on x86; the M1's, which every Apple Silicon Mac has, on macOS; and ARMv8.2 on Arm Linux and Windows. With `CALX_CPU` set, it says that level, and fails if it isn't one the target has. On a Mac with Xcode, it says it builds for iOS too, and names the SDKs; without Xcode it says nothing of iOS, since nothing's wrong. It finds clang as a build does: `CALX_CC`, then the toolchain the installation carries, then `PATH`, and says if the toolchain the release builds with isn't the one installed, which `calx update --toolchain` mends. The real test is building a program, in debug and release, which is what everything else is for. When that fails, it shows what clang said and names what's missing: on Windows, mingw-w64's headers and libraries beside the toolchain's clang, or with another clang, the C runtime and SDK from Visual Studio's Build Tools; on Linux, the C library's headers. It exits with 1 if something needs fixing, and 0 if not. A failed build points at it too.
 
 ## Updating
 

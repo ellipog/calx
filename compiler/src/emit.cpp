@@ -7658,7 +7658,7 @@ std::string c_header(const Program& program, const Names& names, const std::stri
         " *\n"
         " * Link it on Windows with Visual Studio's linker, as Rust's MSVC target does, and the DLL C\n"
         " * runtime (/MD); it names the system libraries it needs itself. On Linux, add -lm -lpthread -ldl;\n"
-        " * on macOS, nothing more. */\n"
+        " * on macOS and iOS, nothing more. */\n"
         "#ifndef " + guard + "\n#define " + guard + "\n\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdint.h>\n\n"
         "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n"
         "/* Starts the library's runtime. Calling it again while it runs does nothing. */\n"

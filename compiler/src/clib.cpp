@@ -1,6 +1,7 @@
 // Static libraries for hosts that aren't Calx (CLX-334): putting a build's objects in a `.lib` or
-// a `.a`, with whichever archiver the system has.
+// a `.a`, with whichever archiver the system has, and in an XCFramework for iOS (CLX-408).
 
+#include <cctype>
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -125,4 +126,83 @@ bool archive_objects(const Toolchain& tc, const std::vector<std::string>& object
     return true;
 }
 
+
+bool make_xcframework(const Toolchain& tc, const std::string& device, const std::string& simulator, const std::string& header,
+                      const std::string& stem, const std::string& out, bool verbose) {
+    std::error_code ec;
+    fs::path target = fs::absolute(out, ec);
+    // What's at `out` is replaced only if it's an XCFramework, as one made before is.
+    if (fs::exists(target, ec) && !(fs::is_directory(target, ec) && fs::is_regular_file(target / "Info.plist", ec) &&
+                                    target.extension() == ".xcframework")) {
+        std::fprintf(stderr, "calx: %s is there, and isn't an XCFramework to replace; give -o a name that ends in .xcframework\n",
+                     out.c_str());
+        return false;
+    }
+    // Swift imports the module by this name, so it's the stem as an identifier.
+    std::string module;
+    for (char c : stem) module += std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
+    if (module.empty() || std::isdigit(static_cast<unsigned char>(module[0]))) module = "_" + module;
+    std::string stamp = unique_stamp();
+    fs::path work = fs::path(tc.cache) / "xcframework" / stamp;
+    fs::path headers = work / "Headers";
+    fs::create_directories(headers / stem, ec);
+    fs::create_directories(work / "ios", ec);
+    fs::create_directories(work / "ios-simulator", ec);
+    std::string lib = "lib" + stem + ".a";
+    std::string map = "module " + module + " {\n    header \"" + stem + ".h\"\n    export *\n}\n";
+    bool staged = !ec && write_file_atomic((headers / stem / (stem + ".h")).string(), header) &&
+                  write_file_atomic((headers / stem / "module.modulemap").string(), map);
+    if (staged) fs::copy_file(device, work / "ios" / lib, fs::copy_options::overwrite_existing, ec);
+    if (staged && !ec) fs::copy_file(simulator, work / "ios-simulator" / lib, fs::copy_options::overwrite_existing, ec);
+    if (!staged || ec) {
+        std::fprintf(stderr, "calx: can't write the XCFramework's files in %s\n", work.string().c_str());
+        fs::remove_all(work, ec);
+        return false;
+    }
+    // Made beside where it goes, so it's renamed into place, never copied across volumes.
+    fs::path made = target.parent_path() / (target.filename().string() + "." + stamp + ".tmp.xcframework");
+    std::vector<std::string> cmd = {"/usr/bin/xcrun",
+                                    "xcodebuild",
+                                    "-create-xcframework",
+                                    "-library",
+                                    (work / "ios" / lib).string(),
+                                    "-headers",
+                                    headers.string(),
+                                    "-library",
+                                    (work / "ios-simulator" / lib).string(),
+                                    "-headers",
+                                    headers.string(),
+                                    "-output",
+                                    made.string()};
+    if (verbose) {
+        for (const std::string& a : cmd) std::fprintf(stderr, "%s ", a.c_str());
+        std::fputc('\n', stderr);
+    }
+    std::string log = (work / "xcodebuild.log").string();
+    int status = run_to_file(cmd, log);
+    std::string said;
+    read_file(log, said);
+    fs::remove_all(work, ec);
+    if (status != 0) {
+        std::fprintf(stderr, "%s", said.c_str());
+        std::fprintf(stderr, "calx: xcodebuild couldn't make the XCFramework (status %d); it comes with Xcode\n", status);
+        fs::remove_all(made, ec);
+        return false;
+    }
+    if (verbose) std::fprintf(stderr, "%s", said.c_str());
+    // The one there before goes aside, the new one takes its place, and then the old one goes.
+    fs::path old = target.parent_path() / (target.filename().string() + "." + stamp + ".old.xcframework");
+    bool had = fs::exists(target, ec);
+    if (had) fs::rename(target, old, ec);
+    if (!ec) fs::rename(made, target, ec);
+    if (ec) {
+        std::error_code back;
+        if (had && !fs::exists(target, back)) fs::rename(old, target, back);
+        std::fprintf(stderr, "calx: can't put the XCFramework at %s: %s\n", out.c_str(), ec.message().c_str());
+        fs::remove_all(made, ec);
+        return false;
+    }
+    if (had) fs::remove_all(old, ec);
+    return true;
+}
 }  // namespace calx

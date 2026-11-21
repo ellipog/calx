@@ -140,6 +140,7 @@ The library holds the runtime's code, not the system's, so the host links the sy
 | Windows | Nothing more: the library names the system libraries it needs, such as `ws2_32.lib`, for the linker. It's built for the MSVC ABI with the DLL C runtime, `/MD`, which is what Rust's `x86_64-pc-windows-msvc` and Visual Studio's defaults use |
 | Linux | `-lm -lpthread -ldl` |
 | macOS | Nothing more |
+| iOS | Nothing more: build it as an [XCFramework](#ios-and-swift) for Xcode |
 
 ### C and C++
 
@@ -215,9 +216,56 @@ fn main() {
 
 Without Cargo, `rustc main.rs -L native=out -l static=core` links it. The `ctx` pointer is how a callback reaches the host's state, such as an `Arc` given with `Arc::into_raw`, and Rust decides whether that state may be used on the library's threads, as it would for a C library's.
 
+### iOS and Swift
+
+On a Mac with Xcode, `--target aarch64-ios` builds the library for an iPhone and `--target aarch64-ios-sim` for the simulator ([targets](command.md#targets)). `--xcframework` builds both and puts them in an XCFramework, which an Xcode project links as one library, whichever it builds for (CLX-408):
+
+```sh
+calx build --xcframework core.calx                           # core.xcframework
+calx build --xcframework --release core.calx -o ios/Core.xcframework
+calx build --staticlib --target aarch64-ios core.calx        # libcore.a and core.h, for an iPhone alone
+```
+
+The XCFramework has a folder for each, `ios-arm64` and `ios-arm64-simulator`, with the library and the header. Beside the header is a module map, so Swift imports the library as a module named for it, `import Core` for `Core.xcframework`. Both are in a folder named for the library, under `Headers`, so two XCFrameworks in one app don't put a `module.modulemap` in the same place. It's made with `xcodebuild -create-xcframework`, and replaces the XCFramework at `-o` if there is one; anything else there is an error. `--xcframework` is for `build` and `check`, takes no `--target`, and takes `--release` and `--cpu` as `--staticlib` does.
+
+In Xcode, add it under the target's Frameworks, Libraries, and Embedded Content, as Do Not Embed, since it's a static library, or name it in a Swift package as `.binaryTarget(name: "Core", path: "Core.xcframework")`. The app links nothing more. Swift passes a closure that captures nothing as the callback, and reaches its own state through the context pointer:
+
+```swift
+import Core
+import Foundation
+
+final class Events {
+    func handle(_ text: String) { print(text) }
+}
+
+calx_init()
+let events = Events()
+let ctx = Unmanaged.passRetained(events).toOpaque().assumingMemoryBound(to: UInt8.self)
+let config = Array(#"{"name": "loom"}"#.utf8)
+let core = core_start(config, config.count, { ctx, text, len in
+    let events = Unmanaged<Events>.fromOpaque(UnsafeRawPointer(ctx!)).takeUnretainedValue()
+    events.handle(String(decoding: UnsafeBufferPointer(start: text, count: len), as: UTF8.self))
+}, ctx)
+core_stop(core)
+Unmanaged<Events>.fromOpaque(UnsafeRawPointer(ctx)).release()
+_ = calx_shutdown()
+```
+
+The callback comes on the library's threads, so an app hands each event to its main actor, with `Task { @MainActor in ... }` or `DispatchQueue.main.async`, before it touches the screen.
+
+What's different on iOS:
+
+- A build runs on iOS 18 and later, on the iPhone XS and XR and every iPhone since. A release build counts on the A12's processor, and one for the simulator on the M1's.
+- An app runs alone in its sandbox, which lets it start no other program, so [std.process](../std/process.md#ios) fails with `Unsupported` there, and on the simulator too, so what works on one works on the other.
+- [std.keyring](../std/keyring.md) keeps its secrets in the app's own Keychain, which needs the application identifier every app Xcode builds is given.
+- std.net's event loop is a kqueue, as on macOS. std.http's requests use libcurl, which iOS hasn't, so they fail there until it uses URLSession instead, which is CLX-410.
+- The runtime calls none of Apple's private functions, which the App Store turns an app away for: its threads wait with `os_sync_wait_on_address`.
+
+`calx build --target aarch64-ios-sim` builds a program too, which `xcrun simctl spawn booted ./program` runs on a simulator that's started, for trying code there without an app. A program for an iPhone needs an app around it, and its signing, to run, so for an iPhone a static library is what's built.
+
 ## How it's built
 
-- The library is built from the same C as a program, with the runtime's parts the code uses, and archived with `llvm-lib` on Windows, `libtool` on macOS, and `llvm-ar` or `ar` on Linux. `--verbose` prints the commands.
+- The library is built from the same C as a program, with the runtime's parts the code uses, and archived with `llvm-lib` on Windows, `libtool` on macOS and for iOS, and `llvm-ar` or `ar` on Linux. An XCFramework is two such libraries, built one after the other from the same C. `--verbose` prints the commands.
 - A release build isn't built with link-time optimization, since the host's linker, not clang's, links it. On Linux and macOS the code is position-independent, as a Rust or Swift host's executables are.
 - Each `@export_c` function is a small C function of the name it's exported as, which checks that the runtime has started and calls the Calx function. Every other name in the library starts with `cx_` or `calx_`, so it doesn't meet the host's.
 - `--cdylib`, a shared library with the same C, isn't built yet.

@@ -38,7 +38,14 @@
 #include <sys/mman.h>
 #include <termios.h>
 #include <unistd.h>
-#if defined(__APPLE__)
+#if defined(CX_IOS)
+#include <mach/mach.h>
+#include <os/os_sync_wait_on_address.h>
+#include <sys/sysctl.h>
+/* On iOS, the public wait and wake on an address, from iOS 17.4, which the oldest iOS a build is
+ * for has: __ulock_wait is private, and an app that calls a private function is turned away from
+ * the App Store (CLX-408). */
+#elif defined(__APPLE__)
 #include <mach/mach.h>
 #include <sys/sysctl.h>
 /* The wait and wake on an address that libc++'s atomic waits and Rust's std use, which every
@@ -641,11 +648,13 @@ cx_usize cx_arg_count(void) { return arg_count; }
 const cx_u8* cx_arg(cx_usize i) { return args[i].ptr; }
 cx_usize cx_arg_len(cx_usize i) { return args[i].len; }
 
-/* Declared by std/env.calx: the system the program was built for, 1 for Windows, 2 for Linux and
-   3 for macOS, and its processor, 1 for x86-64 and 2 for Arm64 (D612). */
+/* Declared by std/env.calx: the system the program was built for, 1 for Windows, 2 for Linux, 3
+   for macOS and 4 for iOS (CLX-408), and its processor, 1 for x86-64 and 2 for Arm64 (D612). */
 cx_u32 cx_env_os(void) {
 #if defined(_WIN32)
     return 1;
+#elif defined(CX_IOS)
+    return 4;
 #elif defined(__APPLE__)
     return 3;
 #else
@@ -663,15 +672,21 @@ cx_u32 cx_env_arch(void) {
 #if defined(__aarch64__) || defined(_M_ARM64)
 /* What the system says the processor has, in calx_rt.h's CX_ARM_ bits: on Linux the auxiliary
  * vector's HWCAP bits, on Windows IsProcessorFeaturePresent, whose crypto flag is AES, PMULL,
- * SHA-1 and SHA-256 together, and on macOS everything, as every Apple Silicon processor has it
- * all, from the M1 on. 0 is not asked yet; the answer has bit 31 set so it never is 0. */
+ * SHA-1 and SHA-256 together, on macOS everything, as every Apple Silicon processor has it all,
+ * from the M1 on, and on iOS all but SHA-512, which came with the A13, so sysctl is asked for it
+ * (CLX-408). 0 is not asked yet; the answer has bit 31 set so it never is 0. */
 static cx_u32 arm_features;
 
 cx_u32 cx_arm_features(void) {
     cx_u32 f = __atomic_load_n(&arm_features, __ATOMIC_RELAXED);
     if (f) return f & ~0x80000000u;
     f = 0x80000000u;
-#if defined(__APPLE__)
+#if defined(CX_IOS)
+    f |= CX_ARM_CRC32 | CX_ARM_AES | CX_ARM_SHA2;
+    int sha512 = 0;
+    size_t size = sizeof sha512;
+    if (sysctlbyname("hw.optional.armv8_2_sha512", &sha512, &size, NULL, 0) == 0 && sha512) f |= CX_ARM_SHA512;
+#elif defined(__APPLE__)
     f |= CX_ARM_CRC32 | CX_ARM_AES | CX_ARM_SHA2 | CX_ARM_SHA512;
 #elif defined(_WIN32)
     if (IsProcessorFeaturePresent(31)) f |= CX_ARM_CRC32; /* PF_ARM_V8_CRC32_INSTRUCTIONS_AVAILABLE */
@@ -2865,6 +2880,10 @@ static int par_cheap(cx_u64 cost) {
 static void par_sleep(cx_u32* word, cx_u32 seen) { WaitOnAddress(word, &seen, sizeof seen, INFINITE); }
 static void par_wake(cx_u32* word) { WakeByAddressAll(word); }
 static void par_yield(void) { SwitchToThread(); }
+#elif defined(CX_IOS)
+static void par_sleep(cx_u32* word, cx_u32 seen) { os_sync_wait_on_address(word, seen, sizeof seen, OS_SYNC_WAIT_ON_ADDRESS_NONE); }
+static void par_wake(cx_u32* word) { os_sync_wake_by_address_all(word, sizeof *word, OS_SYNC_WAKE_BY_ADDRESS_NONE); }
+static void par_yield(void) { sched_yield(); }
 #elif defined(__APPLE__)
 static void par_sleep(cx_u32* word, cx_u32 seen) { __ulock_wait(CX_UL_COMPARE_AND_WAIT, word, seen, 0); }
 static void par_wake(cx_u32* word) { __ulock_wake(CX_UL_COMPARE_AND_WAIT | CX_ULF_WAKE_ALL, word, 0); }

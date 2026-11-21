@@ -107,6 +107,7 @@ const std::vector<HelpGroup>& help_groups() {
           {"--target", "TARGET", "the system to build for, such as `aarch64-ios` from a Mac; the default is this one"},
           {"--lib", "", "build a library, which a program opens while it runs"},
           {"--staticlib", "", "build a static library and its C header, for a C, C++ or Rust program to link"},
+          {"--xcframework", "", "build a static library for an iPhone and the simulator, in an XCFramework Xcode links"},
           {"-o", "PATH", "where build and emit-c write"},
           {"--timings", "", "print how long each step took"},
           {"--verbose", "", "print the clang commands"},
@@ -197,6 +198,9 @@ int usage(bool asked = false) {
         "            the system to build for: this one, or from a Mac aarch64-ios and aarch64-ios-sim\n"
         "  --lib       build a library, which a program opens while it runs\n"
         "  --staticlib build a static library, and its C header, for a C, C++ or Rust program to link\n"
+        "  --xcframework\n"
+        "            build a static library for an iPhone and the iOS simulator, in an XCFramework\n"
+        "            with its header, for an Xcode project to link (on a Mac with Xcode)\n"
         "  -o PATH     where build and emit-c write\n"
         "  --timings   print how long each step took\n"
         "  --verbose   print the clang commands\n"
@@ -216,8 +220,10 @@ struct Options {
     std::string cpu;    // `--cpu`: the processor level a release build counts on, or "" (CLX-381)
     bool cpu_given = false;
     Target target = kHost;  // `--target`: what to build for, the host unless it names another (CLX-409)
+    bool target_given = false;
     bool library = false;
     bool staticlib = false;  // `--staticlib`, for a host that isn't Calx (CLX-334)
+    bool xcframework = false;  // `--xcframework`: a static library for iOS, both kinds, for Xcode (CLX-408)
     bool timings = false;
     bool verbose = false;
     bool line_directives = true;
@@ -262,6 +268,7 @@ int target_option(int argc, char** argv, int& i, Options& opt) {
         std::fprintf(stderr, "calx: %s\n", why.c_str());
         return 2;
     }
+    opt.target_given = true;
     return 1;
 }
 
@@ -932,6 +939,9 @@ int main(int argc, char** argv) {
             opt.mode = BuildMode::release;
         } else if (a == "--lib") {
             opt.library = true;
+        } else if (a == "--xcframework") {
+            opt.xcframework = true;
+            opt.staticlib = true;
         } else if (a == "--staticlib") {
             opt.staticlib = true;
         } else if (a == "--timings") {
@@ -975,7 +985,8 @@ int main(int argc, char** argv) {
         opt.cpu = v ? v : "";
     }
     std::string march;
-    if (!opt.cpu.empty()) {
+    // An XCFramework checks it for each of its targets as it builds for them.
+    if (!opt.cpu.empty() && !opt.xcframework) {
         std::string why;
         march = cpu_flag(opt.target, opt.cpu, why);
         if (march.empty()) {
@@ -1011,13 +1022,26 @@ int main(int argc, char** argv) {
                              "`--staticlib` and link it into the app\n");
         return 2;
     }
+    // An XCFramework holds a static library for each kind of iOS, built here in turn, so it names
+    // its own targets, and takes Xcode, so a Mac (CLX-408).
+    if (opt.xcframework) {
+        const char* why = opt.command != "build" && opt.command != "check" ? "is built with `calx build --xcframework`"
+                          : opt.target_given                               ? "is for an iPhone and the simulator both, so it takes no --target"
+                          : kHost.os != Os::macos                         ? "is made with Xcode, so it's built on a Mac"
+                                                                          : nullptr;
+        if (why) {
+            std::fprintf(stderr, "calx: an XCFramework %s\n", why);
+            return 2;
+        }
+    }
 
     auto t0 = std::chrono::steady_clock::now();
     // CLX-242: a build whose record finds every file it read as it was goes straight to the
     // program it made, which is still in the cache, without reading or checking anything.
     std::int64_t started = stamp_now();
     std::string record;
-    if ((opt.command == "run" || opt.command == "build" || opt.command == "test") && !opt.stdin_text && !opt.json) {
+    if ((opt.command == "run" || opt.command == "build" || opt.command == "test") && !opt.stdin_text && !opt.json &&
+        !opt.xcframework) {
         record = record_for(opt);
         BuildRecord found;
         if (!record.empty() && load_record(record, found)) {
@@ -1183,6 +1207,45 @@ int main(int argc, char** argv) {
         made.tests = tests;
     } else {
         record.clear();
+    }
+    // CLX-408: an XCFramework is a static library for an iPhone and one for the simulator, each
+    // built as `--target` would build it, from the same C, put together with the header.
+    if (opt.xcframework) {
+        const Target kinds[2] = {{Os::ios, Arch::aarch64, false}, {Os::ios, Arch::aarch64, true}};
+        std::string built[2];
+        bool reused = true;
+        for (int i = 0; i < 2; i++) {
+            std::string why, level = opt.cpu.empty() ? "" : cpu_flag(kinds[i], opt.cpu, why);
+            if (!why.empty()) {
+                building.reset();
+                std::fprintf(stderr, "calx: %s%s\n", why.c_str(), opt.cpu_given ? "" : " (from CALX_CPU)");
+                return 2;
+            }
+            Toolchain t;
+            t.target = kinds[i];
+            if (!find_toolchain(t, error)) {
+                building.reset();
+                std::fprintf(stderr, "calx: %s\n", error.c_str());
+                return 1;
+            }
+            BuildResult r = build_program(t, c_sources, opt.mode, BuildKind::staticlib, opt.verbose, level);
+            if (!r.ok) return 1;
+            built[i] = r.exe;
+            reused = reused && r.reused;
+        }
+        std::string out = opt.output.empty() ? std::filesystem::path(opt.input).stem().string() + ".xcframework" : opt.output;
+        term::step("Making the XCFramework");
+        bool made = make_xcframework(tc, built[0], built[1], header, staticlib_stem(opt), out, opt.verbose);
+        building.reset();
+        if (!made) return 1;
+        const term::Caps& c = term::err();
+        if (c.color) {
+            std::string what = std::string(opt.mode == BuildMode::release ? "release" : "debug") +
+                               " static libraries for aarch64-ios and aarch64-ios-sim, with " + staticlib_stem(opt) + ".h";
+            std::fprintf(stderr, "%s Built %s  %s\n", term::tick(c).c_str(), term::accent(c, out).c_str(),
+                         term::dim(c, what + " \xC2\xB7 " + (reused ? "unchanged, " : "in ") + term::duration(ms(t0) / 1000.0)).c_str());
+        }
+        return 0;
     }
     // The checked program isn't needed past here, and is left for the system to free as the
     // process ends: freeing its many small pieces one at a time took a cached build of a program

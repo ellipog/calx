@@ -342,6 +342,7 @@ Built:
 - `extern "C" fn(...) -> T`, the type of a C function's address, which Calx calls, passes to C, and makes from an address C gave with `p.to_fn<F>()` ([C function values](reference/unsafe.md#c-function-values), CLX-333).
 - `@export_c("name")` exports a Calx function with the C ABI, for C code to call, on any thread, the runtime's or not; one called before the runtime starts is refused ([calling Calx from C](reference/unsafe.md#calling-calx-from-c), CLX-333). A Calx plugin doesn't need it: [`@export`](reference/libraries.md) exports a function with Calx's own ABI, whose type the host checks when it finds it (D123). `Box.into_ptr` and `to_box` give C a Calx value to hold, and `unsafe impl Send` vouches for a struct's pointers going to another thread.
 - `calx build --staticlib`: a `.lib` or `.a` with the runtime and the `@export_c` functions, a C header for them, and `calx_init` and `calx_shutdown`, which a C, C++, Rust or Swift program links ([static libraries](reference/embedding.md), CLX-334).
+- `calx build --xcframework`: such a library for an iPhone and for the iOS simulator, in an XCFramework with a module map, which an Xcode project or a Swift package links, built on a Mac with Xcode ([iOS and Swift](reference/embedding.md#ios-and-swift), CLX-408).
 
 Still to build:
 

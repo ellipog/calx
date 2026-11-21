@@ -349,6 +349,15 @@ int run_doctor() {
             warn("no dsymutil: stack traces won't name lines", "dsymutil", "not found: stack traces won't name lines");
             fix("dsymutil comes with LLVM and with Apple's Command Line Tools: `xcode-select --install`.");
         }
+        // Xcode's iOS SDKs, for `--target aarch64-ios` and `aarch64-ios-sim` (CLX-408). Without
+        // Xcode nothing's wrong, so nothing's said: a build for iOS says where they come from.
+        std::string ios_error;
+        std::string iphone = have_clang ? find_ios_sdk(false, ios_error) : "", simulator = have_clang ? find_ios_sdk(true, ios_error) : "";
+        if (!iphone.empty() && !simulator.empty()) {
+            ok("builds for iOS too, aarch64-ios and aarch64-ios-sim, with Xcode's SDKs at " + iphone + " and " + simulator, "iOS",
+               "aarch64-ios and aarch64-ios-sim" + term::dim(c, "  " + fs::path(iphone).filename().string() + ", " +
+                                                                 fs::path(simulator).filename().string()));
+        }
 #endif
     }
 
