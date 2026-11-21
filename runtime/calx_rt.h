@@ -970,6 +970,22 @@ CX_FN(void, cx_ed25519_sign, (const cx_u8* seed, const cx_u8* pub, const cx_u8* 
 CX_FN(cx_bool, cx_ed25519_check, (const cx_u8* pub));
 CX_FN(cx_bool, cx_ed25519_verify, (const cx_u8* pub, const cx_u8* msg, cx_usize len, const cx_u8* sig));
 
+/* Authenticated encryption, in calx_aead.c (CLX-397). ChaCha20-Poly1305 takes a 32-byte key and a
+ * 12-byte nonce, or a 24-byte one for XChaCha20-Poly1305. AES-GCM's context, CX_GCM_CTX bytes with
+ * no alignment needed, is made from a key of 16, 24 or 32 bytes, and takes an IV of any length.
+ * Sealing writes `n` bytes of ciphertext then the 16-byte tag. Opening takes the ciphertext and
+ * tag, `n` bytes, and writes `n - 16` bytes of plaintext only if the tag matches. */
+#define CX_GCM_CTX 400
+CX_FN(void, cx_aead_chacha_seal, (const cx_u8* key, const cx_u8* nonce, cx_usize nonce_len, const cx_u8* pt, cx_usize n,
+                                  const cx_u8* aad, cx_usize alen, cx_u8* out));
+CX_FN(cx_bool, cx_aead_chacha_open, (const cx_u8* key, const cx_u8* nonce, cx_usize nonce_len, const cx_u8* sealed, cx_usize n,
+                                     const cx_u8* aad, cx_usize alen, cx_u8* out));
+CX_FN(void, cx_gcm_start, (cx_u8* ctx, const cx_u8* key, cx_usize len));
+CX_FN(void, cx_gcm_seal, (const cx_u8* ctx, const cx_u8* iv, cx_usize ivlen, const cx_u8* pt, cx_usize n, const cx_u8* aad,
+                          cx_usize alen, cx_u8* out));
+CX_FN(cx_bool, cx_gcm_open, (const cx_u8* ctx, const cx_u8* iv, cx_usize ivlen, const cx_u8* sealed, cx_usize n,
+                             const cx_u8* aad, cx_usize alen, cx_u8* out));
+
 /* Random bytes from the system, AES-128-CFB8 and RSA, in calx_crypto.c (D118). The contexts are
  * CX_CFB8_CTX, CX_RSA_CTX and CX_RSA_PUBLIC_CTX bytes, with no alignment needed. */
 #define CX_CFB8_CTX 208

@@ -1,6 +1,6 @@
 ---
 title: std.crypto
-description: Random bytes from the system, AES-128 in CFB8 mode, RSA with PKCS#1 v1.5 padding and signatures - what Minecraft's online-mode login and signed chat use - and argon2id password hashing in PHC strings and Ed25519 signatures, as Python's argon2-cffi and cryptography give them.
+description: Random bytes from the system, AES-128 in CFB8 mode, RSA with PKCS#1 v1.5 padding and signatures - what Minecraft's online-mode login and signed chat use - and argon2id password hashing in PHC strings, Ed25519 signatures, and authenticated encryption with ChaCha20-Poly1305, XChaCha20-Poly1305 and AES-GCM, as Python's argon2-cffi and cryptography give them.
 ---
 
 # `std.crypto`
@@ -15,7 +15,7 @@ Each gives what Java's `Cipher`, `KeyPairGenerator` and `SecureRandom` give for 
 
 Signed chat uses RSA signatures. Mojang's key signs each player's key, and the player's key signs each of their messages. The server checks both as Java's `Signature` checks `SHA1withRSA` and `SHA256withRSA`.
 
-For everything else there are [passwords](#passwords), hashed with argon2id into the PHC strings Python's argon2-cffi writes, and [Ed25519](#ed25519) signatures, which minisign and SSH keys are, as Python's `cryptography` makes and checks them.
+For everything else there are [passwords](#passwords), hashed with argon2id into the PHC strings Python's argon2-cffi writes, [Ed25519](#ed25519) signatures, which minisign and SSH keys are, as Python's `cryptography` makes and checks them, and [authenticated encryption](#authenticated-encryption), ChaCha20-Poly1305, XChaCha20-Poly1305 and AES-GCM, for keeping secrets that only a key opens and that can't be changed unnoticed, as `cryptography` seals them.
 
 ```calx
 import std.crypto.{Cfb8, RsaKey, random_bytes}
@@ -180,6 +180,68 @@ fn main() {
 - There's no X25519 key exchange yet.
 - The [tests](../../tests/std/ed25519.calx) hold RFC 8032's five Ed25519 vectors, each signed and verified, and not verified with a bit flipped in R or S or a byte added to the message, then keys that aren't points or aren't in their one encoding, and an S of L more than a good one.
 
+## Authenticated encryption
+
+Each of the three seals a message with a key and a nonce: the ciphertext, as long as the message, with a 16-byte tag after it. Opening it takes the same key and nonce, and gives the message back only if the tag matches, so a sealed value that someone changed, or moved, or made up, opens as `none` rather than as other bytes. Associated data, such as the id of the record a secret is stored in, isn't encrypted or put in the sealed bytes, but the tag covers it, so the secret opens only as that record's. They're RFC 8439's ChaCha20-Poly1305, its XChaCha20-Poly1305 variant from draft-irtf-cfrg-xchacha, and NIST's AES-GCM, and each seals the bytes Python's `cryptography` does, in `ChaCha20Poly1305` and `AESGCM`.
+
+```calx
+import std.crypto.{XChaCha20Poly1305, random_bytes}
+
+fn main() {
+    // The key is the program's own, kept in std.keyring, say, and never in the database.
+    let cipher = XChaCha20Poly1305.new(XChaCha20Poly1305.generate_key())
+
+    // An API token, sealed for the row that stores it, with a new random nonce kept beside it.
+    let nonce = random_bytes(24)
+    let sealed = cipher.encrypt(nonce, "sk-live-1234".to_bytes(), "mcp_servers/7".to_bytes())
+    println("{sealed.len()}")    // out: 28
+
+    let token = cipher.decrypt(nonce, sealed, "mcp_servers/7".to_bytes())!
+    println(String.from_utf8(token) ?? "bad")    // out: sk-live-1234
+
+    // Copied to another row, or with a byte changed, it doesn't open.
+    println("{cipher.decrypt(nonce, sealed, "mcp_servers/8".to_bytes()) == none}")    // out: true
+    var changed = sealed.copy()
+    changed[0] ^= 1
+    println("{cipher.decrypt(nonce, changed, "mcp_servers/7".to_bytes()) == none}")    // out: true
+}
+```
+
+```calx
+import std.bytes.{from_hex, hex}
+import std.crypto.{AesGcm, ChaCha20Poly1305}
+
+fn main() {
+    // RFC 8439's test of the AEAD, section 2.8.2: its key, nonce, associated data and tag.
+    let c = ChaCha20Poly1305.new(from_hex("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")!)
+    let message = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.".to_bytes()
+    let sealed = c.encrypt(from_hex("070000004041424344454647")!, message, from_hex("50515253c0c1c2c3c4c5c6c7")!)
+    println("{sealed.len()} {hex(sealed)[228..]}")    // out: 130 1ae10b594f09e26a7e902ecbd0600691
+
+    // The GCM spec's first test: nothing sealed under a zero key and nonce is just the tag.
+    let g = AesGcm.new([0; 16])
+    println(hex(g.encrypt([0; 12], [])))    // out: 58e2fccefa7e3061367f1d57a4e7455a
+}
+```
+
+| Item | Gives |
+| --- | --- |
+| `ChaCha20Poly1305.new(key: List<u8>) -> ChaCha20Poly1305` | The cipher with a 32-byte key, as `ChaCha20Poly1305(key)`. Panics for another length |
+| `ChaCha20Poly1305.generate_key() -> List<u8>` | 32 bytes from the system's random source, as `ChaCha20Poly1305.generate_key()` |
+| `c.encrypt(nonce: List<u8>, plaintext: List<u8>, aad: List<u8> = []) -> List<u8>` | The plaintext encrypted, with the 16-byte tag of it and `aad` after it, as `encrypt(nonce, data, aad)`. Panics unless the nonce is 12 bytes, or if the plaintext is over 256 GiB less 64 bytes, as far as ChaCha20's block counter goes |
+| `c.decrypt(nonce: List<u8>, sealed: List<u8>, aad: List<u8> = []) -> List<u8>?` | The plaintext, or `none` if the tag doesn't match, where `cryptography` raises `InvalidTag`: a byte of `sealed`, the nonce or `aad` changed, the key is another, or `sealed` is under 16 bytes. `none` too for a nonce that isn't 12 bytes |
+| `XChaCha20Poly1305.new(key)`, `XChaCha20Poly1305.generate_key()`, `x.encrypt(nonce, plaintext, aad)`, `x.decrypt(nonce, sealed, aad)` | The same with a 24-byte nonce, as libsodium's `crypto_aead_xchacha20poly1305_ietf` |
+| `AesGcm.new(key: List<u8>) -> AesGcm` | The cipher with a key of 16, 24 or 32 bytes, AES-128, AES-192 or AES-256, as `AESGCM(key)`, its round keys and GHASH key worked out once. Panics for another length |
+| `AesGcm.generate_key(bits: u32 = 256) -> List<u8>` | A key of 128, 192 or 256 bits from the system's random source, as `AESGCM.generate_key(bit_length)`. Panics for another size |
+| `g.encrypt(nonce, plaintext, aad)`, `g.decrypt(nonce, sealed, aad)` | As ChaCha20-Poly1305's, with a nonce of 12 bytes, as NIST advises, or 8 to 128, as `cryptography` takes. The plaintext goes up to 64 GiB less 32 bytes |
+
+- A nonce must never seal two messages under one key. Two messages with the same one give away the xor of their plaintexts, and with AES-GCM what forges any message under the key too. A counter is safe, as TLS, WireGuard and Noise use, one for each direction of a connection. Random nonces are safe with XChaCha20-Poly1305, whose 24 bytes make a repeat as unlikely as guessing the key. With 12 bytes, NIST counts random ones safe for 2^32 messages a key.
+- Which to use: XChaCha20-Poly1305 for secrets kept at rest, each with a random nonce stored beside it. ChaCha20-Poly1305 or AES-GCM where a protocol names them: Noise's `ChaChaPoly` is `ChaCha20Poly1305`, and its nonce is 4 zero bytes then the 64-bit counter, little-endian. AES-GCM is the fastest with AES instructions, which nearly every desktop and server processor of the last decade has, and much slower without them, on a Raspberry Pi 4, say, where ChaCha20 is as fast as anywhere.
+- The nonce isn't in what's sealed, as it isn't in `cryptography`'s. Store or send it with the sealed bytes.
+- `decrypt` compares the tag in a time that doesn't depend on where it differs, and decrypts nothing until it matches. `none` says nothing about why.
+- The [tests](../../tests/std/aead.calx) hold RFC 8439's AEAD vectors (2.8.2 and A.5), draft-irtf-cfrg-xchacha-03's (A.3.1), the GCM spec's test cases 1 to 6 and 13 to 16 and 18, and three from NIST's CAVP files, one of them a forgery, each opened and not opened with any bit of it flipped, its nonce, key or associated data changed, or a byte cut off or added. Then what Python's `cryptography` 46 seals for messages of 0 to 70,000 bytes, at the edges of every block size the code works in.
+- Checked wider than the tests: all 4,500 of NIST's CAVP cases for GCM with 128-bit tags and IVs of 8 to 128 bytes, for each key size, sealed and opened, the 1,162 marked as forgeries among them refused, and 3,600 random messages, keys and nonces sealed by `cryptography` 46, 1,200 for each cipher. `cryptography` has no XChaCha20-Poly1305, so those were sealed by `cryptography`'s `ChaCha20Poly1305` under HChaCha20's key, worked out from its raw ChaCha20. Without the AES instructions, the code gave the same bytes as with them for 3,000 more random cases of every key size.
+
 ## Checked against Java
 
 - AES-CFB8: 300 random streams of up to 699 bytes, encrypted in random pieces, gave the same bytes as Java 25's `Cipher` gave for each whole stream, and decrypting them in other random pieces gave them back. The portable version gave the same as AES-NI on 2000 more.
@@ -238,5 +300,28 @@ On the same desktop, an i9-13900K, the best of several runs, against OpenSSL 3.5
 | An Ed25519 verify | 87 µs | 127 µs |
 
 OpenSSL's `kdf` command ran argon2's lanes one after another, as it had no thread pool to run them on. Working G out in vector registers, as the reference implementation's AVX2 code does, would make each lane faster still.
+
+The authenticated ciphers are [runtime/calx_aead.c](../../runtime/calx_aead.c), linked only into programs that call them, written from RFC 8439 (ChaCha20 and Poly1305), draft-irtf-cfrg-xchacha-03 (HChaCha20), FIPS 197 (AES) and NIST SP 800-38D (GCM).
+
+| Part | How |
+| --- | --- |
+| ChaCha20 | Four blocks at once in vectors of four 32-bit words, a word of every block in each, which clang makes SSE2 or NEON, then turned back into blocks in the registers and xored in 16 bytes at a time. With AVX2, eight blocks at once |
+| Poly1305 | Three limbs of 44, 44 and 42 bits, multiplied through 128-bit products, and the last subtraction of 2^130 - 5 kept or dropped by a mask |
+| AES | AES-NI, or Arm64's AES instructions, eight blocks at a time in CTR mode, so the AES unit's pipeline stays full. Without them, the S-box is each byte's inverse in GF(2^8), x^254, worked out on bit planes, the same bit of 64 bytes in each word, so no table is read at an address that depends on the key or the data |
+| GHASH | PCLMULQDQ, or Arm64's PMULL, eight blocks a step: their eight products with H^8 to H, worked out once for the key, added up and reduced once, as Intel's paper on GCM does it. Without them, 64-bit carry-less products from integer multiplies of every fourth bit, whose carries fall in the gaps between and are masked away, as BearSSL's `ghash_ctmul64` does |
+| Opening | The tag is worked out over the ciphertext and compared, every byte whatever the first that differs, before anything is decrypted |
+| Keys | Copied into the call and wiped from its stack before it returns, with what's worked out from them |
+
+On the same desktop, an i9-13900K, sealing and opening 16 KiB messages, the best of 7 rounds of 4,000, against OpenSSL 3.5's `speed -evp` in WSL:
+
+| | Calx, sealing | Calx, opening | OpenSSL 3.5 |
+| --- | --- | --- | --- |
+| ChaCha20-Poly1305 | 1.24 GB/s | 1.34 GB/s | 2.94 GB/s |
+| XChaCha20-Poly1305 | 1.42 GB/s | 1.39 GB/s | |
+| AES-256-GCM | 4.98 GB/s | 5.14 GB/s | 7.77 GB/s |
+| AES-128-GCM | 6.34 GB/s | 6.64 GB/s | 9.34 GB/s |
+| AES-256-GCM without AES-NI | 16 MB/s | | |
+
+A 64-byte message seals in 313 ns with ChaCha20-Poly1305 and 91 ns with AES-256-GCM. OpenSSL goes over the message once, encrypting and authenticating each part together, in assembly that works out Poly1305 four blocks at a time in AVX2 too; this goes over it twice, first one and then the other.
 
 `std.crypto` is written in Calx over those runtime calls: [std/crypto.calx](../../std/crypto.calx).

@@ -1809,6 +1809,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     if (parts_ok && calls({"cx_crypto_", "cx_cfb8_", "cx_rsa_"})) parts_ok = part("calx_crypto.c");
     if (parts_ok && calls({"cx_argon2_"})) parts_ok = part("calx_argon2.c");
     if (parts_ok && calls({"cx_ed25519_"})) parts_ok = part("calx_ed25519.c");
+    if (parts_ok && calls({"cx_aead_", "cx_gcm_"})) parts_ok = part("calx_aead.c");
     if (parts_ok && calls({"cx_zlib_", "cx_inflate", "cx_deflate"})) parts_ok = part("calx_zlib.c");
     if (parts_ok && calls({"cx_http_"})) parts_ok = part("calx_http.c");
     if (parts_ok && calls({"cx_keyring_"})) parts_ok = part("calx_keyring.c");

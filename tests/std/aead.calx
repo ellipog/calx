@@ -1,0 +1,212 @@
+// ChaCha20-Poly1305, XChaCha20-Poly1305 and AES-GCM (CLX-397): RFC 8439's AEAD vectors (2.8.2 and
+// A.5), draft-irtf-cfrg-xchacha-03's (A.3.1), test cases from the GCM spec McGrew and Viega gave
+// NIST, and cases from NIST's CAVP files, with a FAIL. Then what Python's cryptography 46 seals
+// for inputs made by a formula, at lengths either side of every 16, 64, 128, 256 and 512 bytes,
+// which the code takes at a time. Every seal opens, and not with a bit changed anywhere.
+// build/aead's wider check passed all 4500 of the CAVP cases with 128-bit tags and 8 to 128
+// bytes of IV, and 3600 random cases from cryptography.
+
+import std.bytes.{from_hex, hex}
+import std.crypto.{AesGcm, ChaCha20Poly1305, XChaCha20Poly1305}
+import std.hash.{sha256}
+
+fn unhex(text: String) -> List<u8> {
+    return from_hex(text) ?? panic("hex")
+}
+
+// n bytes of i * mul + add, as the Python program made them.
+fn seq(n: usize, mul: u32, add: u32) -> List<u8> {
+    var out: List<u8> = []
+    for i in 0..n {
+        out.push(u8.wrap(u32.wrap(i) * mul + add))
+    }
+    return out
+}
+
+// Which of the three to use: 0 ChaCha20-Poly1305, 1 XChaCha20-Poly1305, 2 AES-GCM.
+fn seal(kind: i32, key: List<u8>, nonce: List<u8>, plaintext: List<u8>, aad: List<u8>) -> List<u8> {
+    if kind == 0 {
+        return ChaCha20Poly1305.new(key).encrypt(nonce, plaintext, aad)
+    } else if kind == 1 {
+        return XChaCha20Poly1305.new(key).encrypt(nonce, plaintext, aad)
+    }
+    return AesGcm.new(key).encrypt(nonce, plaintext, aad)
+}
+
+fn open(kind: i32, key: List<u8>, nonce: List<u8>, sealed: List<u8>, aad: List<u8>) -> List<u8>? {
+    if kind == 0 {
+        return ChaCha20Poly1305.new(key).decrypt(nonce, sealed, aad)
+    } else if kind == 1 {
+        return XChaCha20Poly1305.new(key).decrypt(nonce, sealed, aad)
+    }
+    return AesGcm.new(key).decrypt(nonce, sealed, aad)
+}
+
+// Prints whether it seals to `want`, and `want` opens, and not with a bit of it, the nonce, the
+// associated data or the key changed, or with a byte cut off or added.
+fn check(kind: i32, key: String, nonce: String, plaintext: List<u8>, aad: String, want: String) {
+    let k = unhex(key)
+    let n = unhex(nonce)
+    let a = unhex(aad)
+    let sealed = unhex(want)
+    let right = hex(seal(kind, k, n, plaintext, a)) == want and open(kind, k, n, sealed, a) == some(plaintext.copy())
+    println("{right and refused(kind, k, n, sealed, a)}")
+}
+
+fn refused(kind: i32, k: List<u8>, n: List<u8>, sealed: List<u8>, a: List<u8>) -> bool {
+    var good = true
+    for i in 0..sealed.len() {
+        var bad = sealed.copy()
+        bad[i] ^= u8.wrap(1 << i32.wrap(i % 8))
+        good = good and open(kind, k, n, bad, a) == none
+    }
+    var nonce = n.copy()
+    nonce[0] ^= 0x80
+    var key = k.copy()
+    key[k.len() - 1] ^= 1
+    var aad = a.copy()
+    aad.push(0)
+    var longer = sealed.copy()
+    longer.push(0)
+    var shorter = sealed.copy()
+    shorter.truncate(sealed.len() - 1)
+    good = good and open(kind, k, nonce, sealed, a) == none and open(kind, key, n, sealed, a) == none and open(kind, k, n, sealed, aad) == none
+    good = good and open(kind, k, n, longer, a) == none and open(kind, k, n, shorter, a) == none
+    if a.len() > 0 {
+        good = good and open(kind, k, n, sealed, []) == none
+    }
+    return good
+}
+
+// The SHA-256 of what n bytes of the formula seal to, its first 8 bytes, against Python's.
+fn formula(n: usize, want: str) {
+    let pt = seq(n, 31, 11)
+    let aad = seq(n % 41, 17, 5)
+    let parts = want.split(" ")
+    let c = ChaCha20Poly1305.new(seq(32, 13, 1)).encrypt(seq(12, 29, 7), pt, aad)
+    let x = XChaCha20Poly1305.new(seq(32, 13, 1)).encrypt(seq(24, 29, 7), pt, aad)
+    let g = AesGcm.new(seq(32, 13, 3)).encrypt(seq(12, 29, 7), pt, aad)
+    let g128 = AesGcm.new(seq(16, 13, 3)).encrypt(seq(12, 29, 7), pt, aad)
+    var same = true
+    let all = [c, x, g, g128]
+    for i in 0..all.len() {
+        same = same and hex(sha256(all[i]))[..16] == parts[i]
+    }
+    let back = ChaCha20Poly1305.new(seq(32, 13, 1)).decrypt(seq(12, 29, 7), all[0], aad) == some(pt.copy())
+    let xback = XChaCha20Poly1305.new(seq(32, 13, 1)).decrypt(seq(24, 29, 7), all[1], aad) == some(pt.copy())
+    let gback = AesGcm.new(seq(32, 13, 3)).decrypt(seq(12, 29, 7), all[2], aad) == some(pt.copy())
+    println("{n} {same} {back and xback and gback}")
+}
+
+fn main() {
+    let ladies = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.".to_bytes()
+
+    // RFC 8439, 2.8.2: the IV after a 32-bit fixed part, 07 00 00 00.
+    check(
+        0,
+        "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+        "070000004041424344454647",
+        ladies,
+        "50515253c0c1c2c3c4c5c6c7",
+        "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b61161ae10b594f09e26a7e902ecbd0600691",
+    )    // out: true
+
+    // RFC 8439, A.5: the decryption, of an Internet-Draft's boilerplate.
+    let draft = ChaCha20Poly1305.new(unhex("1c9240a5eb55d38af333888604f6b5f0473917c1402b80099dca5cbc207075c0"))
+    let opened = draft.decrypt(
+        unhex("000000000102030405060708"),
+        unhex(
+            "64a0861575861af460f062c79be643bd5e805cfd345cf389f108670ac76c8cb24c6cfc18755d43eea09ee94e382d26b0bdb7b73c321b0100d4f03b7f355894cf332f830e710b97ce98c8a84abd0b948114ad176e008d33bd60f982b1ff37c8559797a06ef4f0ef61c186324e2b3506383606907b6a7c02b0f9f6157b53c867e4b9166c767b804d46a59b5216cde7a4e99040c5a40433225ee282a1b0a06c523eaf4534d7f83fa1155b0047718cbc546a0d072b04b3564eea1b422273f548271a0bb2316053fa76991955ebd63159434ecebb4e466dae5a1073a6727627097a1049e617d91d361094fa68f0ff77987130305beaba2eda04df997b714d6c6f2c29a6ad5cb4022b02709beead9d67890cbb22392336fea1851f38",
+        ),
+        unhex("f33388860000000000004e91"),
+    )!
+    let text = String.from_utf8(opened) ?? String("not UTF-8")
+    println(text[..35])    // out: Internet-Drafts are draft documents
+    println("{text.len()}")    // out: 265
+
+    // draft-irtf-cfrg-xchacha-03, A.3.1.
+    check(
+        1,
+        "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+        "404142434445464748494a4b4c4d4e4f5051525354555657",
+        ladies,
+        "50515253c0c1c2c3c4c5c6c7",
+        "bd6d179d3e83d43b9576579493c0e939572a1700252bfaccbed2902c21396cbb731c7f1b0b4aa6440bf3a82f4eda7e39ae64c6708c54c216cb96b72e1213b4522f8c9ba40db5d945b11b69b982c1bb9e3f3fac2bc369488f76b2383565d3fff921f9664c97637da9768812f615c68b13b52ec0875924c1c7987947deafd8780acf49",
+    )    // out: true
+
+    // The GCM spec's test cases 1 to 6, AES-128, 13 to 16 and 18, AES-256: no plaintext, a zero
+    // block, 64 bytes, 60 with associated data, then that with an IV of 8 bytes and of 60.
+    let zero16 = "00000000000000000000000000000000"
+    let zero32 = "0000000000000000000000000000000000000000000000000000000000000000"
+    let k3 = "feffe9928665731c6d6a8f9467308308"
+    let iv3 = "cafebabefacedbaddecaf888"
+    let p64 = unhex("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255")
+    var p60 = p64.copy()
+    p60.truncate(60)
+    let a20 = "feedfacedeadbeeffeedfacedeadbeefabaddad2"
+    let iv60 = "9313225df88406e555909c5aff5269aa6a7a9538534f7da1e4c303d2a318a728c3c0c95156809539fcf0e2429a6b525416aedbf5a0de6a57a637b39b"
+    check(2, zero16, "000000000000000000000000", [], "", "58e2fccefa7e3061367f1d57a4e7455a")    // out: true
+    check(2, zero16, "000000000000000000000000", unhex(zero16), "", "0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf")    // out: true
+    check(2, k3, iv3, p64.copy(), "", "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091473f59854d5c2af327cd64a62cf35abd2ba6fab4")    // out: true
+    check(2, k3, iv3, p60.copy(), a20, "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e0915bc94fbc3221a5db94fae95ae7121a47")    // out: true
+    check(2, k3, "cafebabefacedbad", p60.copy(), a20, "61353b4c2806934a777ff51fa22a4755699b2a714fcdc6f83766e5f97b6c742373806900e49f24b22b097544d4896b424989b5e1ebac0f07c23f45983612d2e79e3b0785561be14aaca2fccb")    // out: true
+    check(2, k3, iv60, p60.copy(), a20, "8ce24998625615b603a033aca13fb894be9112a5c3a211a8ba262a3cca7e2ca701e4a9a4fba43c90ccdcb281d48c7c6fd62875d2aca417034c34aee5619cc5aefffe0bfa462af43c1699d050")    // out: true
+    check(2, zero32, "000000000000000000000000", [], "", "530f8afbc74536b9a963b4f1c4cb738b")    // out: true
+    check(2, zero32, "000000000000000000000000", unhex(zero16), "", "cea7403d4d606b6e074ec5d3baf39d18d0d1c8a799996bf0265b98b5d48ab919")    // out: true
+    let k15 = "feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308"
+    check(2, k15, iv3, p64.copy(), "", "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662898015adb094dac5d93471bdec1a502270e3cc6c")    // out: true
+    check(2, k15, iv3, p60.copy(), a20, "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f66276fc6ece0f4e1768cddf8853bb2d551b")    // out: true
+    check(2, k15, iv60, p60.copy(), a20, "5a8def2f0c9e53f1f75d7853659e2a20eeb2b22aafde6419a058ab4f6f746bf40fc0c3b780f244452da3ebf1c5d82cdea2418997200ef82e44ae7e3fa44a8266ee1c8eb0c8b5d4cf5ae9f19a")    // out: true
+
+    // NIST's CAVP files: gcmEncryptExtIV256, 51 bytes, and gcmEncryptExtIV128, with an IV of
+    // 128 bytes and 20 of associated data.
+    check(
+        2,
+        "1fded32d5999de4a76e0f8082108823aef60417e1896cf4218a2fa90f632ec8a",
+        "1f3afa4711e9474f32e70462",
+        unhex("06b2c75853df9aeb17befd33cea81c630b0fc53667ff45199c629c8e15dce41e530aa792f796b8138eeab2e86c7b7bee1d40b0"),
+        "",
+        "91fbd061ddc5a7fcc9513fcdfdc9c3a7c5d4d64cedf6a9c24ab8a77c36eefbf1c5dc00bc50121b96456c8cd8b6ff1f8b3e480f30096d340f3d5c42d82a6f475def23eb",
+    )    // out: true
+    check(
+        2,
+        "c115a649eb2a502fce0a7f551d0200b7",
+        "8962e4fec5f0321384ba4e23cca35a045ba2e69c11640fbd0ad699a1fca522bdb8b81495d2a1f57fbf9c520cd3ec9aebf3e43b02d9784a532a97faa6d0ed17a1b9096ee047f0eae50414966b8cd6071236d7059a34c8dd1d9ba8ac73d5d93040ef6ae64fa9f5786d4ba7189b1ba89d74aeaf5e65600f06c5d9fcf7c6e3d76ec9",
+        unhex("0962e13f76e281942aec8c9d7bf59ccaf702dea49de484280e4cc07bf44355624d262e5b42eeff46a06eb798c0dcd748aaeb66"),
+        "2ab286756824c7c2d53f98ef7075fae4181bf741",
+        "8fe59aa7c112e4b5000fd82f194f0f9b15218f072630df5870d1c8ca81d7d66ccf95ddd3ab3c603af2fc2bb9edca00c7bdab949eab1e037e703a777b76306d8aa660d3",
+    )    // out: true
+    // gcmDecrypt192's first FAIL with a block of each: the tag doesn't match, so nothing opens.
+    let fake = AesGcm.new(unhex("f3167d3ea919d15bb5254717cc8b2a18da1e35950a872089"))
+    println("{fake.decrypt(unhex("5583ee965e59308a902a0703"), unhex("ad475445f3eecb217387be44895254e1f7e9cef0e7296bdb0b4305b0a8edf9ac"), unhex("cc67a35257f75e8816d0de5b83d321f0")) == none}")    // out: true
+
+    // Against Python's cryptography: ChaCha20Poly1305, XChaCha20-Poly1305 from its HChaCha20
+    // and ChaCha20Poly1305, and AESGCM with 256- and 128-bit keys.
+    formula(0, "72f1c50c13d07931 8452fbc237f76558 a07f142145ae4d1b 9c1109558923f4cb")    // out: 0 true true
+    formula(1, "def2b7cb7b9ef527 7b288cb3b1cc5120 9e05801e426fcbf7 d2e75e1d84c1d2af")    // out: 1 true true
+    formula(16, "95aac466a61dcb79 5a60b1f242ceb30a 20cd0946293b2106 3d802e6d8e440c2d")    // out: 16 true true
+    formula(63, "cb63d87dda57fab3 935363448bcc1611 e6a6dff53757b800 1f08eae65c267e8c")    // out: 63 true true
+    formula(64, "b7c8d45e8aa5abf6 16ad2e2fd3b43ad5 5e86ae726175fc0d afe35c8d39fdc4bc")    // out: 64 true true
+    formula(65, "13a464b5e7e5d0dc 0b347a2f600591e9 1b66f3694ac4d79a 2257a084cff99fb0")    // out: 65 true true
+    formula(255, "60c3fe47e0376ae7 73706c12e0e02e16 c21beea0b6bf31e8 3f85899721881e99")    // out: 255 true true
+    formula(256, "7902d2d7ef96aa68 bc2231de89fe18f7 4c5938cc9830e89f 11a79cda61fb6eba")    // out: 256 true true
+    formula(257, "27fe104aa9a0b5f4 6482329a9f764087 6513d23a7ff48aa1 75afec60a8c433d9")    // out: 257 true true
+    formula(511, "7055a57e4d5d76a8 b7d6875eac81f4fe 0f215a57a64ec2a2 a621e533d02c3992")    // out: 511 true true
+    formula(512, "1efeac34c2123317 5acebf85211621be eea88e22b4800c4f 46b29a4bc3135322")    // out: 512 true true
+    formula(513, "34f7d620cacead79 28b75d0083cb63e8 2c4699ac9fa857df 3d92e6b5c6728f31")    // out: 513 true true
+    formula(1000, "f77609d3db0f286d 275b4216ee56d6da d5a1a58e5a2a4ec7 c6dbae4bdf744feb")    // out: 1000 true true
+    formula(4103, "98fb08a8171c0e12 6c0b65ff076fdb28 702ab8bd1f23f0c2 e5da35613045d01c")    // out: 4103 true true
+    formula(70000, "10c6857ba59cf32a f5731323228148ba c78ca5253796b388 676f3bbdb3f404fb")    // out: 70000 true true
+
+    // New keys, and what can't be opened at all.
+    let key = ChaCha20Poly1305.generate_key()
+    println("{key.len()} {XChaCha20Poly1305.generate_key().len()} {AesGcm.generate_key().len()} {AesGcm.generate_key(128).len()} {AesGcm.generate_key(192).len()}")    // out: 32 32 32 16 24
+    let c = ChaCha20Poly1305.new(key)
+    let nonce: List<u8> = [0; 12]
+    let sealed = c.encrypt(nonce, [], [])
+    println("{sealed.len()} {c.decrypt(nonce, sealed, []) == some([])} {c.decrypt(nonce, [1, 2, 3], []) == none} {c.decrypt([0; 24], sealed, []) == none}")    // out: 16 true true true
+    let x = XChaCha20Poly1305.new(key)
+    println("{x.decrypt(nonce, sealed, []) == none} {x.decrypt([0; 24], sealed, []) == none}")    // out: true true
+    let g = AesGcm.new(key)
+    println("{g.decrypt([0; 7], g.encrypt([0; 8], []), []) == none} {g.decrypt([0; 129], sealed, []) == none} {g.decrypt([0; 8], g.encrypt([0; 8], []), []) == some([])}")    // out: true true true
+}
