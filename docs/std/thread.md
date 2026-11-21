@@ -56,12 +56,37 @@ A thread runs a task: a value whose type implements `Task`, which moves to the n
 | `Thread.spawn(task)` | Starts a thread that runs `task.run()`, and gives its `Thread`. Needs `unsafe`. The task's type must be `Send` |
 | `t.join()` | Waits for the thread to end, and uses `t` up |
 | `sleep(ns)` | Waits `ns` nanoseconds, or a little longer. Needs `unsafe` |
+| `stopping()` | Whether the [static library](../reference/embedding.md#panics) the thread works for has stopped, by a panic or its host's `calx_shutdown`, since the thread started. Always `false` in a program. Needs `unsafe`, and can't be asked inside a `parallel for` |
 
 Every thread's stack is 8 MiB, the main thread's too, on every system, so a program recurses as deep on Windows, Linux and macOS, and on any of its threads (D135). It's address space: memory is taken only as the stack grows into it. A call that would go past the end [panics](../reference/printing.md#panics), at `<stack>`, as any other bug does.
 
 A `Thread` that's dropped without `join()` carries on by itself, and ends with the program if it hasn't ended before. Memory such a thread still holds when the program ends isn't reported as a leak, since it's still in use.
 
 A panic on any thread ends the whole program, as one on the main thread does. Its message and [stack trace](../reference/printing.md#stack-traces) are the panicking thread's, and everything printed before it is written first. Lines printed from different threads never mix: each `println` is written whole.
+
+In a [static library](../reference/embedding.md#panics), a panic goes to the host instead, and ends only the thread it happened on, which `join` then sees end. It stops the library, and its other threads are told: `wait` and `wait_for` give `none` from then on, so a service's loop ends, and `stopping()` turns `true`, for a thread that loops on something else to ask between turns (CLX-407).
+
+```calx
+import std.thread
+import std.thread.{Task}
+
+struct Ticker {}
+
+impl Task for Ticker {
+    fn run(own self) {
+        var ticks = 0
+        while not unsafe { thread.stopping() } and ticks < 3 {
+            unsafe { thread.sleep(1000000) }
+            ticks += 1
+        }
+        println("ticked {ticks} times")
+    }
+}
+
+fn main() {
+    unsafe { Thread.spawn(Ticker {}).join() }    // out: ticked 3 times
+}
+```
 
 A `parallel for` on a thread that `Thread.spawn` started runs on that thread alone, so services don't compete with the program's own loops for the pool. It gives the same result anyway. `set_workers` panics on such a thread. To run its loops on threads, give it a [`Pool`](pool.md#pools-of-its-own) of its own, and run them with `parallel(pool) for`.
 
@@ -79,7 +104,7 @@ A queue carries messages of one type, `T`, which must be `Send`. Each message mo
 | `r.sender()` | A new end that sends to `r`'s queue |
 | `s.send(m)` | Moves `m` into the queue. If every receiving end is gone, `m` is dropped instead |
 | `r.next()` | The first message, or `none` at once if there isn't one |
-| `r.wait()` | The first message, waiting for one if the queue is empty. Gives `none` once it's empty and every `Sender` is gone. A thread that waits 2 seconds gives back the memory it keeps for itself ([std.memory](memory.md)) and goes on waiting |
+| `r.wait()` | The first message, waiting for one if the queue is empty. Gives `none` once it's empty and every `Sender` is gone, or once the [static library](../reference/embedding.md#panics) it's in has stopped. A thread that waits 2 seconds gives back the memory it keeps for itself ([std.memory](memory.md)) and goes on waiting |
 | `r.wait_for(ns)` | As `wait`, but for at most `ns` nanoseconds: `none` if no message came in that time, as well as once every `Sender` is gone. The system may wake it late, never early. Needs `unsafe`, since whether one came in time depends on timing |
 | `s.share()`, `r.share()` | Another end of the same kind, for the same queue |
 | `s.copy()` | The same as `s.share()`: a copy of a sending end is another end of the same queue |

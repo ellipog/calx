@@ -95,6 +95,13 @@ CX_FN(cx_i64, cx_test_start, (int argc, char** argv));
  * does as it starts, since C can call them on threads of its own. */
 CX_FN(void, cx_export_enter, (const char* name));
 CX_FN(void, cx_foreign_threads, (void));
+#ifdef CX_STATICLIB
+/* In a static library, what each `@export_c` function calls its Calx function through instead:
+ * `run(args)`, with a panic in it caught and given to the host, rather than ending its process.
+ * 1 if `run` returned, and 0 if it panicked, or if an earlier panic has stopped the library, when
+ * `run` isn't called at all (CLX-407). */
+int cx_staticlib_call(const char* name, void (*run)(void*), void* args);
+#endif
 /* An `@export_c` function's C name is for the linker to find, outside a static library too: a
  * DLL's or a shared library's export when it's built as one (CX_CDYLIB), and otherwise just
  * visible where everything else is hidden. */
@@ -1445,6 +1452,9 @@ CX_FN(cx_u32, cx_signal_wait, (cx_i64 timeout_ms));
 CX_FN(cx_bool, cx_signal_raise, (cx_u32 kind));
 CX_FN(cx_bool, cx_signal_service, (void));
 CX_FN(void, cx_thread_sleep, (cx_u64 ns));
+/* Whether the static library this thread works for has stopped since the thread started: by a
+ * panic, or by its host's `calx_shutdown`. Always false in a program (CLX-407). */
+CX_FN(cx_bool, cx_thread_stopping, (void));
 
 /* Hashing, for `Map` and `Set` (D94). The same value hashes the same on every platform and in
  * every run, so a table's layout, and the order a loop goes over it, depend only on what was

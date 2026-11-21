@@ -1,0 +1,395 @@
+// CLX-407: a panic in a static library comes back to its C host, rather than ending its process.
+// `engine.calx` divides, indexes and sums with a `parallel for`, and runs a thread that does what
+// it's sent and one that ticks until the library stops. The host gives `calx_on_panic` a hook,
+// then: a panic in a call returns the call's `on_panic` value, the hook hears of it and
+// `calx_panicked` gives it, later calls return at once, and the library's threads are told, the
+// worker by its queue's `wait` and the ticker by `stopping()`; `calx_shutdown` gives 101 and
+// `calx_init` starts it again. Then a panic on the worker's own thread, which the hook hears of
+// there; one in a `parallel for`, after which the next loop runs on the same workers; and one
+// without a hook, which goes to standard error. Built in debug and release, linked with clang.
+// file: main.calx
+import std.env.{arch, os, script, variable}
+import std.fs.{read_text}
+import std.path.{join, parent_dir}
+import std.process.{Command}
+
+/// What a program gave: its output, the first line of its errors, and how it ended.
+fn run(exe: String, args: List<String>, dir: String) -> String {
+    match Command.new(exe).args(args).dir(dir).output() {
+        ok(o) => {
+            // A panic's trace, after its first line, has the frames the system can read, which
+            // differ from one to the next.
+            let errors = o.error_text()
+            let lines = errors.lines()
+            let first = if lines.is_empty() { String() } else { lines[0].copy() }
+            let said = if first.is_empty() { String() } else { "\nstandard error: {first}" }
+            return "{o.text().trim_end()}{said}\n{o.status}"
+        },
+        err(e) => return "can't run {exe}: {e}",
+    }
+}
+
+fn main() {
+    let calx = variable("CALX") ?? String("calx")
+    let clang = variable("CALX_CC") ?? String("clang")
+    let dir = parent_dir(script()!)!
+    let windows = os() == "windows"
+    for mode in ["debug", "release"] {
+        var words: List<String> = ["build", "--staticlib"]
+        if mode == "release" {
+            words.push("--release")
+        }
+        let out = if windows { "out/{mode}/engine.lib" } else { "out/{mode}/libengine.a" }
+        words.push("engine.calx")
+        words.push("-o")
+        words.push(out.copy())
+        match Command.new(calx.copy()).args(words).dir(dir.copy()).output() {
+            ok(o) => {
+                if not o.status.success() {
+                    println("building the {mode} library: {o.text()}{o.error_text()}")
+                    continue
+                }
+            },
+            err(e) => {
+                println("can't run {calx}: {e}")
+                continue
+            },
+        }
+        let header = read_text(join(dir.copy(), "out/{mode}/engine.h"))! ?? String()
+        println("{header.contains("typedef struct calx_panic \{")} {header.contains("const calx_panic* calx_panicked(void);")}")
+        let exe = "out/{mode}/host{if windows { ".exe" } else { "" }}"
+        var cc: List<String> = ["host.c", "-I", "out/{mode}", out.copy(), "-o", exe.copy()]
+        if windows {
+            cc.push("--target={if arch() == "aarch64" { "aarch64" } else { "x86_64" }}-pc-windows-msvc")
+            cc.push("-fms-runtime-lib=dll")
+            cc.push("-fuse-ld=link")
+            cc.push("-Wl,-nodefaultlib:libcmt")
+        } else if os() == "linux" {
+            for lib in ["-lm", "-lpthread", "-ldl"] {
+                cc.push(String(lib))
+            }
+        }
+        match Command.new(clang.copy()).args(cc).dir(dir.copy()).output() {
+            ok(o) => {
+                if not o.status.success() {
+                    println("linking the {mode} host: {o.text()}{o.error_text()}")
+                    continue
+                }
+            },
+            err(e) => {
+                println("can't run {clang}: {e}")
+                continue
+            },
+        }
+        println(run(join(dir.copy(), exe), [], dir.copy()))
+    }
+    // out: true true
+    // out: eng_divide(7, 2) gave 3
+    // out: eng_divide(1, 0) gave -1; the hook heard: eng_divide: division by zero, at engine.calx:220:12
+    // out: calx_panicked: division by zero, in eng_divide
+    // out: eng_divide(8, 2) gave -1 at once, and eng_send gave -2, as the library has stopped
+    // out: worker: its queue gave none after 0 messages, stopping: true
+    // out: ticker: the library stopped
+    // out: calx_shutdown gave 101
+    // out: after calx_init, calx_panicked gives none, and eng_divide(9, 3) gave 3
+    // out: eng_send(crash) gave 0; the hook heard: a thread of the library's: the worker was told to crash, at engine.calx:165:17
+    // out: ticker: the library stopped
+    // out: eng_divide(9, 3) gave -1
+    // out: calx_shutdown gave 101
+    // out: eng_sum(1000) gave -1; the hook heard: eng_sum: the loop met 700, at engine.calx:242:9
+    // out: calx_shutdown gave 101
+    // out: eng_sum(500) gave 374250
+    // out: worker: its queue gave none after 1 messages, stopping: false
+    // out: ticker: told to quit
+    // out: calx_shutdown gave 0
+    // out: eng_index(5) gave 0, without a hook
+    // out: calx_shutdown gave 101
+    // out: 3 panics reached the hook
+    // out: standard error: panic at engine.calx:268:15: index 5 is out of bounds for length 3
+    // out: exited with status 0
+    // out: true true
+    // out: eng_divide(7, 2) gave 3
+    // out: eng_divide(1, 0) gave -1; the hook heard: eng_divide: division by zero, at engine.calx:220:12
+    // out: calx_panicked: division by zero, in eng_divide
+    // out: eng_divide(8, 2) gave -1 at once, and eng_send gave -2, as the library has stopped
+    // out: worker: its queue gave none after 0 messages, stopping: true
+    // out: ticker: the library stopped
+    // out: calx_shutdown gave 101
+    // out: after calx_init, calx_panicked gives none, and eng_divide(9, 3) gave 3
+    // out: eng_send(crash) gave 0; the hook heard: a thread of the library's: the worker was told to crash, at engine.calx:165:17
+    // out: ticker: the library stopped
+    // out: eng_divide(9, 3) gave -1
+    // out: calx_shutdown gave 101
+    // out: eng_sum(1000) gave -1; the hook heard: eng_sum: the loop met 700, at engine.calx:242:9
+    // out: calx_shutdown gave 101
+    // out: eng_sum(500) gave 374250
+    // out: worker: its queue gave none after 1 messages, stopping: false
+    // out: ticker: told to quit
+    // out: calx_shutdown gave 0
+    // out: eng_index(5) gave 0, without a hook
+    // out: calx_shutdown gave 101
+    // out: 3 panics reached the hook
+    // out: standard error: panic at engine.calx:268:15: index 5 is out of bounds for length 3
+    // out: exited with status 0
+}
+
+// file: engine.calx
+import std.thread
+import std.thread.{Task}
+
+/// Where the engine tells its host what happened, from any of its threads.
+struct Sink {
+    on_event: extern "C" fn(*u8, *const u8, usize)
+    ctx: *u8
+}
+
+unsafe impl Send for Sink {}
+
+impl Sink {
+    fn tell(self, message: String) {
+        unsafe { (self.on_event)(self.ctx, message.as_ptr(), message.len()) }
+    }
+}
+
+/// A thread that takes what it's sent, and panics when it's told to crash.
+struct Worker {
+    sink: Sink
+    inbox: Receiver<String>
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        var n = 0
+        while let m = self.inbox.wait() {
+            if m == "crash" {
+                panic("the worker was told to crash")
+            }
+            n += 1
+        }
+        let stopping = unsafe { thread.stopping() }
+        self.sink.tell("worker: its queue gave none after {n} messages, stopping: {stopping}")
+    }
+}
+
+/// A thread that ticks until it's told to quit, or the library stops.
+struct Ticker {
+    sink: Sink
+    quit: Receiver<bool>
+}
+
+impl Task for Ticker {
+    fn run(own self) {
+        while not unsafe { thread.stopping() } {
+            if let _ = self.quit.next() {
+                self.sink.tell("ticker: told to quit")
+                return
+            }
+            unsafe { thread.sleep(1000000) }
+        }
+        self.sink.tell("ticker: the library stopped")
+    }
+}
+
+struct Engine {
+    outbox: Sender<String>?
+    quit: Sender<bool>?
+    worker: Thread?
+    ticker: Thread?
+}
+
+/// Starts the engine's threads, which tell `on_event`, with `ctx`, what happens.
+@export_c
+fn eng_start(on_event: extern "C" fn(*u8, *const u8, usize), ctx: *u8) -> *u8 {
+    let sink = unsafe { Sink { on_event: on_event, ctx: ctx } }
+    let inbox = Receiver<String>()
+    let quit = Receiver<bool>()
+    let e = Engine {
+        outbox: some(inbox.sender()),
+        quit: some(quit.sender()),
+        worker: some(unsafe { Thread.spawn(Worker { sink: sink, inbox: inbox }) }),
+        ticker: some(unsafe { Thread.spawn(Ticker { sink: sink, quit: quit }) }),
+    }
+    unsafe {
+        return Box(e).into_ptr().cast<u8>()
+    }
+}
+
+/// `a / b`, or -1 if the library panics.
+@export_c(on_panic: -1)
+fn eng_divide(a: i32, b: i32) -> i32 {
+    return a / b
+}
+
+/// Gives the worker the text in the `len` bytes at `message`: 0, or -2 if the library panics.
+@export_c(on_panic: -2)
+fn eng_send(engine: *u8, message: *const u8, len: usize) -> i32 {
+    var e = unsafe { engine.cast<Engine>().to_box() }
+    var bytes = List<u8>()
+    for i in 0..len {
+        bytes.push(unsafe { message.add(i).read() })
+    }
+    if let o = mut e.value.outbox {
+        o.send(String.from_utf8(bytes) ?? String("?"))
+    }
+    unsafe {
+        _ = e.into_ptr()
+    }
+    return 0
+}
+
+fn triple(x: i64) -> i64 {
+    if x == 700 {
+        panic("the loop met {x}")
+    }
+    return x * 3
+}
+
+/// The sum of 3 times each of 0 to `n`, worked out on every core; -1 if the library panics.
+@export_c(on_panic: -1)
+fn eng_sum(n: i64) -> i64 {
+    var xs = List<i64>()
+    for i in 0..n {
+        xs.push(i)
+    }
+    parallel for k in 0..xs.len() {
+        xs[k] = triple(xs[k])
+    }
+    var sum: i64 = 0
+    for x in xs {
+        sum += x
+    }
+    return sum
+}
+
+/// The `i`th of three numbers, or 0 if the library panics.
+@export_c
+fn eng_index(i: usize) -> i64 {
+    let xs: List<i64> = [10, 20, 30]
+    return xs[i]
+}
+
+/// Stops the engine's threads, waits for them, and frees it.
+@export_c
+fn eng_stop(engine: *u8) {
+    var e = unsafe { engine.cast<Engine>().to_box() }
+    if let o = e.value.outbox.take() {
+        o.close()
+    }
+    if let q = mut e.value.quit {
+        q.send(true)
+    }
+    if let w = e.value.worker.take() {
+        w.join()
+    }
+    if let t = e.value.ticker.take() {
+        t.join()
+    }
+}
+
+// file: host.c
+#include <stdio.h>
+#include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+static void nap(void) { Sleep(1); }
+#else
+#include <time.h>
+static void nap(void) {
+    struct timespec t = {0, 1000000};
+    nanosleep(&t, NULL);
+}
+#endif
+#include "engine.h"
+
+/* What the library's threads said, which the host waits for, since they say it on their own. */
+static int said_worker, said_ticker, hooked;
+static char worker_text[256], ticker_text[256], hook_text[512];
+
+static void keep(char* to, const uint8_t* text, size_t len, int* flag) {
+    if (len > 255) len = 255;
+    memcpy(to, text, len);
+    to[len] = 0;
+    __atomic_store_n(flag, 1, __ATOMIC_RELEASE);
+}
+
+static void on_event(uint8_t* ctx, const uint8_t* text, size_t len) {
+    (void)ctx;
+    if (len >= 7 && memcmp(text, "worker:", 7) == 0) keep(worker_text, text, len, &said_worker);
+    else keep(ticker_text, text, len, &said_ticker);
+}
+
+static void on_panic(void* ctx, const calx_panic* p) {
+    int* count = (int*)ctx;
+    (*count)++;
+    snprintf(hook_text, sizeof hook_text, "%s: %s, at %s", p->function ? p->function : "a thread of the library's",
+             p->message, p->location);
+    __atomic_store_n(&hooked, 1, __ATOMIC_RELEASE);
+}
+
+/* Waits up to 20 seconds for `flag`, and clears it. */
+static void await(int* flag, const char* what) {
+    for (int i = 0; i < 20000 && !__atomic_load_n(flag, __ATOMIC_ACQUIRE); i++) nap();
+    if (!__atomic_exchange_n(flag, 0, __ATOMIC_ACQ_REL)) printf("the %s never said anything\n", what);
+}
+
+int main(void) {
+    int panics = 0;
+    calx_on_panic(on_panic, &panics);
+
+    /* A panic in a call: it returns, and the library stops. */
+    calx_init();
+    uint8_t* engine = eng_start(on_event, NULL);
+    printf("eng_divide(7, 2) gave %d\n", eng_divide(7, 2));
+    int r = eng_divide(1, 0);
+    await(&hooked, "hook");
+    printf("eng_divide(1, 0) gave %d; the hook heard: %s\n", r, hook_text);
+    const calx_panic* p = calx_panicked();
+    printf("calx_panicked: %s, in %s\n", p ? p->message : "nothing", p && p->function ? p->function : "?");
+    int d = eng_divide(8, 2);
+    int s = eng_send(engine, (const uint8_t*)"x", 1);
+    printf("eng_divide(8, 2) gave %d at once, and eng_send gave %d, as the library has stopped\n", d, s);
+    await(&said_worker, "worker");
+    printf("%s\n", worker_text);
+    await(&said_ticker, "ticker");
+    printf("%s\n", ticker_text);
+    printf("calx_shutdown gave %d\n", calx_shutdown());
+
+    /* Started again, then a panic on the worker's own thread. */
+    calx_init();
+    printf("after calx_init, calx_panicked gives %s, and eng_divide(9, 3) gave %d\n", calx_panicked() ? "a panic" : "none",
+           eng_divide(9, 3));
+    engine = eng_start(on_event, NULL);
+    r = eng_send(engine, (const uint8_t*)"crash", 5);
+    await(&hooked, "hook");
+    printf("eng_send(crash) gave %d; the hook heard: %s\n", r, hook_text);
+    await(&said_ticker, "ticker");
+    printf("%s\n", ticker_text);
+    printf("eng_divide(9, 3) gave %d\n", eng_divide(9, 3));
+    printf("calx_shutdown gave %d\n", calx_shutdown());
+
+    /* A panic in a `parallel for`, then a loop on the same workers. */
+    calx_init();
+    long long sum = eng_sum(1000);
+    await(&hooked, "hook");
+    printf("eng_sum(1000) gave %lld; the hook heard: %s\n", sum, hook_text);
+    printf("calx_shutdown gave %d\n", calx_shutdown());
+    calx_init();
+    printf("eng_sum(500) gave %lld\n", eng_sum(500));
+    engine = eng_start(on_event, NULL);
+    eng_send(engine, (const uint8_t*)"a", 1);
+    eng_stop(engine);
+    await(&said_worker, "worker");
+    printf("%s\n", worker_text);
+    await(&said_ticker, "ticker");
+    printf("%s\n", ticker_text);
+    printf("calx_shutdown gave %d\n", calx_shutdown());
+
+    /* Without a hook, a panic goes to standard error. */
+    calx_on_panic(NULL, NULL);
+    calx_init();
+    printf("eng_index(5) gave %lld, without a hook\n", (long long)eng_index(5));
+    printf("calx_shutdown gave %d\n", calx_shutdown());
+    printf("%d panics reached the hook\n", panics);
+    fflush(stdout);
+    return 0;
+}

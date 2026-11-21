@@ -252,9 +252,31 @@ fn main() {
 ```
 
 - Its parameters and result are C types, plain values, as a C function's are. Text and lists go as a pointer and a length.
-- It can't fail, be generic, be `unsafe`, be `@track_caller` or `@export`, or never return. A panic in it ends the process, as it does in a program: C has no way to catch one.
+- It can't fail, be generic, be `unsafe`, be `@track_caller` or `@export`, or never return.
+- A panic in it ends the process in a program, as any panic does. In a [static library](embedding.md#panics) it doesn't: the call returns to C, and the host hears why (CLX-407). It returns its result type's zero then, `0`, `false` or a null pointer, or what `on_panic:` gives, a constant of its result type, an integer or a `bool`: `@export_c(on_panic: -1)`, or `@export_c("lib_send", on_panic: -1)` with a name.
 - Its C name is a C identifier, not a word of C's such as `int`, not one starting with `cx_` or `calx_`, which are the runtime's, and no other function's.
 - The function itself is still a Calx function, which Calx code calls as any other.
+
+```calx
+// kind: staticlib
+@export_c(on_panic: "no")    // error: expected `i32`, found `str`
+fn lib_div(a: i32, b: i32) -> i32 {
+    return a / b
+}
+
+@export_c(on_panic: 300)    // error: 300 doesn't fit in `u8` (0 to 255)
+fn lib_level() -> u8 {
+    return 1
+}
+
+@export_c(on_panic: -1)    // error: `on_panic` is what the function gives back when it panics, and this one gives back nothing
+fn lib_reset() {}
+
+@export_c(on_panic: 1.0)    // error: `on_panic` is for a function that gives back an integer or a `bool`; one that gives back an `f64` gives its zero when it panics
+fn lib_ratio() -> f64 {
+    return 0.5
+}
+```
 
 ### Callbacks on C's threads
 
@@ -341,5 +363,5 @@ fn main() {
 - A pointer is `T*` or `T const*`, and its methods are plain C: `*p`, `*p = v`, `p + n`, `p == 0`, `(U*)p`.
 - A C function is declared in each C file that calls it, under the name `cx_c_name`, with an asm label giving the linker its real name: `extern cx_i32 cx_c_abs(cx_i32) __asm__(CX_SYMBOL("abs"));`. So a declaration never meets one a header makes, and two declarations of the same function, which must agree, are the same C.
 - An `extern "C" fn` type is a C function pointer, and calling one is `f(x)`.
-- An `@export_c` function is its Calx function, called by a small C function under the C name, which checks that the runtime has started and calls it.
+- An `@export_c` function is its Calx function, called by a small C function under the C name, which checks that the runtime has started and calls it. In a static library that C function passes its arguments in a struct to `cx_staticlib_call`, which calls the Calx function from a place a panic comes back to, and returns `on_panic`'s value if it does.
 - `unsafe` adds nothing to the C. It's a promise checked by the reader, not by the program.

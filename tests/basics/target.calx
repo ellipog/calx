@@ -82,13 +82,16 @@ fn main() {
         if os() != "macos" {
             ios.push("{r.err.contains("building for aarch64-ios") and r.err.contains("so build on a Mac")}")
         } else if r.status != "exited with status 0" {
-            ios.push("{r.err.contains("can't find the SDK for") and r.err.contains("It comes with Xcode")}")
+            // Any other failure says what went wrong, rather than just `false`.
+            let no_sdk = r.err.contains("can't find the SDK for") and r.err.contains("It comes with Xcode")
+            ios.push(if no_sdk { String("true") } else { "{name}: {r.status}: {r.err}" })
         } else {
             // The archive's objects say which platform they're for: 2 for an iPhone, 7 for the
             // simulator, with the oldest iOS they run on.
             let platform = if name == "aarch64-ios-sim" { "7" } else { "2" }
             let loads = run("otool", ["-l", out.copy()], dir.copy()).out
-            ios.push("{loads.contains("platform {platform}") and loads.contains("minos 18.0")}")
+            let right = loads.contains("platform {platform}") and loads.contains("minos 18.0")
+            ios.push(if right { String("true") } else { "{name}: otool -l gave {loads}" })
         }
     }
     println(ios.join(" "))    // out: true true
