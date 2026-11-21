@@ -246,6 +246,8 @@ fn main() ! Error {
 | `lzma.compress(b, preset=9)` | `compress(b, 9)` from [`std.xz`](../std/xz.md), on all the processors, the same bytes on any machine |
 | `LZMADecompressor()`, `lzma.open(path)` to read | `Decompressor.new()` from [`std.xz`](../std/xz.md#a-piece-at-a-time): `d.add(piece)`, then `d.finish()`, which reads every stream as `lzma.open` does |
 | `LZMACompressor()`, `lzma.open(path, "w")` | `Compressor.new()` from [`std.xz`](../std/xz.md#a-piece-at-a-time): `c.add(piece)`, then `c.finish()`, the same bytes as `compress` |
+| `bz2.decompress(b)`, `tarfile.open(p)` on a `.tar.bz2` | `decompress(b)` from [`std.bz2`](../std/bz2.md), with the same errors and a limit if it's given, every stream in it; `Tar.open(fs.read(p)!)` from [`std.tar`](../std/tar.md) |
+| `bz2.compress(b, 9)` | `compress(b, 9)` from [`std.bz2`](../std/bz2.md#compressing), the same bytes, several blocks at once |
 | `compression.zstd.decompress(b)`, `ZstdDict(d)` | `decompress(b)` and `Dictionary.new(d)` from [`std.zstd`](../std/zstd.md), with the same errors, big frames on all the processors |
 | `compression.zstd.compress(b, 19)`, `compress(b, 19, zstd_dict=d)` | `compress(b, 19)` and `d.compress(b, 19)` from [`std.zstd`](../std/zstd.md#compressing), big inputs on all the processors, the same bytes on any machine |
 | `train_dict(samples, 16384)`, `finalize_dict(d, samples, 16384, 3)`, `d.dict_content` | `train_dict(samples, 16384)`, `finalize_dict(d, samples, 16384, 3)` and `d.to_bytes()` from [`std.zstd`](../std/zstd.md#training-one), 3 to 5 times as fast |

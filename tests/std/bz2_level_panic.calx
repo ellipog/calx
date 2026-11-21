@@ -1,0 +1,8 @@
+// std.bz2's compress takes levels 1 to 9, as Python's bz2.compress does, which raises a
+// ValueError for others.
+import std.bz2.{compress}
+
+fn main() {
+    println("{compress("x".to_bytes(), 1).len()}")    // out: 37
+    _ = compress("x".to_bytes(), 0)    // panic: the level 0 isn't one: levels go from 1 to 9
+}

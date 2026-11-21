@@ -1,0 +1,182 @@
+/// bzip2 files, decompressed as Python's `bz2.decompress` reads them (CLX-400): `.bz2` files and
+/// `.tar.bz2` archives, every stream in them one after another, as `pbzip2` and `cat a.bz2 b.bz2`
+/// make them. And compressed byte for byte as `bz2.compress` writes them, at its levels.
+module std.bz2
+
+extern "C" {
+    fn cx_bz2_ctx_size() -> usize
+    fn cx_bz2_init(ctx: *u8)
+    fn cx_bz2_end(ctx: *u8)
+    fn cx_bz2_start(ctx: *u8, at: usize)
+    fn cx_bz2_run(ctx: *u8, input: *const u8, n: usize, out: *u8, len: *usize, cap: usize) -> i32
+    fn cx_bz2_used(ctx: *const u8) -> usize
+    fn cx_bz2e_compress(input: *const u8, n: u64, level: u32) -> u64
+    fn cx_bz2e_size(h: u64) -> u64
+    fn cx_bz2e_take(h: u64, dst: *u8)
+}
+
+/// Why bytes didn't decompress. Python raises an `OSError` for the first three, "Invalid data
+/// stream", and a `ValueError` for `Truncated`.
+pub enum Error {
+    /// They don't start as a bzip2 stream does: `BZh` and a digit from 1 to 9.
+    Format
+    /// They're broken.
+    Corrupt
+    /// A block's CRC, or the stream's, doesn't match what it decompresses to. Python says only
+    /// that the data is invalid.
+    Checksum
+    /// They end inside a stream. Python says "Compressed data ended before the end-of-stream
+    /// marker was reached".
+    Truncated
+    /// They decompress to more than the limit.
+    TooLong
+}
+
+/// What went wrong, in words: `corrupt data`, `the data ends early`.
+impl Display for Error {
+    fn show(self) {
+        match self {
+            Format => print("not a bzip2 file"),
+            Corrupt => print("corrupt data"),
+            Checksum => print("checksum mismatch"),
+            Truncated => print("the data ends early"),
+            TooLong => print("longer than the limit when decompressed"),
+        }
+    }
+}
+
+/// What the bytes decompress to: every stream in them, one after another, as
+/// `bz2.decompress(bytes)` gives it. Fails with `TooLong` if it's more than `limit` bytes, which is
+/// no limit at all unless it's given.
+pub fn decompress(bytes: List<u8>, limit: u64 = u64.MAX) -> List<u8> ! Error {
+    var out: List<u8> = []
+    try decompress_into(bytes, 0, bytes.len(), limit, mut out)
+    return out
+}
+
+/// Decompresses the bytes from `from` up to `to` onto the end of `out`, as `decompress` does,
+/// adding at most `limit` bytes. On an error, `out` is as it was. Panics unless the range is in
+/// `bytes`.
+@track_caller
+pub fn decompress_into(bytes: List<u8>, from: usize, to: usize, limit: u64, out: mut List<u8>) ! Error {
+    if from > to or to > bytes.len() {
+        panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
+    }
+    let begin = out.len()
+    // The context is set up by the runtime, so it isn't cleared first, and what it takes on the
+    // way is given back however the streams end.
+    let size = unsafe { cx_bz2_ctx_size() }
+    var ctx = List<u8>()
+    ctx.reserve(size)
+    unsafe {
+        ctx.set_len(size)
+        cx_bz2_init(ctx.as_mut_ptr())
+    }
+    match streams(bytes, from, to, limit, mut ctx, mut out) {
+        ok => {
+            unsafe {
+                cx_bz2_end(ctx.as_mut_ptr())
+            }
+        },
+        err(e) => {
+            unsafe {
+                cx_bz2_end(ctx.as_mut_ptr())
+            }
+            out.truncate(begin)
+            fail e
+        },
+    }
+}
+
+// The runtime's codes for why a stream stopped, calx_bz2.c's BZ_ ones.
+const END: i32 = 0
+const FULL: i32 = 1
+const TRUNCATED: i32 = -4
+
+fn streams(bytes: List<u8>, from: usize, to: usize, limit: u64, ctx: mut List<u8>, out: mut List<u8>) ! Error {
+    let begin = out.len()
+    // The longest out may get, and one past it, which is as far as the runtime is let write.
+    let most: u64 = if limit > u64.MAX - u64(begin) { u64.MAX } else { u64(begin) + limit }
+    let past = if most == u64.MAX { most } else { most + 1 }
+    var lens: List<usize> = [0]
+    var at = from
+    // As Python reads them: streams one after another while there are bytes left, nothing at all
+    // being nothing. After the first, bytes that aren't a stream, or a stream that's broken, end
+    // it there without what that stream gave, but one that's cut short is still an error.
+    while at < to {
+        let mark = out.len()
+        unsafe {
+            cx_bz2_start(ctx.as_mut_ptr(), at)
+        }
+        var code = FULL
+        while code == FULL {
+            if u64(out.len()) > most {
+                fail Error.TooLong
+            }
+            // Twice as much room as there is, and at least 64 KiB.
+            out.reserve(if out.len() < 65536 { 65536 } else { out.len() })
+            let cap = if u64(out.capacity()) > past { usize.wrap(past) } else { out.capacity() }
+            lens[0] = out.len()
+            code = unsafe { cx_bz2_run(ctx.as_mut_ptr(), bytes.as_ptr(), to, out.as_mut_ptr(), lens.as_mut_ptr(), cap) }
+            unsafe {
+                out.set_len(lens[0])
+            }
+        }
+        if u64(out.len()) > most {
+            fail Error.TooLong
+        }
+        if code == END {
+            at = unsafe { cx_bz2_used(ctx.as_ptr()) }
+        } else if at > from and code != TRUNCATED {
+            out.truncate(mark)
+            return
+        } else {
+            fail error_for(code)
+        }
+    }
+}
+
+fn error_for(code: i32) -> Error {
+    return match code {
+        -1 => Error.Format,
+        -3 => Error.Checksum,
+        -4 => Error.Truncated,
+        _ => Error.Corrupt,
+    }
+}
+
+/// The bytes compressed into one bzip2 stream, the same bytes as Python's
+/// `bz2.compress(bytes, level)` and `bzip2 -1` to `bzip2 -9` write: `level` is the size of its
+/// blocks in 100 kB, from 1, which needs the least memory to decompress, to 9, the default, which
+/// is the smallest. Panics for a level outside 1 to 9, where Python raises a `ValueError`.
+@track_caller
+pub fn compress(bytes: List<u8>, level: u32 = 9) -> List<u8> {
+    var out: List<u8> = []
+    compress_into(bytes, 0, bytes.len(), level, mut out)
+    return out
+}
+
+/// Compresses the bytes from `from` up to `to` as `compress` does, onto the end of `out`. Panics
+/// unless the range is in `bytes`, and for a level outside 1 to 9.
+@track_caller
+pub fn compress_into(bytes: List<u8>, from: usize, to: usize, level: u32, out: mut List<u8>) {
+    if from > to or to > bytes.len() {
+        panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
+    }
+    if level < 1 or level > 9 {
+        panic("the level {level} isn't one: levels go from 1 to 9")
+    }
+    let h = unsafe { cx_bz2e_compress(bytes.as_ptr().add(from), u64(to - from), level) }
+    let n = usize.wrap(unsafe { cx_bz2e_size(h) })
+    let at = out.len()
+    out.reserve(n)
+    unsafe {
+        cx_bz2e_take(h, out.as_mut_ptr().add(at))
+        out.set_len(at + n)
+    }
+}
+
+/// Whether the bytes start as a bzip2 stream does: `BZh` and a digit from 1 to 9, its block size.
+pub fn is_bz2(bytes: List<u8>) -> bool {
+    return bytes.len() >= 4 and bytes[0] == 0x42 and bytes[1] == 0x5A and bytes[2] == 0x68 and bytes[3] >= 0x31 and bytes[3] <= 0x39
+}

@@ -1204,6 +1204,25 @@ CX_FN(cx_u64, cx_xze_start, (const cx_u8* in, cx_u64 n, const cx_u64* opt, cx_u6
 CX_FN(cx_u64, cx_xze_blocks, (cx_u64 n, cx_u64 block));
 CX_FN(void, cx_xze_take, (cx_u64 h, cx_u64 b, cx_u8* dst));
 CX_FN(void, cx_xze_end, (cx_u64 h));
+/* bzip2 decompression, in calx_bz2.c, behind std.bz2 (CLX-400). A context is `cx_bz2_ctx_size()`
+ * bytes, aligned as cx_alloc aligns, set up by `cx_bz2_init` and given back by `cx_bz2_end`.
+ * `cx_bz2_start` starts a stream at in[at], and `cx_bz2_run` decodes it from in[0..n) onto
+ * out[*len..cap), moving *len on: 0 at the stream's end, after which `cx_bz2_used` is the byte
+ * after it; 1 when out is full, to be called again with more room; or a negative error: -1 not
+ * bzip2, -2 corrupt, -3 a CRC that doesn't match, -4 the input ends inside the stream. */
+CX_FN(cx_usize, cx_bz2_ctx_size, (void));
+CX_FN(void, cx_bz2_init, (cx_u8* ctx));
+CX_FN(void, cx_bz2_end, (cx_u8* ctx));
+CX_FN(void, cx_bz2_start, (cx_u8* ctx, cx_usize at));
+CX_FN(cx_i32, cx_bz2_run, (cx_u8* ctx, const cx_u8* in, cx_usize n, cx_u8* out, cx_usize* len, cx_usize cap));
+CX_FN(cx_usize, cx_bz2_used, (const cx_u8* ctx));
+/* bzip2 compression, in calx_bz2enc.c, behind std.bz2's `compress` (CLX-400).
+ * `cx_bz2e_compress` compresses in[0..n) at a level from 1 to 9 as Python's bz2.compress does and
+ * gives a handle to the stream: `cx_bz2e_size` is its size, and `cx_bz2e_take` copies it out and
+ * frees it. */
+CX_FN(cx_u64, cx_bz2e_compress, (const cx_u8* in, cx_u64 n, cx_u32 level));
+CX_FN(cx_u64, cx_bz2e_size, (cx_u64 h));
+CX_FN(void, cx_bz2e_take, (cx_u64 h, cx_u8* dst));
 /* Zstandard decompression, in calx_zstd.c, behind std.zstd (CLX-181). `cx_zstd_frame` starts the
  * frame at in[at..n) in a context of `cx_zstd_ctx_size()` bytes, and `cx_zstd_blocks` decodes its
  * blocks straight onto `out`; `cx_zstd_dict` reads a dictionary's tables into
