@@ -53,10 +53,10 @@ constexpr char kPathSep = ';';
 #else
 constexpr char kPathSep = ':';
 #endif
-constexpr const char* kExe = exe_suffix(kTarget.os);
-constexpr const char* kLib = lib_suffix(kTarget.os);
+// The host's, for the programs calx itself starts, such as clang.
+constexpr const char* kExe = exe_suffix(kHost.os);
 // What clang builds for with mingw-w64's headers and libraries and the UCRT (CLX-110).
-[[maybe_unused]] constexpr const char* kMingwTarget = mingw_target_flag(kTarget.arch);
+[[maybe_unused]] constexpr const char* kMingwTarget = mingw_target_flag(kHost.arch);
 
 }  // namespace
 
@@ -424,7 +424,7 @@ std::string cache_dir() {
     std::string base = env("XDG_CACHE_HOME");
     if (!base.empty()) return (fs::path(base) / "calx").string();
     // macOS keeps caches in ~/Library/Caches, which Time Machine leaves out, as pip's are kept.
-    if (kTarget.os == Os::macos) return (fs::path(env("HOME")) / "Library" / "Caches" / "calx").string();
+    if (kHost.os == Os::macos) return (fs::path(env("HOME")) / "Library" / "Caches" / "calx").string();
     return (fs::path(env("HOME")) / ".cache" / "calx").string();
 #endif
 }
@@ -461,6 +461,30 @@ std::string find_sdk() {
     return "";
 }
 
+std::string find_ios_sdk(bool simulator, std::string& error) {
+    const char* sdk = simulator ? "iphonesimulator" : "iphoneos";
+    const char* what = simulator ? "the iOS simulator" : "iOS";
+#ifdef __APPLE__
+    // xcrun knows which Xcode `xcode-select` or DEVELOPER_DIR chose, and where its SDKs are. With
+    // only the Command Line Tools it has none for iOS, and says so rather than offering to install.
+    std::string out = (fs::temp_directory_path() / ("calx-xcrun-" + unique_stamp())).string();
+    int status = run_to_file({"/usr/bin/xcrun", "--sdk", sdk, "--show-sdk-path"}, out);
+    std::string said;
+    read_file(out, said);
+    std::error_code ec;
+    fs::remove(out, ec);
+    while (!said.empty() && (said.back() == '\n' || said.back() == '\r')) said.pop_back();
+    if (status == 0 && said.find('\n') == std::string::npos && fs::is_directory(said, ec)) return said;
+    error = std::string("can't find the SDK for ") + what + ": `xcrun --sdk " + sdk +
+            " --show-sdk-path` found none. It comes with Xcode, from the App Store or developer.apple.com; install it, "
+            "open it once, and if it's installed choose it with `sudo xcode-select -s /Applications/Xcode.app`";
+    return "";
+#else
+    error = std::string("the SDK for ") + what + " comes with Xcode, so building for it takes a Mac";
+    return "";
+#endif
+}
+
 bool find_toolchain(Toolchain& tc, std::string& error) {
     tc.home = find_home(error);
     if (tc.home.empty()) return false;
@@ -487,7 +511,7 @@ bool find_toolchain(Toolchain& tc, std::string& error) {
     // llvm-mingw's layout: the target's headers and libraries in a folder named for it, beside bin.
     // Its clang drives lld as ld.lld, with GNU ld's options.
     std::error_code dir_ec;
-    tc.mingw = fs::is_directory(dir.parent_path() / mingw_dir(kTarget.arch), dir_ec);
+    tc.mingw = fs::is_directory(dir.parent_path() / mingw_dir(kHost.arch), dir_ec);
     if (tc.mingw) {
         tc.lld_beside = (dir / "ld.lld.exe").string();
         tc.lld_path = plain_file(tc.lld_beside) ? tc.lld_beside : "";
@@ -497,15 +521,21 @@ bool find_toolchain(Toolchain& tc, std::string& error) {
     }
 #else
     // clang's -fuse-ld=lld starts lld as ld64.lld for macOS, with ld64's options (CLX-279).
-    const char* lld_name = kTarget.os == Os::macos ? "ld64.lld" : "ld.lld";
+    const char* lld_name = kHost.os == Os::macos ? "ld64.lld" : "ld.lld";
     tc.lld_beside = (dir / lld_name).string();
     tc.lld_path = plain_file(tc.lld_beside) ? tc.lld_beside : find_on_path(lld_name);
-    if (kTarget.os == Os::macos) {
+    if (kHost.os == Os::macos) {
         for (const char* name : {"dsymutil", "llvm-dsymutil"}) {
             if (tc.dsymutil.empty() && plain_file(dir / name)) tc.dsymutil = (dir / name).string();
         }
         if (tc.dsymutil.empty()) tc.dsymutil = find_on_path("dsymutil");
         tc.sdk = find_sdk();
+        // For iOS, Xcode's SDK for it instead, in every key, so builds against two SDKs, from
+        // two Xcodes, never share a file (CLX-408).
+        if (tc.target.os == Os::ios) {
+            tc.sdk = find_ios_sdk(tc.target.simulator, error);
+            if (tc.sdk.empty()) return false;
+        }
     }
 #endif
     tc.lld = !tc.lld_path.empty();
@@ -514,11 +544,12 @@ bool find_toolchain(Toolchain& tc, std::string& error) {
     auto time = static_cast<long long>(fs::last_write_time(clang_path, ec).time_since_epoch().count());
     // The target too, so an x64 calx and an Arm64 one sharing a cache, as on Windows on Arm, never
     // take each other's files, whatever flags they pass.
-    tc.identity = target_name(kTarget) + "|" + tc.clang + "|" + std::to_string(size) + "|" + std::to_string(time);
+    tc.identity = target_name(tc.target) + "|" + tc.clang + "|" + std::to_string(size) + "|" + std::to_string(time);
     // The toolchain a release carries names itself in VERSION beside its bin/, since its files
     // come with the archive's fixed dates: a release with another clang compiles everything again.
     std::string version;
     if (read_file((dir.parent_path() / "VERSION").string(), version)) tc.identity += "|" + version;
+    if (tc.target.os == Os::ios) tc.identity += "|" + tc.sdk;
 
     tc.cache = cache_dir();
     make_dirs(fs::path(tc.cache) / "obj");
@@ -1460,7 +1491,7 @@ std::string library_attach_c(const RuntimeApi& api) {
 
 }  // namespace
 
-const char* library_suffix() { return kLib; }
+const char* library_suffix(Target t) { return lib_suffix(t.os); }
 
 namespace {
 
@@ -1616,7 +1647,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
                           bool verbose, const std::string& cpu) {
     BuildResult r;
     // The processor a release build counts on, in its compile and its link, and so in every key.
-    const std::string march = cpu.empty() ? std::string(release_cpu_flag(kTarget)) : cpu;
+    const std::string march = cpu.empty() ? std::string(release_cpu_flag(tc.target)) : cpu;
     bool library = kind == BuildKind::library;
     // CLX-334: a static library carries its own runtime, as a program does, and is archived rather
     // than linked; its host links it, with its own linker.
@@ -1673,8 +1704,11 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // DWARF 5, which the runtime's trace reader takes, where clang for macOS may write 4; set as
     // the default, since -gdwarf-5 would also make the debug info full. The SDK, which LLVM's own
     // clang needs told, and the first macOS for Apple Silicon, 11, so a program runs on every one.
+    // For iOS, clang's target names the oldest iOS it runs on, kIosMin, and the SDK is Xcode's
+    // for an iPhone or the simulator (CLX-408).
     flags.push_back("-fdebug-default-version=5");
-    flags.push_back("-mmacosx-version-min=11.0");
+    if (tc.target.os == Os::ios) flags.push_back(clang_target_flag(tc.target));
+    else flags.push_back("-mmacosx-version-min=11.0");
     if (!tc.sdk.empty()) {
         flags.push_back("-isysroot");
         flags.push_back(tc.sdk);
@@ -1693,7 +1727,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // target and Visual Studio's own projects do, so it's built for Visual Studio's C runtime even
     // by llvm-mingw's clang, whose own objects that linker can't take, and with its headers. It's
     // the DLL C runtime in both modes, /MD, which such a host links by default (CLX-334).
-    if (tc.mingw && staticlib) flags.push_back(msvc_target_flag(kTarget.arch));
+    if (tc.mingw && staticlib) flags.push_back(msvc_target_flag(kHost.arch));
     bool dll_crt = staticlib || (!tc.mingw && mode == BuildMode::debug);
 #endif
     if (mode == BuildMode::debug) {
@@ -1940,7 +1974,8 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // ld64 drops what nothing reaches with -dead_strip, as ld.lld does with --gc-sections, and the
     // C library holds the math library (CLX-279). libSystem's stubs come from the SDK.
     link_flags.push_back("-Wl,-dead_strip");
-    link_flags.push_back("-mmacosx-version-min=11.0");
+    if (tc.target.os == Os::ios) link_flags.push_back(clang_target_flag(tc.target));
+    else link_flags.push_back("-mmacosx-version-min=11.0");
     if (!tc.sdk.empty()) {
         link_flags.push_back("-isysroot");
         link_flags.push_back(tc.sdk);
@@ -1995,7 +2030,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     std::string link_text;
     for (const std::string& f : link_flags) link_text += f + " ";
     std::string exe_key = hash_hex({"exe", all_keys, link_text, staticlib ? "staticlib" : "", tc.identity});
-    const char* suffix = staticlib ? staticlib_suffix() : library ? kLib : kExe;
+    const char* suffix = staticlib ? staticlib_suffix(tc.target) : library ? library_suffix(tc.target) : exe_suffix(tc.target.os);
     r.exe = (fs::path(tc.cache) / "bin" / (exe_key + suffix)).string();
     if (file_exists(r.exe)) {
         touch(r.exe);

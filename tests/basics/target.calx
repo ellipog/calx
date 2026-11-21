@@ -1,0 +1,104 @@
+// `--target` names the system a build is for (CLX-409). Every calx builds for the one it runs on,
+// by its Calx name or the triple Rust gives it, and a Mac builds static libraries for iOS too,
+// for an iPhone and for the simulator, with Xcode's SDKs. A target that isn't one, or one this
+// calx can't build for from where it runs, is an error before anything is built, and so is
+// running what's built for another system.
+import std.env.{arch, os, variable}
+import std.fs.{remove_dir_all, temp_dir, write_text, separator}
+import std.process.{Command}
+
+struct Ran {
+    out: String,
+    status: String,
+    err: String,
+}
+
+fn run(exe: String, args: List<String>, dir: String) -> Ran {
+    match Command.new(exe).args(args).dir(dir).output() {
+        ok(o) => return Ran { out: "{o.text()}".trim_end(), status: "{o.status}", err: o.error_text().trim_end() },
+        err(e) => return Ran { out: String(), status: "{e}", err: String() },
+    }
+}
+
+// The first line of a calx's errors, and how it ended.
+fn refused(calx: String, args: List<String>, dir: String) -> String {
+    let r = run(calx, args, dir)
+    let lines = r.err.lines()
+    return "{if lines.is_empty() { String() } else { lines[0].copy() }} [{r.status}]"
+}
+
+// The triple Rust gives the system this runs on.
+fn rust_triple() -> String {
+    let a = arch()
+    if os() == "windows" {
+        return "{a}-pc-windows-msvc"
+    }
+    if os() == "macos" {
+        return "{a}-apple-darwin"
+    }
+    return "{a}-unknown-linux-gnu"
+}
+
+fn main() {
+    let calx = variable("CALX") ?? String("calx")
+    let dir = temp_dir()!
+    let s = separator()
+    let exe = if os() == "windows" { ".exe" } else { "" }
+    write_text("{dir}{s}hello.calx", "fn main() \{\n    println(\"hello from {arch()}-{os()}\")\n\}\n")!
+    write_text("{dir}{s}core.calx", "@export_c\nfn core_add(a: i32, b: i32) -> i32 \{\n    return a + b\n\}\n")!
+
+    // The host, by either name, is what a build without --target makes.
+    let host = "{arch()}-{os()}"
+    var same = true
+    for name in [host.copy(), rust_triple()] {
+        let built = run(calx.copy(), ["build", "--target", name.copy(), "hello.calx", "-o", "hello{exe}"], dir.copy())
+        let ran = run("{dir}{s}hello{exe}", [], dir.copy())
+        if built.status != "exited with status 0" or ran.out != "hello from {host}" {
+            println("{name}: {built.status} {built.err} {ran.status} {ran.out}")
+            same = false
+        }
+    }
+    let ran = run(calx.copy(), ["run", "--target={host}", "hello.calx"], dir.copy())
+    println("{same} {ran.out == "hello from {host}"}")    // out: true true
+
+    // A name that isn't a target, and none at all.
+    println(refused(calx.copy(), ["build", "--target", "riscv64-linux", "hello.calx"], dir.copy()))
+    // out: calx: `riscv64-linux` isn't a target; the targets are x86_64-windows, aarch64-windows, x86_64-linux, aarch64-linux, aarch64-macos, aarch64-ios and aarch64-ios-sim, or the triples Rust gives them, such as aarch64-apple-ios [exited with status 2]
+    println(refused(calx.copy(), ["build", "hello.calx", "--target"], dir.copy()))
+    // out: calx: --target takes the system to build for, such as `--target aarch64-ios` [exited with status 2]
+
+    // Another system this calx can't build for from here, here Linux on the other processor.
+    let other = if arch() == "x86_64" { "aarch64-linux" } else { "x86_64-linux" }
+    let elsewhere = refused(calx.copy(), ["build", "--target", String(other), "hello.calx"], dir.copy())
+    println("{elsewhere.contains("this calx runs on {host}")} {elsewhere.contains("building for {other} from here isn't supported yet")}")    // out: true true
+
+    // iOS: a Mac builds a static library for an iPhone and for the simulator, each its own
+    // platform's objects, but runs neither, nor builds a library for a program to open there.
+    // Without Xcode it says where the SDK comes from, and elsewhere that it takes a Mac.
+    var ios: List<String> = []
+    for name in ["aarch64-apple-ios", "aarch64-ios-sim"] {
+        let out = "out-{name}{s}libcore.a"
+        let r = run(calx.copy(), ["build", "--staticlib", "--target", String(name), "core.calx", "-o", out.copy()], dir.copy())
+        if os() != "macos" {
+            ios.push("{r.err.contains("building for aarch64-ios") and r.err.contains("so build on a Mac")}")
+        } else if r.status != "exited with status 0" {
+            ios.push("{r.err.contains("can't find the SDK for") and r.err.contains("It comes with Xcode")}")
+        } else {
+            // The archive's objects say which platform they're for: 2 for an iPhone, 7 for the
+            // simulator, with the oldest iOS they run on.
+            let platform = if name == "aarch64-ios-sim" { "7" } else { "2" }
+            let loads = run("otool", ["-l", out.copy()], dir.copy()).out
+            ios.push("{loads.contains("platform {platform}") and loads.contains("minos 18.0")}")
+        }
+    }
+    println(ios.join(" "))    // out: true true
+    let run_ios = refused(calx.copy(), ["run", "--target", "aarch64-ios-sim", "hello.calx"], dir.copy())
+    let lib_ios = refused(calx.copy(), ["build", "--lib", "--target", "aarch64-ios", "core.calx"], dir.copy())
+    if os() == "macos" {
+        println("{run_ios.contains("a program built for aarch64-ios-sim doesn't run on this macOS")} {lib_ios.contains("build a static library with `--staticlib`")}")
+    } else {
+        println("{run_ios.contains("isn't supported yet")} {lib_ios.contains("isn't supported yet")}")
+    }
+    // out: true true
+    remove_dir_all(dir)!
+}

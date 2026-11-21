@@ -13,17 +13,17 @@ namespace calx {
 
 namespace fs = std::filesystem;
 
-const char* staticlib_suffix() { return kTarget.os == Os::windows ? ".lib" : ".a"; }
+const char* staticlib_suffix(Target t) { return t.os == Os::windows ? ".lib" : ".a"; }
 
-std::string staticlib_name(const std::string& stem) {
-    return kTarget.os == Os::windows ? stem + ".lib" : "lib" + stem + ".a";
+std::string staticlib_name(Target t, const std::string& stem) {
+    return t.os == Os::windows ? stem + ".lib" : "lib" + stem + ".a";
 }
 
 namespace {
 
 // `name`, with `.exe` on Windows, beside clang, or else on PATH, or "".
 std::string tool(const Toolchain& tc, const std::string& name) {
-    std::string file = name + exe_suffix(kTarget.os);
+    std::string file = name + exe_suffix(kHost.os);
     fs::path beside = fs::path(tc.clang).parent_path() / file;
     std::error_code ec;
     if (fs::is_regular_file(beside, ec)) return beside.string();
@@ -54,7 +54,7 @@ bool archive_objects(const Toolchain& tc, const std::vector<std::string>& object
     std::vector<std::string> head;  // the archiver and its options, before the objects
     bool windows_style = false;     // it takes `/out:`, and a response file of the objects
     std::error_code ec;
-    if (kTarget.os == Os::windows) {
+    if (kHost.os == Os::windows) {
         // llvm-lib, or lld as lld-link, which is llvm-lib when its first argument is `/lib`, as
         // the toolchain a release carries has it, or Visual Studio's own lib.exe. Each writes an
         // archive in Visual Studio's format, with the symbol table its linker reads.
@@ -68,7 +68,7 @@ bool archive_objects(const Toolchain& tc, const std::vector<std::string>& object
             head = {ms, "/nologo"};
         }
         windows_style = !head.empty();
-    } else if (kTarget.os == Os::macos) {
+    } else if (kHost.os == Os::macos) {
         // libtool, Apple's way to make one, with the table of contents ld64 wants; or llvm-ar.
         if (std::string lt = which("libtool"); !lt.empty() && fs::path(lt).parent_path() == "/usr/bin") {
             head = {lt, "-static", "-no_warning_for_no_symbols", "-o", output};
@@ -82,8 +82,8 @@ bool archive_objects(const Toolchain& tc, const std::vector<std::string>& object
     }
     if (head.empty()) {
         std::fprintf(stderr, "calx: can't find a program to make a static library with: %s\n",
-                     kTarget.os == Os::windows ? "it takes llvm-lib or lld-link beside clang or on PATH, or Visual Studio's lib.exe"
-                     : kTarget.os == Os::macos ? "it takes libtool, from Apple's Command Line Tools (`xcode-select --install`)"
+                     kHost.os == Os::windows ? "it takes llvm-lib or lld-link beside clang or on PATH, or Visual Studio's lib.exe"
+                     : kHost.os == Os::macos ? "it takes libtool, from Apple's Command Line Tools (`xcode-select --install`)"
                                                : "it takes ar, from binutils, or llvm-ar beside clang");
         return false;
     }

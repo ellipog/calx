@@ -51,7 +51,7 @@ void print_version() {
     // In a terminal, beside the mark, with where this calx is.
     const term::Caps& c = term::out();
     if (c.color) {
-        std::string platform = target_label(kTarget);
+        std::string platform = target_label(kHost);
         std::string built = CALX_COMMIT[0] ? std::string(CALX_COMMIT) + ", " + CALX_DATE : "built from source";
         std::printf("\n%s\n", term::beside_mark(c, {"", "", term::bold(c, "calx ") + term::accent(c, CALX_VERSION),
                                                     term::dim(c, built + " \xC2\xB7 " + platform),
@@ -104,6 +104,7 @@ const std::vector<HelpGroup>& help_groups() {
         {"options",
          {{"--release", "", "optimize; the default, a debug build, builds fastest"},
           {"--cpu", "LEVEL", "the processor a release build counts on: `x86-64-v2` for one without AVX2"},
+          {"--target", "TARGET", "the system to build for, such as `aarch64-ios` from a Mac; the default is this one"},
           {"--lib", "", "build a library, which a program opens while it runs"},
           {"--staticlib", "", "build a static library and its C header, for a C, C++ or Rust program to link"},
           {"-o", "PATH", "where build and emit-c write"},
@@ -192,6 +193,8 @@ int usage(bool asked = false) {
         "  --cpu LEVEL the processor a release build counts on: x86-64, x86-64-v2, x86-64-v3 (the\n"
         "            default) or x86-64-v4 on x86; armv8-a or armv8.2-a (the default) on Arm\n"
         "            Linux and Windows. CALX_CPU says the same\n"
+        "  --target TARGET\n"
+        "            the system to build for: this one, or from a Mac aarch64-ios and aarch64-ios-sim\n"
         "  --lib       build a library, which a program opens while it runs\n"
         "  --staticlib build a static library, and its C header, for a C, C++ or Rust program to link\n"
         "  -o PATH     where build and emit-c write\n"
@@ -212,6 +215,7 @@ struct Options {
     BuildMode mode = BuildMode::debug;
     std::string cpu;    // `--cpu`: the processor level a release build counts on, or "" (CLX-381)
     bool cpu_given = false;
+    Target target = kHost;  // `--target`: what to build for, the host unless it names another (CLX-409)
     bool library = false;
     bool staticlib = false;  // `--staticlib`, for a host that isn't Calx (CLX-334)
     bool timings = false;
@@ -234,10 +238,30 @@ int cpu_option(int argc, char** argv, int& i, Options& opt) {
     else opt.cpu = i + 1 < argc ? argv[++i] : "";
     if (opt.cpu.empty()) {
         std::fprintf(stderr, "calx: --cpu takes the processor level a release build counts on, such as `--cpu %s`\n",
-                     kTarget.arch == Arch::x86_64 ? "x86-64-v2" : cpu_levels(kTarget)[0]);
+                     kHost.arch == Arch::x86_64 ? "x86-64-v2" : cpu_levels(kHost)[0]);
         return 2;
     }
     opt.cpu_given = true;
+    return 1;
+}
+
+// `--target TARGET` or `--target=TARGET` at `argv[i]`, its target put in `opt` (CLX-409): 1 if it
+// was one, 0 if it's something else, and 2, the status to stop with, if it names no target, or
+// one this calx can't build for.
+int target_option(int argc, char** argv, int& i, Options& opt) {
+    std::string a = argv[i], name;
+    if (a.rfind("--target=", 0) == 0) name = a.substr(9);
+    else if (a != "--target") return 0;
+    else name = i + 1 < argc ? argv[++i] : "";
+    if (name.empty()) {
+        std::fprintf(stderr, "calx: --target takes the system to build for, such as `--target aarch64-ios`\n");
+        return 2;
+    }
+    std::string why;
+    if (!parse_target(name, opt.target, why) || !can_build(kHost, opt.target, why)) {
+        std::fprintf(stderr, "calx: %s\n", why.c_str());
+        return 2;
+    }
     return 1;
 }
 
@@ -759,12 +783,14 @@ std::string record_for(const Options& opt) {
                                     opt.line_directives ? "lines" : "",
                                     opt.mode == BuildMode::release ? "release" : "debug",
                                     opt.cpu,
+                                    target_name(opt.target),
                                     home,
                                     env("PATH"),
                                     env("CALX_CC"),
                                     env("CALX_PROFILE"),
                                     env("CALX_LTO"),
-                                    env("CALX_CPU")};
+                                    env("CALX_CPU"),
+                                    env("DEVELOPER_DIR")};  // which Xcode, whose SDKs a build for iOS takes
     std::vector<std::string_view> parts(key.begin(), key.end());
     return record_path(cache_dir(), parts);
 }
@@ -789,9 +815,9 @@ int finish(const Options& opt, bool serve, const std::string& exe, const std::ve
         if (out.empty()) {
             out = std::filesystem::path(opt.input).stem().string();
             if (opt.library) {
-                out += library_suffix();
+                out += library_suffix(opt.target);
             } else if (opt.staticlib) {
-                out = staticlib_name(out);
+                out = staticlib_name(opt.target, out);
             } else {
 #ifdef _WIN32
                 out += ".exe";
@@ -920,6 +946,8 @@ int main(int argc, char** argv) {
             opt.stdin_text = true;
         } else if (int got = cpu_option(argc, argv, i, opt)) {
             if (got == 2) return 2;
+        } else if (int got = target_option(argc, argv, i, opt)) {
+            if (got == 2) return 2;
         } else if (a == "-o" && i + 1 < argc) {
             opt.output = argv[++i];
         } else if (!a.empty() && a[0] == '-' && !(opt.command == "eval" && opt.input.empty())) {
@@ -949,7 +977,7 @@ int main(int argc, char** argv) {
     std::string march;
     if (!opt.cpu.empty()) {
         std::string why;
-        march = cpu_flag(kTarget, opt.cpu, why);
+        march = cpu_flag(opt.target, opt.cpu, why);
         if (march.empty()) {
             std::fprintf(stderr, "calx: %s%s\n", why.c_str(), opt.cpu_given ? "" : " (from CALX_CPU)");
             return 2;
@@ -967,6 +995,20 @@ int main(int argc, char** argv) {
     if (opt.staticlib && opt.command != "build" && opt.command != "check" && opt.command != "emit-c") {
         std::fprintf(stderr, "calx: a static library doesn't run by itself; build it with `calx build --staticlib`, and link it "
                              "into a program\n");
+        return 2;
+    }
+    // CLX-409: what's built for another system runs there, not here, so it's built, or checked.
+    if (opt.target != kHost && opt.command != "build" && opt.command != "check" && opt.command != "emit-c") {
+        std::fprintf(stderr, "calx: a program built for %s doesn't run on this %s; build it with `calx build --target %s`%s\n",
+                     target_name(opt.target).c_str(), target_label(kHost).c_str(), target_name(opt.target).c_str(),
+                     opt.target.os == Os::ios ? ", or `--staticlib` for an app to link" : "");
+        return 2;
+    }
+    // iOS opens no library a program didn't come with, so a program there has every one linked in:
+    // a static library, for the app's Xcode project to link (CLX-408).
+    if (opt.library && opt.target.os == Os::ios) {
+        std::fprintf(stderr, "calx: iOS doesn't let a program open a library it didn't come with; build a static library with "
+                             "`--staticlib` and link it into the app\n");
         return 2;
     }
 
@@ -1108,6 +1150,7 @@ int main(int argc, char** argv) {
     }
 
     Toolchain tc;
+    tc.target = opt.target;
     std::string error;
     if (!find_toolchain(tc, error)) {
         std::fprintf(stderr, "calx: %s\n", error.c_str());
