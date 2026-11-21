@@ -1,0 +1,51 @@
+// std.signal's thread starts whatever the program keeps in thread-local storage (CLX-417). glibc
+// carves each thread's static TLS out of the thread's stack, and std.fs's copy kept a 64 KB
+// buffer there, so a program that copies files and handles signals, as a server's installer and
+// the server do, couldn't start the 64 KB thread that std.signal hears from its handler on. This
+// one copies a file, imports std.time, whose zones are a 289 KB constant, and handles signals,
+// and on Linux it reads its own ELF program headers to check its TLS is small: nothing in the
+// standard library is kept for each thread unless it's asked to be.
+import std.bytes.{u16_le, u32_le, u64_le}
+import std.env.{os}
+import std.fs
+import std.process.{current_exe}
+import std.signal.{Signal, handle, raise, wait}
+import std.time.{TimeZone}
+
+// The size in memory of the program's TLS segment, PT_TLS, from its ELF program headers.
+fn tls_size(elf: List<u8>) -> u64 {
+    let headers = usize.wrap(u64_le(elf, 0x20))
+    let size = usize(u16_le(elf, 0x36))
+    let count = usize(u16_le(elf, 0x38))
+    var i: usize = 0
+    while i < count {
+        let at = headers + i * size
+        if u32_le(elf, at) == 7 {
+            return u64_le(elf, at + 0x28)
+        }
+        i += 1
+    }
+    return 0
+}
+
+fn main() {
+    let dir = fs.temp_dir()!
+    fs.write("{dir}/a", [1, 2, 3])!
+    fs.copy("{dir}/a", "{dir}/b")!
+    println("{fs.read("{dir}/b")!}")    // out: [1, 2, 3]
+    fs.remove_dir_all(dir)!
+
+    let oslo = TimeZone.named("Europe/Oslo")
+    println("{oslo != none}")    // out: true
+
+    handle()
+    println("{raise(Signal.Terminate)} {wait(10000) ?? Signal.Hangup}")    // out: true terminate
+
+    // glibc wants 16 KB of a thread's stack to spare beside its TLS.
+    if os() == "linux" {
+        let tls = tls_size(fs.read(current_exe())!)
+        println("{tls < 16384}")    // out: true
+    } else {
+        println("true")
+    }
+}
