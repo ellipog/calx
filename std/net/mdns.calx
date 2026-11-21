@@ -697,6 +697,10 @@ struct Registration {
     // The name it was last announced with, or "" before it was: a name that differs once it's
     // probed again is said with `Renamed`.
     announced: String
+    // Its SRV and TXT records as they were before `update` changed them, until `was_until`: a
+    // response of its own sent before the change, heard after it, isn't another host's (§9).
+    was: List<String>
+    was_until: u64
 }
 
 // A browse for a type's services.
@@ -893,6 +897,8 @@ impl Mdns {
             conflict: false,
             announced: String(),
             renames: 0,
+            was: List<String>(),
+            was_until: 0,
         })
         loop {
             let at = self.reg_index(id) ?? self.regs.len()
@@ -921,6 +927,21 @@ impl Mdns {
         let instance = Mdns.instance_of(info.name, kind)
         for i in 0..self.regs.len() {
             if key(Mdns.instance_of(self.regs[i].info.name, self.regs[i].kind)) == key(instance) {
+                // What it said before may still be on its way, to this program too: it isn't a
+                // conflict when it comes. Answers not sent yet go with what's new instead.
+                let now = self.now()
+                let before = Mdns.service_records(self.regs[i])
+                if now >= self.regs[i].was_until {
+                    self.regs[i].was = List<String>()
+                }
+                self.regs[i].was.push(record_key(before[2]))
+                self.regs[i].was.push(record_key(before[3]))
+                self.regs[i].was_until = now + 3000
+                let ik = key(instance)
+                for p in mut self.pending {
+                    p.answers.retain(|r| key(r.name) != ik)
+                    p.additional.retain(|r| key(r.name) != ik)
+                }
                 self.regs[i].info.port = info.port
                 self.regs[i].info.properties = info.properties.copy()
                 self.regs[i].info.addresses = info.addresses.copy()
@@ -1393,8 +1414,10 @@ impl Mdns {
                     if key(r.name) != instance_key or (r.kind != T_SRV and r.kind != T_TXT) or r.ttl == 0 {
                         continue
                     }
-                    let mine = (r.kind == T_SRV and record_key(r) == record_key(ours[2])) or (r.kind == T_TXT and record_key(r) == record_key(ours[3]))
-                    clash = clash or not mine
+                    let rk = record_key(r)
+                    let mine = (r.kind == T_SRV and rk == record_key(ours[2])) or (r.kind == T_TXT and rk == record_key(ours[3]))
+                    let was_mine = now < self.regs[i].was_until and self.regs[i].was.contains(rk)
+                    clash = clash or not (mine or was_mine)
                 }
             }
             if not clash {

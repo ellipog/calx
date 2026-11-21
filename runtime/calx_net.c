@@ -2148,6 +2148,17 @@ static cx_u32 udp_open(net* n, const cx_u8* host, cx_usize len, cx_u16 port, int
 #endif
     (void)yes;
     if (family == AF_INET6) setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, (const char*)&flag, sizeof flag);
+    /* Room for the biggest datagram, and for a burst of them: macOS sends none bigger than the
+     * socket's send buffer, 9216 bytes to start with, and Windows starts with 64 KiB each way. */
+    int room = 256 * 1024;
+    int names[2] = {SO_SNDBUF, SO_RCVBUF};
+    for (int i = 0; i < 2; i++) {
+        int have = 0;
+        net_socklen have_len = sizeof have;
+        if (getsockopt(fd, SOL_SOCKET, names[i], (char*)&have, &have_len) != 0 || have < room) {
+            setsockopt(fd, SOL_SOCKET, names[i], (const char*)&room, sizeof room);
+        }
+    }
 #if defined(__linux__)
     /* Linux gives a socket the datagrams of every group any socket on the machine joined, unless
      * it's told not to; other systems give it only its own groups'. */
@@ -2344,14 +2355,24 @@ static int udp_join(net_slot* s, const cx_u8* group, cx_u32 family, cx_u32 index
     m.imr_interface.s_addr = htonl(index);
     r = setsockopt(fd, IPPROTO_IP, leave ? IP_DROP_MEMBERSHIP : IP_ADD_MEMBERSHIP, (const char*)&m, sizeof m);
 #elif defined(__APPLE__)
-    struct group_req g;
-    memset(&g, 0, sizeof g);
-    g.gr_interface = index;
-    struct sockaddr_in* ga = (struct sockaddr_in*)&g.gr_group;
-    ga->sin_family = AF_INET;
-    ga->sin_len = sizeof *ga;
-    memcpy(&ga->sin_addr, group, 4);
-    r = setsockopt(fd, IPPROTO_IP, leave ? MCAST_LEAVE_GROUP : MCAST_JOIN_GROUP, &g, sizeof g);
+    if (index == 0) {
+        /* MCAST_JOIN_GROUP refuses interface 0 there, as FreeBSD's does; this one lets the routes
+         * choose it. */
+        struct ip_mreq m;
+        memset(&m, 0, sizeof m);
+        memcpy(&m.imr_multiaddr, group, 4);
+        m.imr_interface.s_addr = htonl(INADDR_ANY);
+        r = setsockopt(fd, IPPROTO_IP, leave ? IP_DROP_MEMBERSHIP : IP_ADD_MEMBERSHIP, &m, sizeof m);
+    } else {
+        struct group_req g;
+        memset(&g, 0, sizeof g);
+        g.gr_interface = index;
+        struct sockaddr_in* ga = (struct sockaddr_in*)&g.gr_group;
+        ga->sin_family = AF_INET;
+        ga->sin_len = sizeof *ga;
+        memcpy(&ga->sin_addr, group, 4);
+        r = setsockopt(fd, IPPROTO_IP, leave ? MCAST_LEAVE_GROUP : MCAST_JOIN_GROUP, &g, sizeof g);
+    }
 #else
     struct ip_mreqn m;
     memset(&m, 0, sizeof m);
