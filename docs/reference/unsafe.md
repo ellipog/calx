@@ -363,5 +363,5 @@ fn main() {
 - A pointer is `T*` or `T const*`, and its methods are plain C: `*p`, `*p = v`, `p + n`, `p == 0`, `(U*)p`.
 - A C function is declared in each C file that calls it, under the name `cx_c_name`, with an asm label giving the linker its real name: `extern cx_i32 cx_c_abs(cx_i32) __asm__(CX_SYMBOL("abs"));`. So a declaration never meets one a header makes, and two declarations of the same function, which must agree, are the same C.
 - An `extern "C" fn` type is a C function pointer, and calling one is `f(x)`.
-- An `@export_c` function is its Calx function, called by a small C function under the C name, which checks that the runtime has started and calls it. In a static library that C function passes its arguments in a struct to `cx_lib_call`, which calls the Calx function from a place a panic comes back to, and returns `on_panic`'s value if it does.
+- An `@export_c` function is its Calx function, called by a small C function under the C name, which checks that the runtime has started and calls it. In a static library that C function passes its arguments in a struct to `cx_staticlib_call`, which calls the Calx function from a place a panic comes back to, and returns `on_panic`'s value if it does.
 - `unsafe` adds nothing to the C. It's a promise checked by the reader, not by the program.

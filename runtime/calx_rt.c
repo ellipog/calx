@@ -1000,11 +1000,11 @@ static _Thread_local cx_u32 lib_my_run;
 static int lib_ever_panicked;
 /* Set by calx_thread.c once a thread has waited on a queue: wakes every thread waiting on one,
  * so a thread of a run that has stopped sees it has. */
-void (*cx_lib_wake)(void);
+void (*cx_staticlib_wake)(void);
 static void lib_tell_threads(void) {
     __atomic_store_n(&lib_stopped, __atomic_load_n(&lib_runs, __ATOMIC_ACQUIRE), __ATOMIC_SEQ_CST);
     /* After the store, so a thread about to wait either sees it or is woken (see calx_thread.c). */
-    void (*wake)(void) = __atomic_load_n(&cx_lib_wake, __ATOMIC_SEQ_CST);
+    void (*wake)(void) = __atomic_load_n(&cx_staticlib_wake, __ATOMIC_SEQ_CST);
     if (wake) wake();
 }
 static void lib_forget_panic(void);
@@ -3410,7 +3410,7 @@ cx_bool cx_thread_stopping(void) {
  * A program ends when it panics. A static library is part of its host's process, so a panic in
  * it comes back to the host instead, as a panic in a Rust library does to a host that catches it:
  *
- * - Each `@export_c` function calls its Calx function through `cx_lib_call`, which marks the
+ * - Each `@export_c` function calls its Calx function through `cx_staticlib_call`, which marks the
  *   place to come back to with `setjmp`. A panic writes its message and trace into a `lib_capture`
  *   rather than standard error, gives them to the host, and `longjmp`s back there, so the call
  *   returns to C with its `on_panic` value, or its result type's zero.
@@ -3646,7 +3646,7 @@ static int lib_run(const char* name, void (*run)(void*), void* args) {
     return 1;
 }
 
-int cx_lib_call(const char* name, void (*run)(void*), void* args) {
+int cx_staticlib_call(const char* name, void (*run)(void*), void* args) {
     int state = __atomic_load_n(&rt_state, __ATOMIC_ACQUIRE);
     if (__builtin_expect(state != 1, 0)) {
         /* Stopped by a panic: refused, quietly, as the host knows why. */
@@ -3662,16 +3662,16 @@ int cx_lib_call(const char* name, void (*run)(void*), void* args) {
 
 /* For calx_thread.c: the run a thread being started works for, and a thread of the library's,
  * started on `run(task)` for run `run_of`, with a place to come back to if it panics. */
-cx_u32 cx_lib_run_now(void) { return lib_my_run ? lib_my_run : __atomic_load_n(&lib_runs, __ATOMIC_ACQUIRE); }
+cx_u32 cx_staticlib_run_now(void) { return lib_my_run ? lib_my_run : __atomic_load_n(&lib_runs, __ATOMIC_ACQUIRE); }
 
-void cx_lib_thread(void (*run)(void*), void* task, cx_u32 run_of) {
+void cx_staticlib_thread(void (*run)(void*), void* task, cx_u32 run_of) {
     lib_my_run = run_of;
     (void)lib_run(NULL, run, task);
     lib_my_run = 0;
 }
 
 /* For calx_thread.c: whether a thread waiting on a queue should stop waiting. */
-int cx_lib_told(void) {
+int cx_staticlib_told(void) {
     cx_u32 run = lib_my_run ? lib_my_run : __atomic_load_n(&lib_runs, __ATOMIC_ACQUIRE);
     return run <= __atomic_load_n(&lib_stopped, __ATOMIC_SEQ_CST);
 }

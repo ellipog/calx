@@ -100,7 +100,7 @@ CX_FN(void, cx_foreign_threads, (void));
  * `run(args)`, with a panic in it caught and given to the host, rather than ending its process.
  * 1 if `run` returned, and 0 if it panicked, or if an earlier panic has stopped the library, when
  * `run` isn't called at all (CLX-407). */
-int cx_lib_call(const char* name, void (*run)(void*), void* args);
+int cx_staticlib_call(const char* name, void (*run)(void*), void* args);
 #endif
 /* An `@export_c` function's C name is for the linker to find, outside a static library too: a
  * DLL's or a shared library's export when it's built as one (CX_CDYLIB), and otherwise just

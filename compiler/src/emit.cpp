@@ -503,10 +503,12 @@ private:
                (unit ? call + ";\n" : "return " + call + ";\n") + "}\n";
     }
 
-    // CLX-407: in a static library, the Calx function runs inside `cx_lib_call`, which catches a
-    // panic in it and gives 0, so the call returns to C with `on_panic`'s value, or the result
-    // type's zero, rather than ending the host's process. The arguments, and the result, go
-    // through a struct of the call's own, since `cx_lib_call` takes one pointer.
+    // CLX-407: in a static library, the Calx function runs inside `cx_staticlib_call`, which
+    // catches a panic in it and gives 0, so the call returns to C with `on_panic`'s value, or the
+    // result type's zero, rather than ending the host's process. The arguments, and the result, go
+    // through a struct of the call's own, since `cx_staticlib_call` takes one pointer. Its name
+    // mustn't start with `cx_lib_`: C that names one of those opens libraries (D123), and the
+    // build links every part of the runtime for it.
     std::string export_c_caught(const Item* f, bool unit) const {
         std::string n(f->export_name);
         std::string args = "cx_xa_" + n, thunk = "cx_xt_" + n;
@@ -530,7 +532,7 @@ private:
         s += export_c_head(f) + " {\n";
         s += fields.empty() ? "    void* cx_x = 0;\n" : "    " + args + " cx_x = {" + init + "};\n";
         std::string failed = unit ? "return;" : "return " + export_c_on_panic(f) + ";";
-        s += "    if (!cx_lib_call(" + c_string_literal(f->export_name) + ", " + thunk + ", " + (fields.empty() ? "cx_x" : "&cx_x") +
+        s += "    if (!cx_staticlib_call(" + c_string_literal(f->export_name) + ", " + thunk + ", " + (fields.empty() ? "cx_x" : "&cx_x") +
              ")) " + failed + "\n";
         if (!unit) s += "    return cx_x.r;\n";
         return s + "}\n";

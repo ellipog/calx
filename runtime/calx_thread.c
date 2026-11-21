@@ -33,10 +33,10 @@ void cx_service_enter(void);
 void cx_service_leave(void);
 #ifdef CX_STATICLIB
 /* In calx_rt.c, for a static library (CLX-407). */
-cx_u32 cx_lib_run_now(void);
-void cx_lib_thread(void (*run)(void*), void* task, cx_u32 run_of);
-int cx_lib_told(void);
-extern void (*cx_lib_wake)(void);
+cx_u32 cx_staticlib_run_now(void);
+void cx_staticlib_thread(void (*run)(void*), void* task, cx_u32 run_of);
+int cx_staticlib_told(void);
+extern void (*cx_staticlib_wake)(void);
 #endif
 
 struct cx_queue {
@@ -108,7 +108,7 @@ static cx_u64 now_ns(void) {
  * so it's counted again from the clock each time round. */
 #ifdef CX_STATICLIB
 /* A static library's thread stops waiting once the library has stopped, and gets `none`. */
-#define Q_TOLD() cx_lib_told()
+#define Q_TOLD() cx_staticlib_told()
 #else
 #define Q_TOLD() 0
 #endif
@@ -297,7 +297,7 @@ static void q_waiting(q_waiter* w, cx_queue* q) {
     if (waiters) waiters->prev = w;
     waiters = w;
     waiters_give();
-    if (!__atomic_load_n(&cx_lib_wake, __ATOMIC_SEQ_CST)) __atomic_store_n(&cx_lib_wake, q_wake_waiters, __ATOMIC_SEQ_CST);
+    if (!__atomic_load_n(&cx_staticlib_wake, __ATOMIC_SEQ_CST)) __atomic_store_n(&cx_staticlib_wake, q_wake_waiters, __ATOMIC_SEQ_CST);
 }
 
 static void q_waited(q_waiter* w) {
@@ -403,7 +403,7 @@ static void begin(thread_start* s) {
     cx_service_enter();
 #ifdef CX_STATICLIB
     /* A panic on the thread ends it here, and the host hears of it (CLX-407). */
-    cx_lib_thread(run, task, run_of);
+    cx_staticlib_thread(run, task, run_of);
 #else
     (void)run_of;
     run(task);
@@ -428,7 +428,7 @@ cx_Thread cx_thread_spawn(void (*run)(void*), void* task) {
     s->run = run;
     s->task = task;
 #ifdef CX_STATICLIB
-    s->run_of = cx_lib_run_now();
+    s->run_of = cx_staticlib_run_now();
 #else
     s->run_of = 0;
 #endif
