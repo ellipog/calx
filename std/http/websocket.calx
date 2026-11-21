@@ -1,16 +1,18 @@
 /// A WebSocket client (RFC 6455), for talking to a server that pushes messages as they happen:
-/// `ws://` and `wss://` URLs, as Python's `websockets` and `websocket-client` connect to them, on
-/// the system's own HTTP client, so TLS certificates are checked as `std.http`'s are. Each
-/// connection runs on a thread of its own, which answers pings and the server's close by itself,
-/// and keeps the messages that come until the program takes them.
+/// `ws://` and `wss://` URLs, as Python's `websockets` and `websocket-client` connect to them,
+/// with the system's own TLS, so certificates are checked as `std.http`'s are. Each connection
+/// runs on a thread of its own, which answers pings and the server's close by itself, keeps the
+/// messages that come until the program takes them, and, with `ping_interval_ms`, pings a server
+/// that has gone quiet and ends the connection if it stays quiet.
 module std.http.websocket
 
 import std.http.{Header}
 
 extern "C" {
-    fn cx_http_ws_open(url: *const u8, url_len: usize, head: *const u8, head_len: usize, timeout_ms: u32, limit: usize) -> u64
+    fn cx_http_ws_open(url: *const u8, url_len: usize, head: *const u8, head_len: usize, timeout_ms: u32, limit: usize, ping_interval_ms: u32, ping_timeout_ms: u32) -> u64
     fn cx_http_ws_state(h: u64) -> i32
     fn cx_http_ws_wait_open(h: u64) -> i32
+    fn cx_http_ws_idle_ms(h: u64) -> u64
     fn cx_http_ws_send(h: u64, op: u32, p: *const u8, n: usize) -> i32
     fn cx_http_ws_receive(h: u64, timeout_ms: u32) -> i32
     fn cx_http_ws_taken_len(h: u64) -> usize
@@ -39,7 +41,9 @@ pub enum Error {
     Connect
     /// The TLS handshake failed, or the system doesn't trust the server's certificate.
     Tls
-    /// It didn't open within the time, or the server didn't answer `close` in time.
+    /// It didn't open within the time, or the server didn't answer `close` in time, or, with
+    /// `ping_interval_ms`, nothing came from the server for `ping_timeout_ms` after a ping: the
+    /// connection is dead, as when the network went away without a word, or the server hung.
     Timeout
     /// The server answered with this status rather than switching to a WebSocket, as `404` for a
     /// path it has none at, or `403` for an origin it turns away.
@@ -172,22 +176,33 @@ fn text_of(h: u64, which: u32) -> String {
 /// `Sec-WebSocket-Protocol`. It panics if the timeout is 0, or a header's name isn't a token, its
 /// value has a line break, or it's one the handshake sets itself: Host, Connection, Upgrade,
 /// Content-Length, Transfer-Encoding, or Sec-WebSocket-Key, -Version or -Extensions.
+///
+/// With `ping_interval_ms`, the connection notices when it has died without a close, as one does
+/// when a laptop sleeps or its Wi-Fi goes: once nothing has come from the server for
+/// `ping_interval_ms`, it pings the server, and if nothing comes for `ping_timeout_ms` after the
+/// ping, it closes with 1011 and ends, and `receive` fails with `Timeout`. Anything from the
+/// server counts, its pong, its own pings or a message, so a connection is dead after
+/// `ping_interval_ms + ping_timeout_ms` with nothing from the server, and a busy one isn't
+/// pinged. It panics if `ping_interval_ms` isn't 0 and `ping_timeout_ms` is.
 @track_caller
-pub fn open(url: String, headers: List<Header> = [], timeout_ms: u32 = 30000, limit: usize = 67108864) -> WebSocket {
+pub fn open(url: String, headers: List<Header> = [], timeout_ms: u32 = 30000, limit: usize = 67108864, ping_interval_ms: u32 = 0, ping_timeout_ms: u32 = 20000) -> WebSocket {
     if timeout_ms == 0 {
         panic("a WebSocket's timeout is at least 1 ms")
     }
+    if ping_interval_ms != 0 and ping_timeout_ms == 0 {
+        panic("a WebSocket that pings waits at least 1 ms for an answer: give ping_timeout_ms")
+    }
     let head = header_lines(headers)
-    let h = unsafe { cx_http_ws_open(url.as_ptr(), url.len(), head.as_ptr(), head.len(), timeout_ms, limit) }
+    let h = unsafe { cx_http_ws_open(url.as_ptr(), url.len(), head.as_ptr(), head.len(), timeout_ms, limit, ping_interval_ms, ping_timeout_ms) }
     return WebSocket { handle: h }
 }
 
 /// Opens a WebSocket to `url` and waits until it's open, as a script wants it, as Python's
 /// `websockets.connect` does: `open`, then `wait_open`. Messages may be 64 MiB long unless
-/// `limit` says.
+/// `limit` says, and it pings the server as `open` says.
 @track_caller
-pub fn connect(url: String, headers: List<Header> = [], timeout_ms: u32 = 30000, limit: usize = 67108864) -> WebSocket ! Error {
-    let ws = open(url, headers, timeout_ms, limit)
+pub fn connect(url: String, headers: List<Header> = [], timeout_ms: u32 = 30000, limit: usize = 67108864, ping_interval_ms: u32 = 0, ping_timeout_ms: u32 = 20000) -> WebSocket ! Error {
+    let ws = open(url, headers, timeout_ms, limit, ping_interval_ms, ping_timeout_ms)
     try ws.wait_open()
     return ws
 }
@@ -196,6 +211,14 @@ impl WebSocket {
     /// Whether it's open: the handshake is done and it hasn't closed.
     pub fn is_open(self) -> bool {
         return unsafe { cx_http_ws_state(self.handle) } == 1
+    }
+
+    /// The milliseconds since anything last came from the server: a message, a ping, a pong, or
+    /// part of one, or since it opened if nothing has. 0 while it opens, or if it didn't. A
+    /// program with a rule of its own for when a connection is dead can keep it with this, as
+    /// `idle_ms() > 45000`.
+    pub fn idle_ms(self) -> u64 {
+        return unsafe { cx_http_ws_idle_ms(self.handle) }
     }
 
     /// Waits while it opens, and fails with why if it didn't, or with what it ended with if it

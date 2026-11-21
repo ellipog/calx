@@ -1057,10 +1057,14 @@ CX_FN(cx_u64, cx_http_expected, (cx_u64 h));
 /* WebSockets, behind std.http.websocket (CLX-320), in calx_http.c: a connection on a thread of its
  * own, its messages taken from a queue. `cx_http_ws_receive` gives a message's opcode, 1 for text
  * and 2 for binary, with its bytes for `cx_http_ws_taken`; 0 if none came in the time; or what the
- * connection ended with, negated. `which` is 0 for the close's reason and 1 for the protocol. */
-CX_FN(cx_u64, cx_http_ws_open, (const cx_u8* url, cx_usize url_len, const cx_u8* head, cx_usize head_len, cx_u32 timeout_ms, cx_usize limit));
+ * connection ended with, negated. `which` is 0 for the close's reason and 1 for the protocol. With a
+ * ping interval it pings a quiet server and ends if it stays quiet (CLX-395), and
+ * `cx_http_ws_idle_ms` gives how long it has been quiet. */
+CX_FN(cx_u64, cx_http_ws_open, (const cx_u8* url, cx_usize url_len, const cx_u8* head, cx_usize head_len, cx_u32 timeout_ms, cx_usize limit,
+                                cx_u32 ping_interval_ms, cx_u32 ping_timeout_ms));
 CX_FN(cx_i32, cx_http_ws_state, (cx_u64 h));
 CX_FN(cx_i32, cx_http_ws_wait_open, (cx_u64 h));
+CX_FN(cx_u64, cx_http_ws_idle_ms, (cx_u64 h));
 CX_FN(cx_i32, cx_http_ws_send, (cx_u64 h, cx_u32 op, const cx_u8* p, cx_usize n));
 CX_FN(cx_i32, cx_http_ws_receive, (cx_u64 h, cx_u32 timeout_ms));
 CX_FN(cx_usize, cx_http_ws_taken_len, (cx_u64 h));
