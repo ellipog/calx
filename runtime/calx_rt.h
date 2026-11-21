@@ -973,6 +973,19 @@ CX_FN(void, cx_ed25519_sign, (const cx_u8* seed, const cx_u8* pub, const cx_u8* 
 CX_FN(cx_bool, cx_ed25519_check, (const cx_u8* pub));
 CX_FN(cx_bool, cx_ed25519_verify, (const cx_u8* pub, const cx_u8* msg, cx_usize len, const cx_u8* sig));
 
+/* ECDSA over P-256 with SHA-256, ES256, in calx_p256.c (CLX-406). Numbers are 32 bytes,
+ * big-endian. A private key is its scalar d, which `cx_p256_scalar_check` says is from 1 to
+ * n - 1, a public key x then y, 64 bytes, which `cx_p256_check` says is a point on the curve, and
+ * a signature r then s, 64 bytes. `cx_p256_sign` takes RFC 6979's nonce, so it's the same each
+ * time for the same key and message. `cx_p256_decompress` gives the y with x and y's parity,
+ * false if no point has that x. */
+CX_FN(cx_bool, cx_p256_scalar_check, (const cx_u8* d));
+CX_FN(void, cx_p256_public, (const cx_u8* d, cx_u8* out));
+CX_FN(cx_bool, cx_p256_check, (const cx_u8* xy));
+CX_FN(cx_bool, cx_p256_decompress, (const cx_u8* x, cx_bool odd, cx_u8* y_out));
+CX_FN(void, cx_p256_sign, (const cx_u8* d, const cx_u8* msg, cx_usize len, cx_u8* out));
+CX_FN(cx_bool, cx_p256_verify, (const cx_u8* xy, const cx_u8* msg, cx_usize len, const cx_u8* sig));
+
 /* Authenticated encryption, in calx_aead.c (CLX-397). ChaCha20-Poly1305 takes a 32-byte key and a
  * 12-byte nonce, or a 24-byte one for XChaCha20-Poly1305. AES-GCM's context, CX_GCM_CTX bytes with
  * no alignment needed, is made from a key of 16, 24 or 32 bytes, and takes an IV of any length.
