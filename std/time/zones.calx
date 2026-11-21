@@ -1,0 +1,16 @@
+/// Every time zone of the IANA tz database, version 2026f, for std.time's `TimeZone`.
+/// Written by tools/tz/gen_zones.calx; don't edit by hand.
+module std.time.zones
+
+// The tz database is in the public domain: https://www.iana.org/time-zones
+
+/// The tz database's version.
+pub const VERSION: str = "2026f"
+
+/// How many names there are: 344 zones, under 597 names with the links.
+pub const COUNT: usize = 597
+
+/// zones.bin: how many names there are, a u32; then each name's start and length and its
+/// zone's TZif file's start and length, four u32s, in order of the names' bytes; then the
+/// names, and the TZif files. Numbers are little-endian, and starts are from the table's start.
+pub const DATA: [u8; 289007] = embed("zones.bin")

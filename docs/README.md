@@ -75,7 +75,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 1. [std.io](std/io.md): standard input and output as bytes, and standard input a line at a time
 2. [std.math](std/math.md): fast math functions, accurate to about half an ULP and the same on every platform
 3. [std.java.math](std/java-math.md): math functions with `StrictMath`'s results bit for bit
-4. [std.time](std/time.md): a monotonic clock and the wall clock, which only `unsafe` code can read, the local time zone, and dates: their arithmetic, strftime and strptime codes and ISO 8601
+4. [std.time](std/time.md): a monotonic clock and the wall clock, which only `unsafe` code can read, the local time zone, dates: their arithmetic, strftime and strptime codes and ISO 8601, and the IANA time zones, built in
 5. [std.env](std/env.md): the command-line arguments, the environment variables, the system the program runs on, and the user it runs as
 6. [std.pool](std/pool.md): the threads `parallel for` runs on
 7. [std.net](std/net.md): TCP connections driven by events, on IOCP and epoll

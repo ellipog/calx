@@ -1,0 +1,111 @@
+// std.time's time zones, from the IANA tz database carried in the program (CLX-404). Python's
+// zoneinfo gives the same for each, with the same release of the database, and java.time the same
+// moment for a time in a gap.
+
+import std.time.{DateTime, TimeZone, Timestamp}
+import std.time
+
+fn zone(name: str) -> TimeZone {
+    return TimeZone.named(name)!
+}
+
+// The moment, on the zone's clock, with its abbreviation.
+fn show(z: TimeZone, t: Timestamp) -> String {
+    return "{t.iso(z.offset(t))} {z.abbreviation(t)}"
+}
+
+// The moment the zone's clock shows that time, shown on the zone's clock.
+fn wall(z: TimeZone, year: i32, month: i32, day: i32, hour: i32, minute: i32) -> String {
+    return show(z, z.timestamp(DateTime.new(year, month, day, hour, minute)!))
+}
+
+fn utc(year: i32, month: i32, day: i32, hour: i32, minute: i32, second: i32) -> Timestamp {
+    return DateTime.new(year, month, day, hour, minute, second)!.timestamp(0)
+}
+
+fn main() {
+    // Names.
+    println(time.TZDATA_VERSION)                                                                // out: 2026f
+    let names = TimeZone.names()
+    var all_found = true
+    for n in names {
+        if let z = TimeZone.named(n.copy()) {
+            all_found = all_found and z.name() == n
+        } else {
+            all_found = false
+        }
+    }
+    println("{names.len()} {all_found} {names[0]} {names[names.len() - 1]}")                   // out: 597 true Africa/Abidjan Zulu
+    println("{TimeZone.named("Europe/Osl")} {TimeZone.named("europe/oslo")} {TimeZone.named("")}")  // out: none none none
+    println("{TimeZone.named("US/Eastern")!.offset(utc(2026, 1, 1, 0, 0, 0))} {TimeZone.named("Asia/Calcutta")!.name()}")  // out: -18000 Asia/Calcutta
+    let u = TimeZone.utc()
+    println("{u.name()} {u.offset(utc(2026, 7, 1, 0, 0, 0))} {u.abbreviation(utc(1900, 1, 1, 0, 0, 0))} {u == zone("UTC")}")  // out: UTC 0 UTC true
+
+    // Oslo goes to summer time on 2026-03-29 at 01:00 UTC, and back on 2026-10-25 at 01:00 UTC.
+    let oslo = zone("Europe/Oslo")
+    println(show(oslo, utc(2026, 3, 29, 0, 59, 59)))                                           // out: 2026-03-29T01:59:59+01:00 CET
+    println(show(oslo, utc(2026, 3, 29, 1, 0, 0)))                                             // out: 2026-03-29T03:00:00+02:00 CEST
+    println(show(oslo, utc(2026, 10, 25, 0, 59, 59)))                                          // out: 2026-10-25T02:59:59+02:00 CEST
+    println(show(oslo, utc(2026, 10, 25, 1, 0, 0)))                                            // out: 2026-10-25T02:00:00+01:00 CET
+    println("{oslo.is_dst(utc(2026, 7, 1, 0, 0, 0))} {oslo.is_dst(utc(2026, 1, 1, 0, 0, 0))} {oslo.date_time(utc(2026, 7, 1, 6, 0, 0)).iso()}")  // out: true false 2026-07-01T08:00:00
+    // A time in the gap moves forward by the gap's length, and one in the overlap is the earlier.
+    println(wall(oslo, 2026, 3, 29, 1, 59))                                                    // out: 2026-03-29T01:59:00+01:00 CET
+    println(wall(oslo, 2026, 3, 29, 2, 0))                                                     // out: 2026-03-29T03:00:00+02:00 CEST
+    println(wall(oslo, 2026, 3, 29, 2, 30))                                                    // out: 2026-03-29T03:30:00+02:00 CEST
+    println(wall(oslo, 2026, 3, 29, 3, 0))                                                     // out: 2026-03-29T03:00:00+02:00 CEST
+    println(wall(oslo, 2026, 10, 25, 1, 59))                                                   // out: 2026-10-25T01:59:00+02:00 CEST
+    println(wall(oslo, 2026, 10, 25, 2, 30))                                                   // out: 2026-10-25T02:30:00+02:00 CEST
+    println(wall(oslo, 2026, 10, 25, 3, 0))                                                    // out: 2026-10-25T03:00:00+01:00 CET
+    let t = oslo.timestamp(DateTime.new(2026, 10, 25, 2, 30, 15, 250)!)
+    println("{t.unix_ms} {oslo.timestamp(DateTime.new(2026, 3, 29, 2, 59, 59, 999)!).unix_ms}")  // out: 1792888215250 1774749599999
+    // Every day at 08:00 there, across both changes.
+    for day in [DateTime.new(2026, 3, 28, 8)!, DateTime.new(2026, 3, 29, 8)!, DateTime.new(2026, 10, 25, 8)!] {
+        println(oslo.timestamp(day).iso(0))
+    }
+    // out: 2026-03-28T07:00:00Z
+    // out: 2026-03-29T06:00:00Z
+    // out: 2026-10-25T07:00:00Z
+    // Far ahead, by the rule the database ends with.
+    println("{show(oslo, utc(2100, 7, 1, 0, 0, 0))} {show(oslo, utc(2100, 12, 1, 0, 0, 0))}")  // out: 2100-07-01T02:00:00+02:00 CEST 2100-12-01T01:00:00+01:00 CET
+
+    // New York, both ways, and before standard time came in 1883.
+    let ny = zone("America/New_York")
+    println("{wall(ny, 2026, 3, 8, 2, 30)} {wall(ny, 2026, 11, 1, 1, 30)}")                     // out: 2026-03-08T03:30:00-04:00 EDT 2026-11-01T01:30:00-04:00 EDT
+    println("{show(ny, utc(2026, 11, 1, 5, 59, 59))} {show(ny, utc(2026, 11, 1, 6, 0, 0))}")    // out: 2026-11-01T01:59:59-04:00 EDT 2026-11-01T01:00:00-05:00 EST
+    println("{show(ny, utc(1883, 11, 18, 16, 59, 59))} {show(ny, utc(1883, 11, 18, 17, 0, 0))}")  // out: 1883-11-18T12:03:57-04:56:02 LMT 1883-11-18T12:00:00-05:00 EST
+    println(show(ny, utc(1943, 6, 1, 0, 0, 0)))                                                // out: 1943-05-31T20:00:00-04:00 EWT
+
+    // The southern hemisphere: Sydney's summer is in January, and its clocks go forward in October.
+    let sydney = zone("Australia/Sydney")
+    println("{show(sydney, utc(2026, 1, 15, 0, 0, 0))} {show(sydney, utc(2026, 7, 15, 0, 0, 0))}")  // out: 2026-01-15T11:00:00+11:00 AEDT 2026-07-15T10:00:00+10:00 AEST
+    println("{wall(sydney, 2026, 10, 4, 2, 30)} {wall(sydney, 2026, 4, 5, 2, 30)}")             // out: 2026-10-04T03:30:00+11:00 AEDT 2026-04-05T02:30:00+11:00 AEDT
+    println("{show(sydney, utc(2026, 4, 4, 15, 59, 59))} {show(sydney, utc(2026, 4, 4, 16, 0, 0))}")  // out: 2026-04-05T02:59:59+11:00 AEDT 2026-04-05T02:00:00+10:00 AEST
+    // Santiago changes at 24:00 on a Saturday, so its gap starts at midnight.
+    let santiago = zone("America/Santiago")
+    println("{wall(santiago, 2026, 9, 6, 0, 30)} {wall(santiago, 2026, 4, 4, 23, 30)}")         // out: 2026-09-06T01:30:00-03:00 -03 2026-04-04T23:30:00-03:00 -03
+    println(show(santiago, utc(2026, 4, 5, 3, 0, 0)))                                          // out: 2026-04-04T23:00:00-04:00 -04
+
+    // Offsets of half an hour and three quarters, and summer time of half an hour.
+    let kolkata = zone("Asia/Kolkata")
+    println("{show(kolkata, utc(2026, 7, 1, 0, 0, 0))} {kolkata.offset(utc(2026, 1, 1, 0, 0, 0))}")  // out: 2026-07-01T05:30:00+05:30 IST 19800
+    let adelaide = zone("Australia/Adelaide")
+    println("{show(adelaide, utc(2026, 1, 1, 0, 0, 0))} {show(adelaide, utc(2026, 7, 1, 0, 0, 0))}")  // out: 2026-01-01T10:30:00+10:30 ACDT 2026-07-01T09:30:00+09:30 ACST
+    println("{wall(adelaide, 2026, 10, 4, 2, 30)} {wall(adelaide, 2026, 4, 5, 2, 30)}")         // out: 2026-10-04T03:30:00+10:30 ACDT 2026-04-05T02:30:00+10:30 ACDT
+    let lord_howe = zone("Australia/Lord_Howe")
+    println("{wall(lord_howe, 2026, 10, 4, 2, 15)} {wall(lord_howe, 2026, 4, 5, 1, 45)}")        // out: 2026-10-04T02:45:00+11:00 +11 2026-04-05T01:45:00+11:00 +11
+    println(show(lord_howe, utc(2026, 4, 4, 15, 0, 0)))                                        // out: 2026-04-05T01:30:00+10:30 +1030
+    println("{zone("Asia/Kathmandu").offset(utc(2026, 1, 1, 0, 0, 0))} {show(zone("Pacific/Chatham"), utc(2026, 1, 1, 0, 0, 0))}")  // out: 20700 2026-01-01T13:45:00+13:45 +1345
+
+    // Rules that changed: Iran stopped summer time in 2022, Moscow kept it in 2011 and left it in
+    // 2014, and Samoa skipped the 30th of December 2011, so that day's noon is the next day's.
+    let tehran = zone("Asia/Tehran")
+    println("{tehran.offset(utc(2021, 7, 1, 0, 0, 0))} {tehran.offset(utc(2026, 7, 1, 0, 0, 0))}")  // out: 16200 12600
+    let moscow = zone("Europe/Moscow")
+    println("{moscow.offset(utc(2010, 1, 1, 0, 0, 0))} {moscow.offset(utc(2012, 1, 1, 0, 0, 0))} {moscow.offset(utc(2015, 1, 1, 0, 0, 0))}")  // out: 10800 14400 10800
+    let apia = zone("Pacific/Apia")
+    println("{wall(apia, 2011, 12, 29, 12, 0)} {wall(apia, 2011, 12, 30, 12, 0)}")             // out: 2011-12-29T12:00:00-10:00 -10 2011-12-31T12:00:00+14:00 +14
+    // Ireland's summer time is its standard time in the database, and its winter time is the
+    // offset from it, so `is_dst` is true in winter there, as Python's `dst()` is.
+    let dublin = zone("Europe/Dublin")
+    println("{show(dublin, utc(2026, 1, 1, 0, 0, 0))} {dublin.is_dst(utc(2026, 1, 1, 0, 0, 0))} {show(dublin, utc(2026, 7, 1, 0, 0, 0))} {dublin.is_dst(utc(2026, 7, 1, 0, 0, 0))}")  // out: 2026-01-01T00:00:00Z GMT true 2026-07-01T01:00:00+01:00 IST false
+}
