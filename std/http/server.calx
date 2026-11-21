@@ -646,6 +646,7 @@ impl Server {
                 }
                 Connected(_) => {}
                 Woken => {}
+                Datagram(_) => {}
             }
         }
         for id in sockets {

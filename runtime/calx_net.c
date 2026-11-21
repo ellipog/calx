@@ -25,6 +25,13 @@
  * reaches a newer connection in the same slot. A slot is reused only after the poll that
  * reported its `Closed` event, and, on Windows, once the system has returned every operation.
  *
+ * UDP sockets are slots of the same poller (CLX-412), so a program's datagrams come as events
+ * in the loop its connections do. Each datagram that arrives waits in the slot's `in`, with the
+ * address it came from, until the program takes it, and a `Datagram` event says some did. A
+ * datagram is sent at once, unless the socket has no room, when it waits in `out`, each with
+ * where it goes and the multicast interface it was sent on, for the socket to take it: on Linux
+ * and macOS when it says it's writable, and on Windows by an overlapped WSASendTo at a time.
+ *
  * This file is compiled into a program only when it uses std.net, so other programs don't link
  * the socket libraries. */
 #ifdef _WIN32
@@ -32,12 +39,16 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <mswsock.h>
+#include <iphlpapi.h>
 #include <windows.h>
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "iphlpapi.lib")
 #else
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -68,14 +79,17 @@
 int cx_in_parallel(void);
 CX_COLD void cx_panic_text(const char* at, const char* message);
 
-enum { EV_ACCEPTED = 1, EV_CONNECTED = 2, EV_RECEIVED = 3, EV_CLOSED = 4, EV_WOKEN = 5 };
+enum { EV_ACCEPTED = 1, EV_CONNECTED = 2, EV_RECEIVED = 3, EV_CLOSED = 4, EV_WOKEN = 5, EV_DATAGRAM = 6 };
 enum { ERR_IN_USE = 1, ERR_ADDRESS = 2, ERR_REFUSED = 3, ERR_OTHER = 4 };
-enum { SLOT_FREE, SLOT_LISTENER, SLOT_CONN };
+enum { SLOT_FREE, SLOT_LISTENER, SLOT_CONN, SLOT_UDP };
 enum { CONN_CONNECTING, CONN_OPEN, CONN_CLOSING, CONN_CLOSED };
 
 #define NET_NONE 0xFFFFFFFFu
 #define NET_INDEX_BITS 24
 #define NET_RECV 16384 /* bytes read at a time */
+#define NET_UDP_MAX 65536 /* the most a datagram can hold, and more */
+#define NET_UDP_KEEP (1 << 20) /* bytes of datagrams a UDP socket keeps waiting, either way */
+#define UDP_HEAD 27 /* before each datagram that arrived: its length, then its address (addr_parts) */
 
 static _Thread_local cx_u32 net_err_kind;
 static _Thread_local cx_i32 net_err_code;
@@ -145,7 +159,7 @@ typedef struct net_wait {
 #ifdef _WIN32
 /* OP_FILE is a TransmitFile; OP_FREAD and OP_FSEND read a part of a file and send it, where
  * TransmitFile is limited (see post_file). */
-enum { OP_ACCEPT = 1, OP_RECV, OP_SEND, OP_CONNECT, OP_FILE, OP_FREAD, OP_FSEND };
+enum { OP_ACCEPT = 1, OP_RECV, OP_SEND, OP_CONNECT, OP_FILE, OP_FREAD, OP_FSEND, OP_URECV, OP_USEND };
 #define NET_FILE_CHUNK (256 * 1024) /* bytes of a file read and sent at a time, without TransmitFile */
 typedef struct {
     OVERLAPPED ov;
@@ -174,7 +188,14 @@ struct net_slot {
     struct net_wait* waiting_last;
     struct sockaddr_storage peer;  /* the other end, from when it opened */
     int has_peer;
+    /* A UDP socket's family and whether it's IPv6 alone, and the multicast interface the
+     * program asked for and the one the socket has, which a queued datagram's can differ from. */
+    int ufamily, uv6only;
+    cx_u32 mif_cur, mif_set;
 #ifdef _WIN32
+    cx_u8* ubuf;  /* where a datagram is received, NET_UDP_MAX bytes */
+    struct sockaddr_storage ufrom, uto;  /* where it came from, and where the one in flight goes */
+    int ufrom_len, uto_len;
     SOCKET s;
     int pending;  /* operations the system still holds */
     int sending;
@@ -361,6 +382,8 @@ static void release_slot(net* n, net_slot* s) {
     free(s->fbuf);
     s->fbuf = NULL;
     s->fbuf_at = s->fbuf_len = 0;
+    free(s->ubuf);
+    s->ubuf = NULL;
     tf_release(s);
 #endif
     s->kind = SLOT_FREE;
@@ -376,8 +399,9 @@ static net_slot* conn_of(net* n, cx_u32 id) {
     return s;
 }
 
-/* Resolves `host`, which isn't NUL-terminated, to an address. An empty host is every address. */
-static struct addrinfo* resolve(const cx_u8* host, cx_usize len, cx_u16 port, int passive) {
+/* Resolves `host`, which isn't NUL-terminated, to an address for TCP, or for UDP if `dgram`. An
+ * empty host is every address. */
+static struct addrinfo* resolve(const cx_u8* host, cx_usize len, cx_u16 port, int passive, int dgram) {
     char name[256], service[8];
     if (len >= sizeof name) {
         net_fail(ERR_ADDRESS, 0);
@@ -408,8 +432,8 @@ static struct addrinfo* resolve(const cx_u8* host, cx_usize len, cx_u16 port, in
     struct addrinfo hints;
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_socktype = dgram ? SOCK_DGRAM : SOCK_STREAM;
+    hints.ai_protocol = dgram ? IPPROTO_UDP : IPPROTO_TCP;
     if (passive) hints.ai_flags = AI_PASSIVE;
     struct addrinfo* res = NULL;
     if (getaddrinfo(len ? name : NULL, service, &hints, &res) != 0 || !res) {
@@ -433,6 +457,178 @@ static const struct addrinfo* listen_addr(const struct addrinfo* a, int every) {
 static cx_u16 local_port(const struct sockaddr_storage* a) {
     if (a->ss_family == AF_INET6) return ntohs(((const struct sockaddr_in6*)a)->sin6_port);
     return ntohs(((const struct sockaddr_in*)a)->sin_port);
+}
+
+#ifdef _WIN32
+typedef SOCKET net_sock;
+typedef int net_socklen;
+#define SOCK_OF(s) ((s)->s)
+#else
+typedef int net_sock;
+typedef socklen_t net_socklen;
+#define SOCK_OF(s) ((s)->fd)
+#endif
+
+/* An address as std.net passes it, 22 bytes: the address in [0, 16), the port in [16, 18) and an
+ * IPv6 scope in [18, 22), both big-endian. It gives the family, 4 or 6, or 0 if it isn't IP. An
+ * IPv4-mapped IPv6 address, as an IPv4 client of a socket that takes both families has, comes
+ * back as IPv4. */
+static cx_u32 addr_parts(const struct sockaddr_storage* sa, cx_u8* out) {
+    memset(out, 0, 22);
+    if (sa->ss_family == AF_INET) {
+        const struct sockaddr_in* a = (const struct sockaddr_in*)sa;
+        memcpy(out, &a->sin_addr, 4);
+        memcpy(out + 16, &a->sin_port, 2);
+        return 4;
+    }
+    if (sa->ss_family != AF_INET6) return 0;
+    const struct sockaddr_in6* a = (const struct sockaddr_in6*)sa;
+    const cx_u8* b = (const cx_u8*)&a->sin6_addr;
+    static const cx_u8 mapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF};
+    memcpy(out + 16, &a->sin6_port, 2);
+    if (memcmp(b, mapped, 12) == 0) {
+        memcpy(out, b + 12, 4);
+        return 4;
+    }
+    memcpy(out, b, 16);
+    cx_u32 scope = (cx_u32)a->sin6_scope_id;
+    out[18] = (cx_u8)(scope >> 24);
+    out[19] = (cx_u8)(scope >> 16);
+    out[20] = (cx_u8)(scope >> 8);
+    out[21] = (cx_u8)scope;
+    return 6;
+}
+
+/* The other way: the address std.net gave, of `family`, for a socket of `sock_family`, which
+ * takes an IPv4 address as IPv4-mapped if it's IPv6. 0 for an IPv6 address and an IPv4 socket. */
+static int addr_in(const cx_u8* in, cx_u32 family, int sock_family, struct sockaddr_storage* sa, net_socklen* len) {
+    memset(sa, 0, sizeof *sa);
+    if (family == 4 && sock_family == AF_INET) {
+        struct sockaddr_in* a = (struct sockaddr_in*)sa;
+        a->sin_family = AF_INET;
+        memcpy(&a->sin_addr, in, 4);
+        memcpy(&a->sin_port, in + 16, 2);
+        *len = (net_socklen)sizeof *a;
+        return 1;
+    }
+    if (sock_family != AF_INET6 || (family != 4 && family != 6)) return 0;
+    struct sockaddr_in6* a = (struct sockaddr_in6*)sa;
+    a->sin6_family = AF_INET6;
+    cx_u8* b = (cx_u8*)&a->sin6_addr;
+    if (family == 4) {
+        b[10] = b[11] = 0xFF;
+        memcpy(b + 12, in, 4);
+    } else {
+        memcpy(b, in, 16);
+        a->sin6_scope_id = ((cx_u32)in[18] << 24) | ((cx_u32)in[19] << 16) | ((cx_u32)in[20] << 8) | in[21];
+    }
+    memcpy(&a->sin6_port, in + 16, 2);
+    *len = (net_socklen)sizeof *a;
+    return 1;
+}
+
+/* A datagram arrived on a UDP socket: it waits, after its length and where it came from, for the
+ * program to take it. One that would put more than NET_UDP_KEEP bytes in waiting is dropped, as
+ * the system drops what arrives at a socket whose buffer is full. */
+static void udp_arrived(net* n, net_slot* s, const cx_u8* p, size_t len, const struct sockaddr_storage* from) {
+    if (buf_live(&s->in) + len + UDP_HEAD > NET_UDP_KEEP) return;
+    cx_u8 head[UDP_HEAD];
+    cx_u32 l = (cx_u32)len;
+    memcpy(head, &l, 4);
+    head[4] = (cx_u8)addr_parts(from, head + 5);
+    buf_append(&s->in, head, UDP_HEAD);
+    if (len) buf_append(&s->in, p, len);
+    if (!s->received) {
+        s->received = 1;
+        emit(n, EV_DATAGRAM, s);
+    }
+}
+
+/* A datagram waiting to be sent is its length, the multicast interface it was sent on, the
+ * length of where it goes, that, then its bytes. */
+#define UDP_OUT_HEAD 12
+
+static void udp_queue(net_slot* s, const cx_u8* p, size_t len, const struct sockaddr_storage* to, net_socklen to_len) {
+    cx_u32 head[3] = {(cx_u32)len, s->mif_cur, (cx_u32)to_len};
+    buf_append(&s->out, (const cx_u8*)head, UDP_OUT_HEAD);
+    buf_append(&s->out, (const cx_u8*)to, (size_t)to_len);
+    if (len) buf_append(&s->out, p, len);
+}
+
+/* Moves what's left to the start of a buffer read from its front, once most of it has been. */
+static void buf_compact(net_buf* b) {
+    if (b->at < 65536 || b->at < b->len / 2) return;
+    memmove(b->p, b->p + b->at, b->len - b->at);
+    b->len -= b->at;
+    b->at = 0;
+}
+
+/* Sets the interface the socket's multicast datagrams go out on, by its index, 0 for the system's
+ * choice: 1 if it could. */
+static int set_mif(net_sock fd, int family, int v6only, cx_u32 index) {
+    if (family == AF_INET6) {
+        unsigned int v = index;
+        int ok = setsockopt(fd, IPPROTO_IPV6, IPV6_MULTICAST_IF, (const char*)&v, sizeof v) == 0;
+        if (v6only) return ok;
+        /* A socket for both families sends IPv4 multicast too, where the system lets it say how. */
+    }
+#ifdef _WIN32
+    DWORD v4 = htonl(index); /* an index is an address in 0.0.0.0/8 */
+    int ok4 = setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, (const char*)&v4, sizeof v4) == 0;
+#elif defined(__APPLE__)
+#ifdef IP_MULTICAST_IFINDEX
+    unsigned int v4 = index;
+    int ok4 = setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IFINDEX, &v4, sizeof v4) == 0;
+#else
+    /* macOS before IP_MULTICAST_IFINDEX names the interface by an address of its own. */
+    struct in_addr at;
+    at.s_addr = htonl(INADDR_ANY);
+    if (index) {
+        struct ifaddrs* all = NULL;
+        if (getifaddrs(&all) == 0) {
+            for (struct ifaddrs* i = all; i; i = i->ifa_next) {
+                if (i->ifa_addr && i->ifa_addr->sa_family == AF_INET && if_nametoindex(i->ifa_name) == index) {
+                    at = ((struct sockaddr_in*)i->ifa_addr)->sin_addr;
+                    break;
+                }
+            }
+            freeifaddrs(all);
+        }
+    }
+    int ok4 = setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, &at, sizeof at) == 0;
+#endif
+#else
+    struct ip_mreqn m;
+    memset(&m, 0, sizeof m);
+    m.imr_ifindex = (int)index;
+    int ok4 = setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, &m, sizeof m) == 0;
+#endif
+    return family == AF_INET6 ? 1 : ok4;
+}
+
+/* The socket's multicast interface as a datagram sent on `index` needs it. */
+static void udp_mif(net_slot* s, cx_u32 index) {
+    if (s->mif_set == index) return;
+    if (set_mif(SOCK_OF(s), s->ufamily, s->uv6only, index)) s->mif_set = index;
+}
+
+/* Reads the datagram at the front of `out`: where it goes, its interface and its bytes. */
+static const cx_u8* udp_front(net_slot* s, size_t* len, cx_u32* mif, struct sockaddr_storage* to, net_socklen* to_len) {
+    cx_u32 head[3];
+    const cx_u8* at = s->out.p + s->out.at;
+    memcpy(head, at, UDP_OUT_HEAD);
+    *len = head[0];
+    *mif = head[1];
+    *to_len = (net_socklen)head[2];
+    memset(to, 0, sizeof *to);
+    memcpy(to, at + UDP_OUT_HEAD, head[2]);
+    return at + UDP_OUT_HEAD + head[2];
+}
+
+static void udp_pop(net_slot* s, size_t len, net_socklen to_len) {
+    s->out.at += UDP_OUT_HEAD + (size_t)to_len + len;
+    if (s->out.at >= s->out.len) s->out.at = s->out.len = 0;
+    else buf_compact(&s->out);
 }
 
 /* Frees the slots whose Closed event the last poll returned, once nothing else holds them. */
@@ -477,7 +673,9 @@ static size_t deliver(net* n) {
     n->nev = 0;
     n->woke = 0;
     for (size_t i = 0; i < n->nout; i += 2) {
-        if (n->out[i] == EV_RECEIVED) n->slots[n->out[i + 1] & (((cx_u32)1 << NET_INDEX_BITS) - 1)]->received = 0;
+        if (n->out[i] == EV_RECEIVED || n->out[i] == EV_DATAGRAM) {
+            n->slots[n->out[i + 1] & (((cx_u32)1 << NET_INDEX_BITS) - 1)]->received = 0;
+        }
     }
     return n->nout / 2;
 }
@@ -712,6 +910,47 @@ static void post_accept(net* n, net_slot* l) {
     (void)n;
 }
 
+/* Keeps a receive pending on a UDP socket, into `ubuf`. A receive that fails at once, as one can
+ * after an ICMP error the system still reports, is tried again a few times. */
+static void post_udp_recv(net* n, net_slot* s) {
+    (void)n;
+    for (int tries = 0; tries < 8 && s->state != CONN_CLOSED; tries++) {
+        WSABUF b = {NET_UDP_MAX, (char*)s->ubuf};
+        DWORD flags = 0;
+        s->ufrom_len = (int)sizeof s->ufrom;
+        op_reset(&s->rop, s, OP_URECV);
+        if (WSARecvFrom(s->s, &b, 1, NULL, &flags, (struct sockaddr*)&s->ufrom, &s->ufrom_len, &s->rop.ov, NULL) == 0 ||
+            WSAGetLastError() == WSA_IO_PENDING) {
+            s->pending++;
+            s->receiving = 1;
+            return;
+        }
+    }
+}
+
+/* Sends the datagram at the front of what waits, overlapped, one at a time, each on its own
+ * multicast interface. One the system refuses at once is dropped, as one it can't deliver is. */
+static void udp_send_queued(net* n, net_slot* s) {
+    (void)n;
+    while (!s->sending && s->state != CONN_CLOSED && buf_live(&s->out)) {
+        size_t len;
+        cx_u32 mif;
+        const cx_u8* p = udp_front(s, &len, &mif, &s->uto, &s->uto_len);
+        s->fly.at = s->fly.len = 0;
+        if (len) buf_append(&s->fly, p, len);
+        udp_pop(s, len, s->uto_len);
+        udp_mif(s, mif);
+        WSABUF b = {(ULONG)len, (char*)s->fly.p};
+        op_reset(&s->sop, s, OP_USEND);
+        if (WSASendTo(s->s, &b, 1, NULL, 0, (struct sockaddr*)&s->uto, s->uto_len, &s->sop.ov, NULL) == 0 ||
+            WSAGetLastError() == WSA_IO_PENDING) {
+            s->pending++;
+            s->sending = 1;
+        }
+    }
+    if (!buf_live(&s->out)) s->out.at = s->out.len = 0;
+}
+
 static void completed(net* n, OVERLAPPED_ENTRY* e) {
     net_op* op = (net_op*)e->lpOverlapped;
     net_slot* s = op->slot;
@@ -833,6 +1072,18 @@ static void completed(net* n, OVERLAPPED_ENTRY* e) {
             post_send(n, s);
             if (s->state == CONN_CLOSING && !s->sending) finish(n, s);
             break;
+        case OP_URECV:
+            s->receiving = 0;
+            if (s->state == CONN_CLOSED) break;
+            /* A datagram cut short, too big for the buffer, comes back as an error, and is dropped. */
+            if (ok) udp_arrived(n, s, s->ubuf, bytes, &s->ufrom);
+            post_udp_recv(n, s);
+            break;
+        case OP_USEND:
+            s->sending = 0;
+            if (s->state == CONN_CLOSED) break;
+            udp_send_queued(n, s);
+            break;
     }
 }
 
@@ -889,7 +1140,7 @@ cx_u64 cx_net_open(void) {
 }
 
 static cx_i32 net_listen(net* n, const cx_u8* host, cx_usize len, cx_u16 port) {
-    struct addrinfo* a = resolve(host, len, port, 1);
+    struct addrinfo* a = resolve(host, len, port, 1, 0);
     if (!a) return -1;
     const struct addrinfo* b = listen_addr(a, len == 0);
     SOCKET s = WSASocketW(b->ai_family, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
@@ -932,7 +1183,7 @@ static cx_i32 net_listen(net* n, const cx_u8* host, cx_usize len, cx_u16 port) {
 }
 
 static cx_u32 net_connect(net* n, const cx_u8* host, cx_usize len, cx_u16 port) {
-    struct addrinfo* a = resolve(host, len, port, 0);
+    struct addrinfo* a = resolve(host, len, port, 0, 0);
     if (!a) return NET_NONE;
     SOCKET s = WSASocketW(a->ai_family, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
     struct sockaddr_storage any;
@@ -1203,9 +1454,65 @@ static void accept_all(net* n, net_slot* l) {
     }
 }
 
+/* Sends the datagrams that waited for room, each on its own multicast interface, while the socket
+ * takes them. One the system refuses is dropped, as one it can't deliver is. */
+static void udp_flush(net_slot* s) {
+    while (s->writable && s->state != CONN_CLOSED && buf_live(&s->out)) {
+        size_t len;
+        cx_u32 mif;
+        struct sockaddr_storage to;
+        net_socklen to_len;
+        const cx_u8* p = udp_front(s, &len, &mif, &to, &to_len);
+        udp_mif(s, mif);
+        ssize_t r = sendto(s->fd, p, len, 0, (struct sockaddr*)&to, to_len);
+        if (r < 0 && errno == EINTR) continue;
+        if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS)) {
+            s->writable = 0;
+            break;
+        }
+        udp_pop(s, len, to_len);
+    }
+    if (!buf_live(&s->out)) s->out.at = s->out.len = 0;
+}
+
+/* Takes every datagram that has arrived on a UDP socket. */
+static void udp_readable(net* n, net_slot* s) {
+    static _Thread_local cx_u8* buf;
+    if (!buf) {
+        buf = malloc(NET_UDP_MAX);
+        if (!buf) net_out_of_memory();
+    }
+    /* Edge-triggered, so until the system has none left. */
+    int errors = 0;
+    while (errors < 16) {
+        struct sockaddr_storage from;
+        socklen_t from_len = sizeof from;
+        ssize_t r = recvfrom(s->fd, buf, NET_UDP_MAX, 0, (struct sockaddr*)&from, &from_len);
+        if (r >= 0) {
+            udp_arrived(n, s, buf, (size_t)r, &from);
+            errors = 0;
+        } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            break;
+        } else if (errno != EINTR) {
+            /* One a datagram sent earlier brought back, such as an ICMP unreachable, which reading
+             * reports once: the socket goes on. */
+            errors++;
+        }
+    }
+}
+
 static void ready(net* n, net_slot* s, cx_u32 e) {
     if (s->kind == SLOT_LISTENER) {
         accept_all(n, s);
+        return;
+    }
+    if (s->kind == SLOT_UDP) {
+        if (s->state == CONN_CLOSED) return;
+        if (e & (RD_IN | RD_ERR)) udp_readable(n, s);
+        if (e & RD_OUT) {
+            s->writable = 1;
+            udp_flush(s);
+        }
         return;
     }
     if (s->state == CONN_CLOSED) return;
@@ -1313,7 +1620,7 @@ cx_u64 cx_net_open(void) {
 }
 
 static cx_i32 net_listen(net* n, const cx_u8* host, cx_usize len, cx_u16 port) {
-    struct addrinfo* a = resolve(host, len, port, 1);
+    struct addrinfo* a = resolve(host, len, port, 1, 0);
     if (!a) return -1;
     const struct addrinfo* b = listen_addr(a, len == 0);
     int fd = new_socket(b->ai_family);
@@ -1347,7 +1654,7 @@ static cx_i32 net_listen(net* n, const cx_u8* host, cx_usize len, cx_u16 port) {
 }
 
 static cx_u32 net_connect(net* n, const cx_u8* host, cx_usize len, cx_u16 port) {
-    struct addrinfo* a = resolve(host, len, port, 0);
+    struct addrinfo* a = resolve(host, len, port, 0, 0);
     if (!a) return NET_NONE;
     int fd = new_socket(a->ai_family);
     if (fd < 0) {
@@ -1413,6 +1720,7 @@ void cx_net_free(cx_u64 h) {
 #ifdef _WIN32
         buf_free(&s->fly);
         free(s->fbuf);
+        free(s->ubuf);
         tf_release(s);
 #endif
         free(s);
@@ -1625,6 +1933,13 @@ void cx_net_wake(cx_u64 h) {
 static int settled(net* n) {
     for (size_t i = 0; i < n->nslots; i++) {
         net_slot* s = n->slots[i];
+        if (s->kind == SLOT_UDP && s->state != CONN_CLOSED) {
+#ifdef _WIN32
+            if (s->sending) return 0;
+#endif
+            if (buf_live(&s->out)) return 0;
+            continue;
+        }
         if (s->kind != SLOT_CONN || s->state == CONN_CONNECTING) continue;
         if (s->state == CONN_CLOSING) return 0;
 #ifdef _WIN32
@@ -1730,28 +2045,7 @@ void cx_net_close(cx_u64 h, cx_u32 id) {
 static cx_u32 peer(const net_slot* s, cx_u8* out) {
     memset(out, 0, 22);
     if (!s || !s->has_peer) return 0;
-    if (s->peer.ss_family == AF_INET) {
-        const struct sockaddr_in* a = (const struct sockaddr_in*)&s->peer;
-        memcpy(out, &a->sin_addr, 4);
-        memcpy(out + 16, &a->sin_port, 2);
-        return 4;
-    }
-    if (s->peer.ss_family != AF_INET6) return 0;
-    const struct sockaddr_in6* a = (const struct sockaddr_in6*)&s->peer;
-    const cx_u8* b = (const cx_u8*)&a->sin6_addr;
-    static const cx_u8 mapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF};
-    memcpy(out + 16, &a->sin6_port, 2);
-    if (memcmp(b, mapped, 12) == 0) {
-        memcpy(out, b + 12, 4);
-        return 4;
-    }
-    memcpy(out, b, 16);
-    cx_u32 scope = (cx_u32)a->sin6_scope_id;
-    out[18] = (cx_u8)(scope >> 24);
-    out[19] = (cx_u8)(scope >> 16);
-    out[20] = (cx_u8)(scope >> 8);
-    out[21] = (cx_u8)scope;
-    return 6;
+    return addr_parts(&s->peer, out);
 }
 
 cx_u32 cx_net_peer(cx_u64 h, cx_u32 id, cx_u8* out) {
@@ -1773,6 +2067,550 @@ cx_u32 cx_net_connect(cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port) {
     cx_u32 id = net_connect(n, host, len, port);
     net_leave(n);
     return id;
+}
+
+/* UDP (CLX-412). */
+
+static net_slot* udp_of(net* n, cx_u32 id) {
+    cx_u32 index = id & (((cx_u32)1 << NET_INDEX_BITS) - 1);
+    if (index >= n->nslots) return NULL;
+    net_slot* s = n->slots[index];
+    if (s->kind != SLOT_UDP || s->gen != (cx_u8)(id >> NET_INDEX_BITS) || s->reported) return NULL;
+    return s;
+}
+
+static net_sock udp_socket(int family) {
+#ifdef _WIN32
+    return WSASocketW(family, SOCK_DGRAM, IPPROTO_UDP, NULL, 0, WSA_FLAG_OVERLAPPED);
+#elif defined(__APPLE__)
+    return own_socket(socket(family, SOCK_DGRAM, IPPROTO_UDP));
+#else
+    return socket(family, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_UDP);
+#endif
+}
+
+#ifdef _WIN32
+#define NET_BAD_SOCK INVALID_SOCKET
+#define close_sock closesocket
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+#ifndef SIO_UDP_NETRESET
+#define SIO_UDP_NETRESET _WSAIOW(IOC_VENDOR, 15)
+#endif
+#else
+#define NET_BAD_SOCK (-1)
+#define close_sock close
+#endif
+
+/* Opens a UDP socket bound to `host` and `port`, the system's choice of port if it's 0. An empty
+ * host is every address, IPv4 and IPv6, with one socket that takes both, or IPv4 alone where the
+ * machine has no IPv6. An IPv6 address, such as `::`, is IPv6 alone. With `reuse`, other sockets
+ * that ask for it can bind the same port, as each program with an mDNS responder does on 5353,
+ * and each gets the multicast datagrams sent to it. */
+static cx_u32 udp_open(net* n, const cx_u8* host, cx_usize len, cx_u16 port, int reuse) {
+    struct addrinfo* a = resolve(host, len, port, 1, 1);
+    if (!a) return NET_NONE;
+    const struct addrinfo* b = listen_addr(a, len == 0);
+    net_sock fd = udp_socket(b->ai_family);
+    if (fd == NET_BAD_SOCK && b != a) {
+        b = a;
+        fd = udp_socket(b->ai_family);
+    }
+    if (fd == NET_BAD_SOCK) {
+        fail_os();
+        freeaddrinfo(a);
+        return NET_NONE;
+    }
+    int family = b->ai_family;
+    int v6only = family == AF_INET6 && len != 0;
+    int yes = 1, flag = v6only;
+#ifdef _WIN32
+    BOOL win_yes = TRUE;
+    setsockopt(fd, SOL_SOCKET, reuse ? SO_REUSEADDR : SO_EXCLUSIVEADDRUSE, (const char*)&win_yes, sizeof win_yes);
+    /* Nonblocking, so a send the socket has no room for comes back at once and waits in `out`, while
+     * receives stay overlapped. An ICMP unreachable that a datagram sent brings would end the next
+     * receive with an error, which these turn off. */
+    u_long nonblocking = 1;
+    ioctlsocket(fd, FIONBIO, &nonblocking);
+    BOOL off = FALSE;
+    DWORD got;
+    WSAIoctl(fd, SIO_UDP_CONNRESET, &off, sizeof off, NULL, 0, &got, NULL, NULL);
+    WSAIoctl(fd, SIO_UDP_NETRESET, &off, sizeof off, NULL, 0, &got, NULL, NULL);
+#else
+    if (reuse) {
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
+#ifdef __APPLE__
+        /* macOS shares a port between sockets only with this as well, as mDNSResponder's has it. */
+        setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &yes, sizeof yes);
+#endif
+    }
+#endif
+    (void)yes;
+    if (family == AF_INET6) setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, (const char*)&flag, sizeof flag);
+#if defined(__linux__)
+    /* Linux gives a socket the datagrams of every group any socket on the machine joined, unless
+     * it's told not to; other systems give it only its own groups'. */
+    int none = 0;
+#ifndef IP_MULTICAST_ALL
+#define IP_MULTICAST_ALL 49
+#endif
+#ifndef IPV6_MULTICAST_ALL
+#define IPV6_MULTICAST_ALL 29
+#endif
+    if (family == AF_INET || !v6only) setsockopt(fd, IPPROTO_IP, IP_MULTICAST_ALL, &none, sizeof none);
+    if (family == AF_INET6) setsockopt(fd, IPPROTO_IPV6, IPV6_MULTICAST_ALL, &none, sizeof none);
+#endif
+    if (bind(fd, b->ai_addr, (net_socklen)b->ai_addrlen) != 0) {
+        fail_os();
+        close_sock(fd);
+        freeaddrinfo(a);
+        return NET_NONE;
+    }
+    freeaddrinfo(a);
+    net_slot* s = new_slot(n, SLOT_UDP);
+    if (!s) {
+        net_fail(ERR_OTHER, 0);
+        close_sock(fd);
+        return NET_NONE;
+    }
+    SOCK_OF(s) = fd;
+    s->ufamily = family;
+    s->uv6only = family == AF_INET || v6only;
+    s->state = CONN_OPEN;
+#ifdef _WIN32
+    s->ubuf = malloc(NET_UDP_MAX);
+    if (!s->ubuf) net_out_of_memory();
+    if (!CreateIoCompletionPort((HANDLE)fd, n->iocp, 0, 0)) {
+        fail_os();
+        closesocket(fd);
+        s->s = INVALID_SOCKET;
+        release_slot(n, s);
+        return NET_NONE;
+    }
+    post_udp_recv(n, s);
+#else
+    if (watch(n, s, fd, 1) != 0) {
+        fail_os();
+        close(fd);
+        s->fd = -1;
+        release_slot(n, s);
+        return NET_NONE;
+    }
+    s->writable = 1;
+#endif
+    return slot_id(s);
+}
+
+cx_u32 cx_net_udp_open(cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port, cx_bool reuse) {
+    net* n = net_enter(h);
+    cx_u32 id = udp_open(n, host, len, port, reuse);
+    net_leave(n);
+    return id;
+}
+
+/* The port the socket is bound to, or 0 once it's closed. */
+cx_u16 cx_net_udp_port(cx_u64 h, cx_u32 id) {
+    net* n = net_enter(h);
+    net_slot* s = udp_of(n, id);
+    cx_u16 port = 0;
+    if (s) {
+        struct sockaddr_storage at;
+        net_socklen at_len = sizeof at;
+        if (getsockname(SOCK_OF(s), (struct sockaddr*)&at, &at_len) == 0) port = local_port(&at);
+    }
+    net_leave(n);
+    return port;
+}
+
+/* Sends `len` bytes to the address std.net gives, of `family`: at once, unless the socket has no
+ * room, when it waits its turn. 0 if it went or waits, or -1 with the error. A socket that has
+ * 1 MiB waiting already drops it, as a network would. */
+static cx_i32 udp_send(net* n, net_slot* s, const cx_u8* p, cx_usize len, const cx_u8* to, cx_u32 family) {
+    struct sockaddr_storage sa;
+    net_socklen sa_len;
+    if (!addr_in(to, family, s->ufamily, &sa, &sa_len)) {
+        net_fail(ERR_ADDRESS, 0);
+        return -1;
+    }
+#ifdef _WIN32
+    int idle = !s->sending && !buf_live(&s->out);
+#else
+    int idle = s->writable && !buf_live(&s->out);
+#endif
+    if (idle) {
+        udp_mif(s, s->mif_cur);
+        for (;;) {
+            if (sendto(SOCK_OF(s), (const char*)p, (int)len, 0, (struct sockaddr*)&sa, sa_len) >= 0) return 0;
+#ifdef _WIN32
+            if (WSAGetLastError() == WSAEWOULDBLOCK) break;
+            if (WSAGetLastError() == WSAEINTR) continue;
+#else
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS) {
+                s->writable = 0;
+                break;
+            }
+            if (errno == EINTR) continue;
+#endif
+            fail_os();
+            return -1;
+        }
+    }
+    if (buf_live(&s->out) + UDP_OUT_HEAD + (size_t)sa_len + len > NET_UDP_KEEP) return 0;
+    udp_queue(s, p, len, &sa, sa_len);
+#ifdef _WIN32
+    udp_send_queued(n, s);
+#else
+    (void)n;
+#endif
+    return 0;
+}
+
+cx_i32 cx_net_udp_send(cx_u64 h, cx_u32 id, const cx_u8* p, cx_usize len, const cx_u8* to, cx_u32 family) {
+    net* n = net_enter(h);
+    net_slot* s = udp_of(n, id);
+    cx_i32 r = -1;
+    if (!s) net_fail(ERR_OTHER, 0);
+    else r = udp_send(n, s, p, len, to, family);
+    net_leave(n);
+    return r;
+}
+
+/* The length of the next datagram waiting on the socket, or -1 if there's none. */
+cx_i64 cx_net_udp_size(cx_u64 h, cx_u32 id) {
+    net* n = net_enter(h);
+    net_slot* s = udp_of(n, id);
+    cx_i64 k = -1;
+    if (s && buf_live(&s->in) >= UDP_HEAD) {
+        cx_u32 l;
+        memcpy(&l, s->in.p + s->in.at, 4);
+        k = l;
+    }
+    net_leave(n);
+    return k;
+}
+
+/* Takes the next datagram: its bytes to `to`, which has room for them, and where it came from to
+ * `from`, 22 bytes, as `addr_parts` writes it. Its family, or 0 if there was none. */
+cx_u32 cx_net_udp_take(cx_u64 h, cx_u32 id, cx_u8* to, cx_u8* from) {
+    net* n = net_enter(h);
+    net_slot* s = udp_of(n, id);
+    cx_u32 family = 0;
+    if (s && buf_live(&s->in) >= UDP_HEAD) {
+        const cx_u8* at = s->in.p + s->in.at;
+        cx_u32 l;
+        memcpy(&l, at, 4);
+        family = at[4];
+        memcpy(from, at + 5, 22);
+        if (l) memcpy(to, at + UDP_HEAD, l);
+        s->in.at += UDP_HEAD + l;
+        if (s->in.at >= s->in.len) s->in.at = s->in.len = 0;
+        else buf_compact(&s->in);
+    }
+    net_leave(n);
+    return family;
+}
+
+/* Joins, or leaves, the multicast group whose address std.net gives, of `family`, on the
+ * interface with that index, or the system's choice if it's 0. 1 if it could. An IPv4 group's
+ * interface is named by its index as an address in 0.0.0.0/8 on Windows, and by the index itself
+ * elsewhere. */
+static int udp_join(net_slot* s, const cx_u8* group, cx_u32 family, cx_u32 index, int leave) {
+    net_sock fd = SOCK_OF(s);
+    if (family == 6) {
+        if (s->ufamily != AF_INET6) {
+            net_fail(ERR_ADDRESS, 0);
+            return 0;
+        }
+        struct ipv6_mreq m;
+        memset(&m, 0, sizeof m);
+        memcpy(&m.ipv6mr_multiaddr, group, 16);
+        m.ipv6mr_interface = index;
+        if (setsockopt(fd, IPPROTO_IPV6, leave ? IPV6_LEAVE_GROUP : IPV6_JOIN_GROUP, (const char*)&m, sizeof m) != 0) {
+            fail_os();
+            return 0;
+        }
+        return 1;
+    }
+    if (family != 4 || (s->ufamily == AF_INET6 && s->uv6only)) {
+        net_fail(ERR_ADDRESS, 0);
+        return 0;
+    }
+    int r;
+#ifdef _WIN32
+    struct ip_mreq m;
+    memset(&m, 0, sizeof m);
+    memcpy(&m.imr_multiaddr, group, 4);
+    m.imr_interface.s_addr = htonl(index);
+    r = setsockopt(fd, IPPROTO_IP, leave ? IP_DROP_MEMBERSHIP : IP_ADD_MEMBERSHIP, (const char*)&m, sizeof m);
+#elif defined(__APPLE__)
+    struct group_req g;
+    memset(&g, 0, sizeof g);
+    g.gr_interface = index;
+    struct sockaddr_in* ga = (struct sockaddr_in*)&g.gr_group;
+    ga->sin_family = AF_INET;
+    ga->sin_len = sizeof *ga;
+    memcpy(&ga->sin_addr, group, 4);
+    r = setsockopt(fd, IPPROTO_IP, leave ? MCAST_LEAVE_GROUP : MCAST_JOIN_GROUP, &g, sizeof g);
+#else
+    struct ip_mreqn m;
+    memset(&m, 0, sizeof m);
+    memcpy(&m.imr_multiaddr, group, 4);
+    m.imr_ifindex = (int)index;
+    r = setsockopt(fd, IPPROTO_IP, leave ? IP_DROP_MEMBERSHIP : IP_ADD_MEMBERSHIP, &m, sizeof m);
+#endif
+    if (r != 0) {
+        fail_os();
+        return 0;
+    }
+    return 1;
+}
+
+cx_bool cx_net_udp_join(cx_u64 h, cx_u32 id, const cx_u8* group, cx_u32 family, cx_u32 index, cx_bool leave) {
+    net* n = net_enter(h);
+    net_slot* s = udp_of(n, id);
+    int ok = 0;
+    if (!s) net_fail(ERR_OTHER, 0);
+    else ok = udp_join(s, group, family, index, leave);
+    net_leave(n);
+    return ok != 0;
+}
+
+enum { UDP_MULTICAST_HOPS = 1, UDP_MULTICAST_LOOP, UDP_HOPS, UDP_BROADCAST, UDP_MULTICAST_IF };
+
+/* Sets an option, for IPv4 and for IPv6 as the socket has them: 1 if it could. */
+static int udp_option(net_slot* s, cx_u32 which, cx_u32 value) {
+    net_sock fd = SOCK_OF(s);
+    int v6 = s->ufamily == AF_INET6, v4 = !v6 || !s->uv6only;
+    int ok6 = 1, ok4 = 1;
+    if (which == UDP_MULTICAST_IF) {
+        if (!set_mif(fd, s->ufamily, s->uv6only, value)) {
+            fail_os();
+            return 0;
+        }
+        s->mif_cur = s->mif_set = value;
+        return 1;
+    }
+    if (which == UDP_BROADCAST) {
+        int b = value != 0;
+        ok4 = setsockopt(fd, SOL_SOCKET, SO_BROADCAST, (const char*)&b, sizeof b) == 0;
+    } else if (which == UDP_HOPS) {
+        int hops = (int)value;
+        if (v6) ok6 = setsockopt(fd, IPPROTO_IPV6, IPV6_UNICAST_HOPS, (const char*)&hops, sizeof hops) == 0;
+        if (v4) ok4 = setsockopt(fd, IPPROTO_IP, IP_TTL, (const char*)&hops, sizeof hops) == 0 || v6;
+    } else {
+        int six = (int)value;
+        int name6 = which == UDP_MULTICAST_HOPS ? IPV6_MULTICAST_HOPS : IPV6_MULTICAST_LOOP;
+        int name4 = which == UDP_MULTICAST_HOPS ? IP_MULTICAST_TTL : IP_MULTICAST_LOOP;
+        if (v6) ok6 = setsockopt(fd, IPPROTO_IPV6, name6, (const char*)&six, sizeof six) == 0;
+        if (v4) {
+#if defined(__APPLE__)
+            /* macOS takes these two IPv4 options as a byte. */
+            unsigned char four = (unsigned char)value;
+#elif defined(_WIN32)
+            DWORD four = value;
+#else
+            int four = (int)value;
+#endif
+            /* On a socket for both families, the IPv4 one is the system's to refuse. */
+            ok4 = setsockopt(fd, IPPROTO_IP, name4, (const char*)&four, sizeof four) == 0 || v6;
+        }
+    }
+    if (!ok6 || !ok4) {
+        fail_os();
+        return 0;
+    }
+    return 1;
+}
+
+cx_bool cx_net_udp_option(cx_u64 h, cx_u32 id, cx_u32 which, cx_u32 value) {
+    net* n = net_enter(h);
+    net_slot* s = udp_of(n, id);
+    int ok = 0;
+    if (!s) net_fail(ERR_OTHER, 0);
+    else ok = udp_option(s, which, value);
+    net_leave(n);
+    return ok != 0;
+}
+
+/* Closes the socket. What waited to be sent is dropped, and so is what arrived. Its slot is freed
+ * at the next poll, or, on Windows, once the system gives back what it holds. */
+void cx_net_udp_close(cx_u64 h, cx_u32 id) {
+    net* n = net_enter(h);
+    net_slot* s = udp_of(n, id);
+    if (s) {
+        s->state = CONN_CLOSED;
+        s->reported = 1;
+        if (SOCK_OF(s) != NET_BAD_SOCK) close_sock(SOCK_OF(s));
+        SOCK_OF(s) = NET_BAD_SOCK;
+        s->in.at = s->in.len = 0;
+        s->out.at = s->out.len = 0;
+        n->retiring = net_grow(n->retiring, &n->retiring_cap, n->nretiring + 1, sizeof(cx_u32));
+        n->retiring[n->nretiring++] = s->index;
+    }
+    net_leave(n);
+}
+
+/* The machine's network interfaces, for std.net's `interfaces`, put together by the first call,
+ * on the thread that asks, and copied out by the second. Each is its index, 4 bytes big-endian,
+ * flags (1 up, 2 loopback, 4 multicast), its name's length, 2 bytes, the name in UTF-8, how many
+ * addresses it has, 2 bytes, and each address: its family, 4 or 6, 22 bytes as `addr_parts` writes
+ * them, and its prefix length. */
+static _Thread_local net_buf if_list;
+
+static void if_put16(cx_u16 v) {
+    cx_u8 b[2] = {(cx_u8)(v >> 8), (cx_u8)v};
+    buf_append(&if_list, b, 2);
+}
+
+static void if_start(cx_u32 index, int flags, const char* name, size_t name_len) {
+    cx_u8 b[5] = {(cx_u8)(index >> 24), (cx_u8)(index >> 16), (cx_u8)(index >> 8), (cx_u8)index, (cx_u8)flags};
+    buf_append(&if_list, b, 5);
+    if (name_len > 0xFFFF) name_len = 0xFFFF;
+    if_put16((cx_u16)name_len);
+    buf_append(&if_list, (const cx_u8*)name, name_len);
+}
+
+static void if_address(const struct sockaddr* sa, int prefix) {
+    struct sockaddr_storage st;
+    memset(&st, 0, sizeof st);
+    memcpy(&st, sa, sa->sa_family == AF_INET6 ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in));
+    cx_u8 b[24];
+    b[0] = (cx_u8)addr_parts(&st, b + 1);
+#ifdef __APPLE__
+    /* macOS keeps a link-local address's scope in its third and fourth bytes too. */
+    if (b[0] == 6 && b[1] == 0xFE && (b[2] & 0xC0) == 0x80) b[3] = b[4] = 0;
+#endif
+    b[23] = (cx_u8)prefix;
+    buf_append(&if_list, b, 24);
+}
+
+#ifndef _WIN32
+/* How many bits a netmask has set. */
+static int mask_bits(const struct sockaddr* m) {
+    if (!m) return 0;
+    const cx_u8* p;
+    int len;
+    if (m->sa_family == AF_INET6) {
+        p = (const cx_u8*)&((const struct sockaddr_in6*)m)->sin6_addr;
+        len = 16;
+    } else {
+        p = (const cx_u8*)&((const struct sockaddr_in*)m)->sin_addr;
+        len = 4;
+    }
+    int bits = 0;
+    for (int i = 0; i < len; i++) {
+        for (cx_u8 b = p[i]; b; b <<= 1) bits++;
+    }
+    return bits;
+}
+#endif
+
+/* The length of the list, or -1 with the error. */
+cx_i64 cx_net_interfaces(void) {
+    net_check_thread();
+    if_list.at = if_list.len = 0;
+#ifdef _WIN32
+    if (!net_start()) {
+        net_fail(ERR_OTHER, WSAGetLastError());
+        return -1;
+    }
+    ULONG size = 16384;
+    IP_ADAPTER_ADDRESSES* list = NULL;
+    ULONG r = ERROR_BUFFER_OVERFLOW;
+    for (int tries = 0; tries < 4 && r == ERROR_BUFFER_OVERFLOW; tries++) {
+        free(list);
+        list = malloc(size);
+        if (!list) net_out_of_memory();
+        r = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+                                 NULL, list, &size);
+    }
+    if (r != NO_ERROR) {
+        free(list);
+        net_fail(ERR_OTHER, (cx_i32)r);
+        return -1;
+    }
+    for (IP_ADAPTER_ADDRESSES* a = list; a; a = a->Next) {
+        char name[512];
+        int name_len = WideCharToMultiByte(CP_UTF8, 0, a->FriendlyName, -1, name, sizeof name, NULL, NULL);
+        name_len = name_len > 0 ? name_len - 1 : 0;
+        int flags = (a->OperStatus == IfOperStatusUp ? 1 : 0) | (a->IfType == IF_TYPE_SOFTWARE_LOOPBACK ? 2 : 0) |
+                    ((a->Flags & IP_ADAPTER_NO_MULTICAST) ? 0 : 4);
+        if_start(a->IfIndex ? a->IfIndex : a->Ipv6IfIndex, flags, name, (size_t)name_len);
+        cx_u16 count = 0;
+        for (IP_ADAPTER_UNICAST_ADDRESS* u = a->FirstUnicastAddress; u; u = u->Next) {
+            int f = u->Address.lpSockaddr->sa_family;
+            if ((f == AF_INET || f == AF_INET6) && count < 0xFFFF) count++;
+        }
+        if_put16(count);
+        cx_u16 put = 0;
+        for (IP_ADAPTER_UNICAST_ADDRESS* u = a->FirstUnicastAddress; u && put < count; u = u->Next) {
+            int f = u->Address.lpSockaddr->sa_family;
+            if (f != AF_INET && f != AF_INET6) continue;
+            if_address(u->Address.lpSockaddr, u->OnLinkPrefixLength);
+            put++;
+        }
+    }
+    free(list);
+#else
+    struct ifaddrs* all = NULL;
+    if (getifaddrs(&all) != 0) {
+        fail_os();
+        return -1;
+    }
+    /* getifaddrs gives an entry for each address, so each interface's are gathered under the first
+     * entry with its name. */
+    for (struct ifaddrs* i = all; i; i = i->ifa_next) {
+        int first = 1;
+        for (struct ifaddrs* j = all; j != i; j = j->ifa_next) {
+            if (strcmp(j->ifa_name, i->ifa_name) == 0) {
+                first = 0;
+                break;
+            }
+        }
+        if (!first) continue;
+        unsigned flags = (unsigned)i->ifa_flags;
+        int f = ((flags & IFF_UP) && (flags & IFF_RUNNING) ? 1 : 0) | ((flags & IFF_LOOPBACK) ? 2 : 0) | ((flags & IFF_MULTICAST) ? 4 : 0);
+        if_start(if_nametoindex(i->ifa_name), f, i->ifa_name, strlen(i->ifa_name));
+        cx_u16 count = 0;
+        for (struct ifaddrs* j = i; j; j = j->ifa_next) {
+            if (strcmp(j->ifa_name, i->ifa_name) != 0 || !j->ifa_addr) continue;
+            int fam = j->ifa_addr->sa_family;
+            if ((fam == AF_INET || fam == AF_INET6) && count < 0xFFFF) count++;
+        }
+        if_put16(count);
+        cx_u16 put = 0;
+        for (struct ifaddrs* j = i; j && put < count; j = j->ifa_next) {
+            if (strcmp(j->ifa_name, i->ifa_name) != 0 || !j->ifa_addr) continue;
+            int fam = j->ifa_addr->sa_family;
+            if (fam != AF_INET && fam != AF_INET6) continue;
+            if_address(j->ifa_addr, mask_bits(j->ifa_netmask));
+            put++;
+        }
+    }
+    freeifaddrs(all);
+#endif
+    return (cx_i64)if_list.len;
+}
+
+void cx_net_interfaces_copy(cx_u8* to) {
+    if (if_list.len) memcpy(to, if_list.p, if_list.len);
+    buf_free(&if_list);
+}
+
+/* The machine's name, as Python's `socket.gethostname()` gives it, into `to`, which has room for
+ * `cap` bytes: its length, or 0 if the system wouldn't say. */
+cx_usize cx_net_host_name(cx_u8* to, cx_usize cap) {
+    char name[256];
+    memset(name, 0, sizeof name);
+#ifdef _WIN32
+    if (!net_start()) return 0;
+#endif
+    if (gethostname(name, (int)sizeof name - 1) != 0) return 0;
+    size_t len = strlen(name);
+    if (len > cap) len = cap;
+    memcpy(to, name, len);
+    return len;
 }
 
 /* Why the last call that failed on this thread did: each thread has its own. */

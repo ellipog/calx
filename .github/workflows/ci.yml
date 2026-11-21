@@ -159,6 +159,49 @@ jobs:
       - name: Tests
         shell: bash
         run: '"$CALX_BIN" run --release tests/run.calx -- --modes debug,release'
+      # std.net.mdns beside the system's own responder (CLX-412): it finds a service avahi or
+      # Bonjour announces, and avahi-browse or dns-sd finds and resolves one it announces, with
+      # its TXT record. On Windows the tests run beside Windows' own responder already.
+      - name: mDNS with avahi and Bonjour
+        if: (runner.os == 'Linux' && runner.arch == 'X64') || runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -eu
+          out="$RUNNER_TEMP/mdns-interop"
+          "$CALX_BIN" build tools/mdns/interop.calx -o "$out"
+          kind=_calxci._tcp
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get install -y -qq avahi-daemon avahi-utils > /dev/null
+            sudo systemctl start avahi-daemon
+            avahi-publish -s "Avahi Side" "$kind" 4322 id=av &
+          else
+            dns-sd -R "Bonjour Side" "$kind" local 4322 id=bj &
+          fi
+          other=$!
+          if [ "$RUNNER_OS" = Linux ]; then
+            "$out" find "$kind" "Avahi Side" id=av
+          else
+            "$out" find "$kind" "Bonjour Side" id=bj
+          fi
+          kill "$other"
+          "$out" announce "$kind" "Calx Side" 25 id=ca &
+          calx=$!
+          sleep 3
+          if [ "$RUNNER_OS" = Linux ]; then
+            avahi-browse -rpt "$kind" | tee "$RUNNER_TEMP/browse.txt"
+            grep -q '"id=ca"' "$RUNNER_TEMP/browse.txt"
+          else
+            dns-sd -B "$kind" local > "$RUNNER_TEMP/browse.txt" &
+            browse=$!
+            dns-sd -L "Calx Side" "$kind" local > "$RUNNER_TEMP/lookup.txt" &
+            lookup=$!
+            sleep 6
+            kill "$browse" "$lookup"
+            cat "$RUNNER_TEMP/browse.txt" "$RUNNER_TEMP/lookup.txt"
+            grep -q 'Calx Side' "$RUNNER_TEMP/browse.txt"
+            grep -q 'id=ca' "$RUNNER_TEMP/lookup.txt"
+          fi
+          wait "$calx"
       # A handoff between threads that's missing its ordering fails only now and then, so on Arm
       # the parallel and thread tests run 20 more times (CLX-274).
       - name: Threads, again and again
@@ -167,7 +210,7 @@ jobs:
         run: for i in $(seq 1 20); do "$CALX_BIN" run --release tests/run.calx -- --modes release tests/parallel tests/thread || exit 1; done
       - name: Check the release tools and the art script
         shell: bash
-        run: for f in tools/update/update.calx tools/release/package.calx tools/release/toolchain.calx assets/logo/banner.calx; do "$CALX_BIN" check "$f"; done
+        run: for f in tools/update/update.calx tools/release/package.calx tools/release/toolchain.calx tools/mdns/interop.calx assets/logo/banner.calx; do "$CALX_BIN" check "$f"; done
       # Calx's own code in its one format (CLX-160). The suite checks the tests' files.
       - name: Formatting
         shell: bash
