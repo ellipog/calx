@@ -1,5 +1,5 @@
 /// HTTP and HTTPS requests, on the system's own client, so certificates are checked as the system
-/// checks them: WinHTTP on Windows, and libcurl on Linux and macOS (D118).
+/// checks them: WinHTTP on Windows, URLSession on iOS, and libcurl on Linux and macOS (D118).
 ///
 /// A request runs off the program's thread, and `done` says when it has finished, so a server's
 /// loop goes on while it waits, as vanilla's login waits for Mojang's session server on a thread of
@@ -52,9 +52,9 @@ pub enum Error {
     TooLong
     /// There's no HTTP client on the system that can make the request: on Linux, libcurl isn't
     /// installed, or for `Version.Http2Only`, the system's client has no HTTP/2 (a libcurl built
-    /// without nghttp2), or no HTTP/2 without TLS (WinHTTP).
+    /// without nghttp2), or no HTTP/2 without TLS (WinHTTP and URLSession).
     Unavailable
-    /// Something else, with the system's error code: libcurl's on Linux.
+    /// Something else, with the system's error code: libcurl's on Linux, `NSURLError`'s on iOS.
     Os(i32)
 }
 
@@ -226,6 +226,7 @@ impl Request {
         let version = match used {
             10 => "HTTP/1.0",
             20 => "HTTP/2",
+            30 => "HTTP/3",
             _ => "HTTP/1.1",
         }
         return Response {

@@ -2,8 +2,8 @@
 // loopback, as tests/std/http.calx's is. It keeps each HTTP/1.1 connection open, and speaks
 // enough HTTP/2 (RFC 9113) to answer GETs that come with prior knowledge, h2c. HTTP/2 over TLS,
 // which ALPN chooses, can't be tested without a TLS server, so h2c is what shows that requests
-// multiplex over one connection. WinHTTP has no h2c, so on Windows that part checks that the
-// requests say so, and gives the lines Linux and macOS print.
+// multiplex over one connection. WinHTTP and URLSession have no h2c, so on Windows and iOS that
+// part checks that the requests say so, and gives the lines Linux and macOS print.
 
 import std.env
 import std.http.{Error, Request, Response, Version, get}
@@ -146,7 +146,7 @@ fn body_of(r: Response) -> String {
 fn unavailable(r: mut Request) {
     match r.wait() {
         err(Error.Unavailable) => {}
-        _ => panic("WinHTTP has no h2c, so Http2Only on http:// is Unavailable"),
+        _ => panic("WinHTTP and URLSession have no h2c, so Http2Only on http:// is Unavailable"),
     }
 }
 
@@ -155,7 +155,7 @@ fn h2c(net: Net, s: mut Server, base: String) -> List<String> {
     let before = s.accepted
     var x = get("{base}/x", [], 5000, 1000, version: Version.Http2Only)
     var y = get("{base}/y", [], 5000, 1000, version: Version.Http2Only)
-    if env.os() == "windows" {
+    if env.os() == "windows" or env.os() == "ios" {
         unavailable(mut x)
         unavailable(mut y)
         return [

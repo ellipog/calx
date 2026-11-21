@@ -2071,8 +2071,15 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
             if (file_exists(alloc_obj)) touch(alloc_obj);
             else compile((runtime / "calx_alloc.c").string(), alloc_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
             for (const auto& [file, obj] : parts) {
-                if (file_exists(obj)) touch(obj);
-                else compile((runtime / file).string(), obj, {"-D_CRT_SECURE_NO_WARNINGS"});
+                if (file_exists(obj)) {
+                    touch(obj);
+                } else if (file == "calx_http.c" && tc.target.os == Os::ios) {
+                    // On iOS, HTTP is URLSession's and WebSockets' connections Network.framework's,
+                    // so that part is Objective-C, which links its frameworks itself (CLX-410).
+                    compile((runtime / file).string(), obj, {"-D_CRT_SECURE_NO_WARNINGS", "-x", "objective-c"});
+                } else {
+                    compile((runtime / file).string(), obj, {"-D_CRT_SECURE_NO_WARNINGS"});
+                }
             }
             if (!sqlite_obj.empty()) {
                 if (file_exists(sqlite_obj)) {

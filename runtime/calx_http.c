@@ -1,7 +1,7 @@
 /* HTTP and HTTPS requests behind std.http (D118), on the system's own client so that certificates
- * are checked as the system checks them: WinHTTP on Windows, and libcurl on Linux and macOS,
- * loaded with dlopen when the first request starts, so a program that makes none doesn't need it
- * installed. Every macOS has it; on Linux it's a package.
+ * are checked as the system checks them: WinHTTP on Windows, URLSession on iOS, and libcurl on
+ * Linux and macOS, loaded with dlopen when the first request starts, so a program that makes none
+ * doesn't need it installed. Every macOS has it; on Linux it's a package.
  * Linked only into programs that call them.
  *
  * Each request runs off the program's thread, the way vanilla asks Mojang's session server on an
@@ -23,7 +23,7 @@
  * connection is kept for the requests after it, and HTTP/2 ones to a host go over one at once.
  *
  * WebSockets, behind std.http.websocket, are at the end of the file: on libcurl's connections on
- * Linux and macOS, and on Winsock and Schannel on Windows. */
+ * Linux and macOS, on Network.framework's on iOS, and on Winsock and Schannel on Windows. */
 #include "calx_rt.h"
 
 #include <stdlib.h>
@@ -51,6 +51,11 @@
 #ifndef __APPLE__
 #include <sys/random.h>
 #endif
+#endif
+#ifdef CX_IOS
+/* URLSession and Network.framework, for which this file is built as Objective-C (CLX-410). */
+#import <Foundation/Foundation.h>
+#include <Network/Network.h>
 #endif
 
 /* In calx_rt.c: starts a thread with the stack every thread of a program has (D135). */
@@ -137,6 +142,7 @@ typedef struct request {
     void* easy;              /* on the transfer thread, libcurl's handle */
     struct curl_slist* list; /* and the header lines it sends */
     struct request* queued;  /* the next request waiting for the transfer thread */
+    int redirects;           /* on iOS, how many it has followed */
 #endif
     int started; /* 1 on a thread of its own, 2 on the transfer thread */
 } request;
@@ -692,6 +698,268 @@ static void run(request* r) {
     if (opener) host_release(opener, 0);
 }
 
+#elif defined(CX_IOS)
+
+/* --- iOS: URLSession ----------------------------------------------------------------------- *
+ *
+ * iOS has no libcurl, so requests go through URLSession, the system's own client, which checks
+ * certificates as the system does, and keeps connections and speaks HTTP/2 over TLS by itself
+ * (CLX-410). This part of the file is Objective-C, which the compiler builds it as for iOS, and
+ * links Foundation itself, so an app needs nothing more. Every request is a data task on one
+ * session, whose delegate, on a queue of its own, gathers the response and finishes the request
+ * as the transfer threads do on Linux and macOS: `done_cond` says when one has.
+ *
+ * URLSession decides some things itself. It always sends Accept, Accept-Language and
+ * Accept-Encoding, so Accept-Encoding is `identity` unless the caller gives one, and the body
+ * comes as the server sent it; the other two are URLSession's unless the caller gives them. It
+ * picks HTTP/1.1 or HTTP/2 over TLS by ALPN for Http1 too, and HTTP/3 where a server offers it;
+ * it has no h2c, so Http2Only on http:// is Unavailable, as on Windows. The headers come as
+ * URLSession read them, one line for each name. */
+
+__asm__(".linker_option \"-framework\", \"Foundation\"");
+
+static pthread_mutex_t done_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t done_cond = PTHREAD_COND_INITIALIZER;
+
+static void transfer_done(request* r) {
+    pthread_mutex_lock(&done_lock);
+    __atomic_store_n(&r->state, 1, __ATOMIC_RELEASE);
+    pthread_cond_broadcast(&done_cond);
+    pthread_mutex_unlock(&done_lock);
+}
+
+/* What an NSURLErrorDomain code means to std.http. */
+static int url_error(NSInteger e) {
+    switch (e) {
+    case NSURLErrorBadURL:
+    case NSURLErrorUnsupportedURL: return E_BAD_URL;
+    case NSURLErrorCannotFindHost:
+    case NSURLErrorDNSLookupFailed: return E_RESOLVE;
+    case NSURLErrorCannotConnectToHost:
+    case NSURLErrorNotConnectedToInternet:
+    case NSURLErrorInternationalRoamingOff:
+    case NSURLErrorDataNotAllowed: return E_CONNECT;
+    case NSURLErrorTimedOut: return E_TIMEOUT;
+    case NSURLErrorSecureConnectionFailed:
+    case NSURLErrorServerCertificateHasBadDate:
+    case NSURLErrorServerCertificateUntrusted:
+    case NSURLErrorServerCertificateHasUnknownRoot:
+    case NSURLErrorServerCertificateNotYetValid:
+    case NSURLErrorClientCertificateRejected:
+    case NSURLErrorClientCertificateRequired: return E_TLS;
+    case NSURLErrorDataLengthExceedsMaximum: return E_TOO_LONG;
+    case NSURLErrorNetworkConnectionLost:
+    case NSURLErrorBadServerResponse:
+    case NSURLErrorCannotParseResponse:
+    case NSURLErrorZeroByteResource:
+    case NSURLErrorCannotDecodeRawData:
+    case NSURLErrorCannotDecodeContentData:
+    case NSURLErrorHTTPTooManyRedirects:
+    case NSURLErrorRedirectToNonExistentLocation: return E_PROTOCOL;
+    default: return E_OS;
+    }
+}
+
+/* Nanoseconds from `start` to `at`, or 0 for a step that wasn't taken. */
+static cx_u64 since(NSDate* start, NSDate* at) {
+    if (!start || !at) return 0;
+    NSTimeInterval s = [at timeIntervalSinceDate:start];
+    return s > 0 ? (cx_u64)(s * 1e9) : 0;
+}
+
+@interface CxSessionDelegate : NSObject <NSURLSessionDataDelegate>
+@end
+
+/* Each running task's request, by the task's identifier, used only on the session's queue. */
+static NSMutableDictionary* running_tasks;
+
+static request* task_request(NSURLSessionTask* task) {
+    NSValue* v = running_tasks[@(task.taskIdentifier)];
+    return v ? (request*)v.pointerValue : NULL;
+}
+
+/* Ends the request with `error`, which the task's completion then keeps. */
+static void task_fail(NSURLSessionTask* task, request* r, int error) {
+    if (!r->error) r->error = error;
+    [task cancel];
+}
+
+@implementation CxSessionDelegate
+
+- (void)URLSession:(NSURLSession*)session
+              dataTask:(NSURLSessionDataTask*)task
+    didReceiveResponse:(NSURLResponse*)response
+     completionHandler:(void (^)(NSURLSessionResponseDisposition))done {
+    request* r = task_request(task);
+    if (r && [response isKindOfClass:[NSHTTPURLResponse class]]) {
+        NSHTTPURLResponse* http = (NSHTTPURLResponse*)response;
+        r->status = (cx_u32)http.statusCode;
+        r->raw.len = 0;
+        for (NSString* name in http.allHeaderFields) {
+            NSString* line = [NSString stringWithFormat:@"%@: %@\r\n", name, http.allHeaderFields[name]];
+            const char* text = line.UTF8String;
+            if (text && !add(&r->raw, text, strlen(text))) cx_panic_capacity();
+        }
+        long long length = response.expectedContentLength;
+        r->sized = 1;
+        __atomic_store_n(&r->expected, length >= 0 ? (cx_u64)length + 1 : 0, __ATOMIC_RELAXED);
+    }
+    done(NSURLSessionResponseAllow);
+}
+
+- (void)URLSession:(NSURLSession*)session dataTask:(NSURLSessionDataTask*)task didReceiveData:(NSData*)data {
+    request* r = task_request(task);
+    if (!r || r->error) return;
+    __block int too_long = 0;
+    [data enumerateByteRangesUsingBlock:^(const void* bytes_at, NSRange range, BOOL* stop) {
+        if (r->data.len + range.length > r->limit) {
+            too_long = 1;
+            *stop = YES;
+        } else if (!add(&r->data, bytes_at, range.length)) {
+            cx_panic_capacity();
+        }
+    }];
+    if (too_long) task_fail(task, r, E_TOO_LONG);
+    else __atomic_store_n(&r->received, (cx_u64)r->data.len, __ATOMIC_RELAXED);
+}
+
+/* Up to 10 redirects, and never from https:// to http://, as libcurl and WinHTTP are told. */
+- (void)URLSession:(NSURLSession*)session
+                          task:(NSURLSessionTask*)task
+    willPerformHTTPRedirection:(NSHTTPURLResponse*)response
+                    newRequest:(NSURLRequest*)next
+             completionHandler:(void (^)(NSURLRequest*))done {
+    request* r = task_request(task);
+    int downgrade = r && r->https && ![next.URL.scheme.lowercaseString isEqualToString:@"https"];
+    if (r && (++r->redirects > 10 || downgrade)) {
+        task_fail(task, r, E_PROTOCOL);
+        done(nil);
+        return;
+    }
+    done(next);
+}
+
+- (void)URLSession:(NSURLSession*)session task:(NSURLSessionTask*)task didFinishCollectingMetrics:(NSURLSessionTaskMetrics*)metrics {
+    request* r = task_request(task);
+    NSURLSessionTaskTransactionMetrics* t = metrics.transactionMetrics.lastObject;
+    if (!r || !t) return;
+    NSString* protocol = t.networkProtocolName.lowercaseString;
+    r->used = [protocol isEqualToString:@"h2"] ? 20 : [protocol isEqualToString:@"h3"] ? 30 : [protocol isEqualToString:@"http/1.0"] ? 10 : 11;
+    r->reused = t.reusedConnection;
+    NSDate* start = t.fetchStartDate;
+    if (!r->reused) {
+        r->times[T_RESOLVE] = since(start, t.domainLookupEndDate);
+        r->times[T_CONNECT] = since(start, t.secureConnectionStartDate ? t.secureConnectionStartDate : t.connectEndDate);
+        if (r->https) r->times[T_TLS] = since(start, t.secureConnectionEndDate);
+    }
+    r->times[T_FIRST_BYTE] = since(start, t.responseStartDate ? t.responseStartDate : t.responseEndDate);
+    r->times[T_TOTAL] = since(start, t.responseEndDate);
+    /* Each step ends no sooner than the one before, as the other systems give them, though
+     * URLSession can leave a step out. */
+    cx_u64 before = 0;
+    for (int i = 0; i < T_COUNT; i++) {
+        if (r->times[i] == 0) continue;
+        if (r->times[i] < before) r->times[i] = before;
+        before = r->times[i];
+    }
+}
+
+- (void)URLSession:(NSURLSession*)session task:(NSURLSessionTask*)task didCompleteWithError:(NSError*)error {
+    request* r = task_request(task);
+    if (!r) return;
+    [running_tasks removeObjectForKey:@(task.taskIdentifier)];
+    if (r->error) {
+        /* a limit or a rule of this file's, which cancelled it */
+    } else if (error) {
+        int e = [error.domain isEqualToString:NSURLErrorDomain] ? url_error(error.code) : E_OS;
+        r->error = e, r->code = (cx_i32)error.code;
+    } else if (r->version == V_HTTP2_ONLY && r->used != 20) {
+        r->error = E_PROTOCOL;
+    } else if (!tidy_headers(r, 0)) {
+        cx_panic_capacity();
+    }
+    transfer_done(r);
+}
+
+@end
+
+static NSURLSession* http_session;
+static NSOperationQueue* http_queue;
+static cx_u32 session_state;
+
+static void session_open(void) {
+    @autoreleasepool {
+        NSURLSessionConfiguration* c = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+        /* No proxy, cookie, cache or credential store, as the other systems' clients have none. */
+        c.connectionProxyDictionary = @{};
+        c.HTTPCookieStorage = nil;
+        c.HTTPShouldSetCookies = NO;
+        c.URLCache = nil;
+        c.URLCredentialStorage = nil;
+        c.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+        c.timeoutIntervalForRequest = 24 * 3600;
+        c.timeoutIntervalForResource = 24 * 3600;
+        c.HTTPMaximumConnectionsPerHost = 16;
+        http_queue = [[NSOperationQueue alloc] init];
+        http_queue.maxConcurrentOperationCount = 1;
+        running_tasks = [[NSMutableDictionary alloc] init];
+        http_session = [[NSURLSession sessionWithConfiguration:c delegate:[[[CxSessionDelegate alloc] init] autorelease]
+                                                 delegateQueue:http_queue] retain];
+    }
+}
+
+/* Starts the request on the session. Its whole time is `timeout_ms`, after which it's cancelled. */
+static int transfer(request* r) {
+    once(&session_state, session_open);
+    r->started = 2;
+    @autoreleasepool {
+        NSURL* url = [NSURL URLWithString:[NSString stringWithUTF8String:r->url]];
+        if (!url) {
+            r->error = E_BAD_URL;
+            transfer_done(r);
+            return 1;
+        }
+        NSMutableURLRequest* q = [NSMutableURLRequest requestWithURL:url];
+        q.HTTPMethod = r->post ? @"POST" : @"GET";
+        q.timeoutInterval = 24 * 3600;
+        q.HTTPShouldHandleCookies = NO;
+        if (r->post) q.HTTPBody = [NSData dataWithBytes:r->body ? (const void*)r->body : "" length:r->body_len];
+        for (char* line = r->head; *line;) {
+            char* next = strstr(line, "\r\n");
+            if (!next) break;
+            char* colon = memchr(line, ':', (size_t)(next - line));
+            if (colon) {
+                NSString* name = [[[NSString alloc] initWithBytes:line length:(NSUInteger)(colon - line) encoding:NSUTF8StringEncoding] autorelease];
+                const char* v = colon + 1;
+                while (v < next && (*v == ' ' || *v == '\t')) v++;
+                NSString* value = [[[NSString alloc] initWithBytes:v length:(NSUInteger)(next - v) encoding:NSUTF8StringEncoding] autorelease];
+                if (name && value) [q addValue:value forHTTPHeaderField:name];
+            }
+            line = next + 2;
+        }
+        if (!has_header(r->head, "user-agent")) [q setValue:@"Calx" forHTTPHeaderField:@"User-Agent"];
+        if (!has_header(r->head, "accept-encoding")) [q setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"];
+        NSURLSessionDataTask* task = [http_session dataTaskWithRequest:q];
+        cx_u32 timeout_ms = r->timeout_ms;
+        [http_queue addOperationWithBlock:^{
+            running_tasks[@(task.taskIdentifier)] = [NSValue valueWithPointer:r];
+            [task resume];
+        }];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)timeout_ms * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            [http_queue addOperationWithBlock:^{
+                request* still = task_request(task);
+                if (still) task_fail(task, still, E_TIMEOUT);
+            }];
+        });
+    }
+    return 1;
+}
+
+/* Never reached on iOS, where every request goes to the session. */
+static void run(request* r) {
+    r->error = E_UNAVAILABLE;
+}
+
 #else
 
 /* --- Linux and macOS: libcurl, loaded at run time ------------------------------------------ */
@@ -1132,8 +1400,8 @@ cx_u64 cx_http_start(cx_bool post, const cx_u8* url, cx_usize url_len, const cx_
     if (!parse_url(r, (const char*)url, url_len)) {
         r->error = E_BAD_URL;
     }
-#ifdef _WIN32
-    /* WinHTTP speaks HTTP/2 over TLS alone, not h2c. */
+#if defined(_WIN32) || defined(CX_IOS)
+    /* WinHTTP and URLSession speak HTTP/2 over TLS alone, not h2c. */
     else if (r->version == V_HTTP2_ONLY && !r->https) {
         r->error = E_UNAVAILABLE;
     }
@@ -1642,7 +1910,283 @@ static int ws_has_token(const char* list, size_t n, const char* token) {
  *                                      the program's wake, or for `deadline`
  *   ws_disconnect(l)                   closes it and lets it go */
 
-#ifndef _WIN32
+#if defined(CX_IOS)
+
+/* --- WebSockets' connections on Network.framework ------------------------------------------- *
+ *
+ * iOS has no libcurl to make the connection, so Network.framework makes it: TCP, and TLS for
+ * wss://, with the system's certificate checks (CLX-410). It works by callbacks on a queue of its
+ * own, so what comes is kept in `in` until the connection's thread reads it, and a byte down a
+ * pipe wakes the thread when anything has come, the connection has ended, or a send has gone,
+ * which `ws_poll` waits for beside the program's wake. A send hands its bytes over at once and
+ * counts as unsent until Network.framework says it went, so a close waits for what was sent
+ * before it. */
+
+__asm__(".linker_option \"-framework\", \"Network\"");
+
+typedef struct ws_link_state {
+    pthread_mutex_t mu;
+    bytes in;        /* what's come and not been read */
+    size_t sending;  /* bytes handed to a send that hasn't gone */
+    int ended;       /* the server ended its side, or the connection failed: nothing more will come */
+    int broken;      /* the connection failed or was cancelled, or a send failed: nothing more goes */
+    int pipe[2];     /* a byte down it says one of those happened */
+    int refs;        /* the connection's thread, and each callback still to come */
+} ws_link_state;
+
+typedef struct {
+    nw_connection_t conn;
+    dispatch_queue_t queue;
+    ws_link_state* s;
+} ws_link;
+
+static void link_poke(ws_link_state* s) {
+    char b = 1;
+    if (write(s->pipe[1], &b, 1) < 0) {
+        /* The pipe is full, so the thread will wake anyway. */
+    }
+}
+
+/* Lets one holder of the state go, and frees it after the last. */
+static void link_release(ws_link_state* s) {
+    pthread_mutex_lock(&s->mu);
+    int last = --s->refs == 0;
+    pthread_mutex_unlock(&s->mu);
+    if (!last) return;
+    close(s->pipe[0]), close(s->pipe[1]);
+    free(s->in.p);
+    pthread_mutex_destroy(&s->mu);
+    free(s);
+}
+
+/* Reads what comes, into `in`, until the connection ends. */
+static void link_receive(nw_connection_t conn, ws_link_state* s) {
+    pthread_mutex_lock(&s->mu);
+    s->refs++;
+    pthread_mutex_unlock(&s->mu);
+    nw_connection_receive(conn, 1, 65536, ^(dispatch_data_t content, nw_content_context_t context, bool complete, nw_error_t error) {
+        (void)context;
+        pthread_mutex_lock(&s->mu);
+        if (content) {
+            dispatch_data_apply(content, ^bool(dispatch_data_t region, size_t offset, const void* p, size_t n) {
+                (void)region, (void)offset;
+                if (!add(&s->in, p, n)) cx_panic_capacity();
+                return true;
+            });
+        }
+        /* On a stream, complete is the server's FIN. */
+        int over = error != NULL || complete;
+        if (over) s->ended = 1;
+        if (error) s->broken = 1;
+        pthread_mutex_unlock(&s->mu);
+        link_poke(s);
+        if (!over) link_receive(conn, s);
+        link_release(s);
+    });
+}
+
+/* What a Network.framework error means to std.http, with the system's code. */
+static int link_error(nw_error_t e, cx_i32* code) {
+    if (!e) {
+        *code = 0;
+        return E_CONNECT;
+    }
+    int c = nw_error_get_error_code(e);
+    *code = c;
+    switch (nw_error_get_error_domain(e)) {
+    case nw_error_domain_dns: return E_RESOLVE;
+    case nw_error_domain_tls: return E_TLS;
+    case nw_error_domain_posix: return c == ETIMEDOUT ? E_TIMEOUT : c == ECONNREFUSED || c == EHOSTUNREACH || c == ENETUNREACH ? E_CONNECT : E_OS;
+    default: return E_OS;
+    }
+}
+
+static int ws_connect(wsock* w, ws_link* l, cx_u64 deadline, cx_i32* code) {
+    l->conn = NULL, l->queue = NULL;
+    ws_link_state* s = calloc(1, sizeof *s);
+    if (!s) cx_panic_capacity();
+    if (pipe(s->pipe) != 0) {
+        *code = errno;
+        free(s);
+        return E_OS;
+    }
+    for (int i = 0; i < 2; i++) {
+        fcntl(s->pipe[i], F_SETFD, FD_CLOEXEC);
+        fcntl(s->pipe[i], F_SETFL, fcntl(s->pipe[i], F_GETFL) | O_NONBLOCK);
+    }
+    pthread_mutex_init(&s->mu, NULL);
+    s->refs = 2; /* the thread's, and the state handler's until the connection is cancelled */
+    l->s = s;
+    char port[8];
+    ws_port_text(w->port, port);
+    nw_endpoint_t at = nw_endpoint_create_host(w->host, port);
+    nw_parameters_t params = w->tls ? nw_parameters_create_secure_tcp(NW_PARAMETERS_DEFAULT_CONFIGURATION, NW_PARAMETERS_DEFAULT_CONFIGURATION)
+                                    : nw_parameters_create_secure_tcp(NW_PARAMETERS_DISABLE_PROTOCOL, NW_PARAMETERS_DEFAULT_CONFIGURATION);
+    /* No proxy, as the other systems' connections take none. */
+    nw_parameters_set_prefer_no_proxy(params, true);
+    l->conn = nw_connection_create(at, params);
+    nw_release(at);
+    nw_release(params);
+    l->queue = dispatch_queue_create("calx.websocket", DISPATCH_QUEUE_SERIAL);
+    nw_connection_set_queue(l->conn, l->queue);
+    /* Its state, as it opens: 1 once ready, -1 once it failed, with the error. */
+    __block int state = 0;
+    __block nw_error_t failure = NULL;
+    dispatch_semaphore_t changed = dispatch_semaphore_create(0);
+    nw_connection_set_state_changed_handler(l->conn, ^(nw_connection_state_t now, nw_error_t error) {
+        if (state != 0) {
+            if (now == nw_connection_state_failed || now == nw_connection_state_cancelled) {
+                pthread_mutex_lock(&s->mu);
+                s->ended = s->broken = 1;
+                pthread_mutex_unlock(&s->mu);
+                link_poke(s);
+            }
+            if (now == nw_connection_state_cancelled) link_release(s);
+            return;
+        }
+        if (now == nw_connection_state_ready) {
+            state = 1;
+        } else if (now == nw_connection_state_failed || now == nw_connection_state_cancelled ||
+                   (now == nw_connection_state_waiting && error)) {
+            /* Waiting is what it does when it can't connect yet, as a refused port or no network
+             * gives, which here is as good as failing. */
+            if (error) failure = nw_retain(error);
+            state = -1;
+        } else {
+            return;
+        }
+        dispatch_semaphore_signal(changed);
+    });
+    nw_connection_start(l->conn);
+    cx_u64 now = ws_now_ms();
+    long waited = now < deadline ? dispatch_semaphore_wait(changed, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(deadline - now) * NSEC_PER_MSEC)) : 1;
+    dispatch_release(changed);
+    __block int opened = 0;
+    __block nw_error_t why = NULL;
+    dispatch_sync(l->queue, ^{
+        opened = state;
+        why = failure;
+        if (state == 0) state = -1; /* what comes after is too late */
+    });
+    (void)waited;
+    if (opened != 1) {
+        int e = opened == 0 ? E_TIMEOUT : link_error(why, code);
+        if (why) nw_release(why);
+        nw_connection_cancel(l->conn);
+        nw_release(l->conn);
+        dispatch_release(l->queue);
+        link_release(s);
+        return e;
+    }
+    link_receive(l->conn, s);
+    return 0;
+}
+
+static void ws_disconnect(ws_link* l) {
+    ws_link_state* s = l->s;
+    /* The end of what this side sends, a FIN, after everything sent before it, as closing a socket
+     * gives on the other systems. Cancelling at once would reset the connection, which can lose the
+     * close frame before it. Then the server's FIN is waited for, as RFC 6455 has the server close
+     * first, for as long as a second. */
+    pthread_mutex_lock(&s->mu);
+    int broken = s->broken;
+    if (!broken) s->sending++, s->refs++;
+    pthread_mutex_unlock(&s->mu);
+    if (!broken) {
+        nw_connection_send(l->conn, NULL, NW_CONNECTION_FINAL_MESSAGE_CONTEXT, true, ^(nw_error_t error) {
+            pthread_mutex_lock(&s->mu);
+            s->sending--;
+            if (error) s->broken = 1;
+            pthread_mutex_unlock(&s->mu);
+            link_poke(s);
+            link_release(s);
+        });
+    }
+    for (int i = 0; i < 100; i++) {
+        pthread_mutex_lock(&s->mu);
+        int busy = !s->broken && (s->sending > 0 || !s->ended);
+        pthread_mutex_unlock(&s->mu);
+        if (!busy) break;
+        struct timespec ten = {0, 10000000};
+        nanosleep(&ten, NULL);
+    }
+    nw_connection_cancel(l->conn);
+    nw_release(l->conn);
+    dispatch_release(l->queue);
+    link_release(s);
+}
+
+/* Hands what's in `out` from `at` to the connection, while less than 4 MiB of it is still going. */
+static int ws_send_some(ws_link* l, bytes* out, size_t* at) {
+    ws_link_state* s = l->s;
+    pthread_mutex_lock(&s->mu);
+    int broken = s->broken;
+    size_t room = s->sending < (4u << 20) ? (4u << 20) - s->sending : 0;
+    pthread_mutex_unlock(&s->mu);
+    if (broken && *at < out->len) return 0;
+    size_t n = out->len - *at < room ? out->len - *at : room;
+    if (n) {
+        dispatch_data_t data = dispatch_data_create(out->p + *at, n, NULL, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+        pthread_mutex_lock(&s->mu);
+        s->sending += n;
+        s->refs++;
+        pthread_mutex_unlock(&s->mu);
+        nw_connection_send(l->conn, data, NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, false, ^(nw_error_t error) {
+            pthread_mutex_lock(&s->mu);
+            s->sending -= n;
+            if (error) s->ended = s->broken = 1;
+            pthread_mutex_unlock(&s->mu);
+            link_poke(s);
+            link_release(s);
+        });
+        dispatch_release(data);
+        *at += n;
+    }
+    if (*at == out->len) out->len = 0, *at = 0;
+    return 1;
+}
+
+static int ws_unsent(ws_link* l) {
+    pthread_mutex_lock(&l->s->mu);
+    int some = l->s->sending > 0 && !l->s->broken;
+    pthread_mutex_unlock(&l->s->mu);
+    return some;
+}
+
+static int ws_recv_some(ws_link* l, bytes* in) {
+    ws_link_state* s = l->s;
+    pthread_mutex_lock(&s->mu);
+    int got = s->in.len > 0, ended = s->ended;
+    if (got) {
+        if (!add(in, s->in.p, s->in.len)) cx_panic_capacity();
+        s->in.len = 0;
+    }
+    pthread_mutex_unlock(&s->mu);
+    return got ? 1 : ended ? -1 : 0;
+}
+
+static void ws_poll(wsock* w, ws_link* l, int writing, cx_u64 deadline) {
+    (void)writing; /* a send that goes pokes the pipe too */
+    struct pollfd fds[2] = {{l->s->pipe[0], POLLIN, 0}, {w->wake[0], POLLIN, 0}};
+    int ms = -1;
+    if (deadline != WS_FOREVER) {
+        cx_u64 now = ws_now_ms();
+        ms = now >= deadline ? 0 : deadline - now > 0x7FFFFFFF ? 0x7FFFFFFF : (int)(deadline - now);
+    }
+    if (poll(fds, 2, ms) > 0) {
+        char drain[64];
+        if (fds[0].revents & POLLIN) {
+            while (read(l->s->pipe[0], drain, sizeof drain) > 0) {
+            }
+        }
+        if (fds[1].revents & POLLIN) {
+            while (read(w->wake[0], drain, sizeof drain) > 0) {
+            }
+        }
+    }
+}
+
+#elif !defined(_WIN32)
 
 /* --- WebSockets' connections on libcurl ----------------------------------------------------- */
 
@@ -2448,6 +2992,9 @@ static void ws_talk(wsock* w, ws_link* l, cx_u64 deadline) {
             /* The answer to the server's close goes out, for a while at most, then it's done. */
             if (close_by == WS_FOREVER) close_by = ws_now_ms() + (w->timeout_ms < 10000 ? w->timeout_ms : 10000);
             if (ws_now_ms() >= close_by) break;
+            /* What the frames above added goes now, as Network.framework's poll waits for news, not
+             * for room to write. */
+            if (out.len && !ws_send_some(l, &out, &sent)) continue;
             if (out.len || ws_unsent(l)) ws_poll(w, l, 1, close_by);
             continue;
         }
@@ -2489,7 +3036,11 @@ static void ws_talk(wsock* w, ws_link* l, cx_u64 deadline) {
                 if (dead < wake_at) wake_at = dead;
             }
         }
-        if (r == 0) ws_poll(w, l, out.len > 0 || ws_unsent(l), wake_at);
+        if (r == 0) {
+            /* A pong the frames above added goes before the wait, as in the close's case. */
+            if (out.len && !ws_send_some(l, &out, &sent)) continue;
+            ws_poll(w, l, out.len > 0 || ws_unsent(l), wake_at);
+        }
     }
     free(out.p), free(in.p), free(message.p), free(queued.p);
 }
@@ -2564,10 +3115,12 @@ cx_u64 cx_http_ws_open(const cx_u8* url, cx_usize url_len, const cx_u8* head, cx
         if (!w->wake) error = E_OS, w->code = (cx_i32)GetLastError();
     }
 #else
+#ifndef CX_IOS
     if (!error) {
         once(&curl_state, curl_load);
         if (!curl_loaded || !curl.easy_send || !curl.easy_recv) error = E_UNAVAILABLE;
     }
+#endif
     if (!error) {
         if (pipe(w->wake) != 0) {
             error = E_OS, w->code = errno;

@@ -258,7 +258,7 @@ What's different on iOS:
 - A build runs on iOS 18 and later, on the iPhone XS and XR and every iPhone since. A release build counts on the A12's processor, and one for the simulator on the M1's.
 - An app runs alone in its sandbox, which lets it start no other program, so [std.process](../std/process.md#ios) fails with `Unsupported` there, and on the simulator too, so what works on one works on the other.
 - [std.keyring](../std/keyring.md) keeps its secrets in the app's own Keychain, which needs the application identifier every app Xcode builds is given.
-- std.net's event loop is a kqueue, as on macOS. std.http's requests use libcurl, which iOS hasn't, so they fail there until it uses URLSession instead, which is CLX-410.
+- std.net's event loop is a kqueue, as on macOS. [std.http](../std/http.md)'s requests go through URLSession, and a [WebSocket](../std/http-websocket.md)'s connection through Network.framework, where Linux and macOS use libcurl, and the library links both frameworks by itself. The app's App Transport Security applies to the requests.
 - The runtime calls none of Apple's private functions, which the App Store turns an app away for: its threads wait with `os_sync_wait_on_address`.
 
 `calx build --target aarch64-ios-sim` builds a program too, which `xcrun simctl spawn booted ./program` runs on a simulator that's started, for trying code there without an app. A program for an iPhone needs an app around it, and its signing, to run, so for an iPhone a static library is what's built.

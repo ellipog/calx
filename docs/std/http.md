@@ -1,13 +1,13 @@
 ---
 title: std.http
-description: HTTP and HTTPS requests on the system's own client, WinHTTP on Windows and libcurl on Linux and macOS, off the program's thread so its loop goes on while it waits, in HTTP/1.1 or HTTP/2, over connections kept for the requests after them.
+description: HTTP and HTTPS requests on the system's own client, WinHTTP on Windows, URLSession on iOS and libcurl on Linux and macOS, off the program's thread so its loop goes on while it waits, in HTTP/1.1 or HTTP/2, over connections kept for the requests after them.
 ---
 
 # `std.http`
 
 GET and POST over HTTP and HTTPS, in HTTP/1.1 or [HTTP/2](#http2). An online-mode server uses it to ask Mojang's session server whether a player who's logging in has joined.
 
-Requests go through the system's own client, so the system checks certificates against the roots it trusts, as browsers do: WinHTTP on Windows, and libcurl on Linux and macOS. To answer requests rather than make them, there's [std.http.server](http-server.md), and to talk to a WebSocket, [std.http.websocket](http-websocket.md).
+Requests go through the system's own client, so the system checks certificates against the roots it trusts, as browsers do: WinHTTP on Windows, URLSession on iOS, and libcurl on Linux and macOS. To answer requests rather than make them, there's [std.http.server](http-server.md), and to talk to a WebSocket, [std.http.websocket](http-websocket.md).
 
 A script that only wants what's at a URL calls `fetch`, which waits for the answer:
 
@@ -57,10 +57,10 @@ fn main() {
 | `r.wait() -> Response ! Error` | Waits for it to finish and takes the response. Panics if it was taken already, by `r` or a copy of it |
 | `Header { name: String, value: String }` | A header line |
 | `resp.status: u32` | The status code: 200, or 204 when the session server says a player hasn't joined |
-| `resp.headers: List<Header>` | The response's header lines, in the order they came, with each value trimmed. HTTP/2 sends names in lower case, and on Linux and macOS they come so; WinHTTP gives them in its own case |
+| `resp.headers: List<Header>` | The response's header lines, in the order they came, with each value trimmed. HTTP/2 sends names in lower case, and on Linux and macOS they come so; WinHTTP and URLSession give them in their own case |
 | `resp.body: List<u8>` | The body |
 | `resp.header(name: String) -> String?` | The first header named `name`, ignoring case, as HTTP compares names |
-| `resp.version: String` | The HTTP the response came in, `HTTP/1.1`, `HTTP/2` or `HTTP/1.0`, as httpx's `r.http_version` |
+| `resp.version: String` | The HTTP the response came in, `HTTP/1.1`, `HTTP/2` or `HTTP/1.0`, as httpx's `r.http_version`, and on iOS `HTTP/3` too |
 | `resp.reused: bool` | Whether it came over a connection that was open already ([connections](#connections)) |
 | `resp.timings: Timings` | How long its steps took ([timings](#timings)) |
 
@@ -139,8 +139,9 @@ Which systems speak it, through their own clients:
 | Windows 10 1607 and later, and Windows 11 | WinHTTP's HTTP/2 | `Unavailable`: WinHTTP has none |
 | Linux | libcurl's, where it's built with nghttp2, as Debian's, Ubuntu's, Fedora's, Arch's and Alpine's are. `curl -V` lists `HTTP2` if so. Without it, `Http2` is HTTP/1.1 and `Http2Only` is `Unavailable` | The same |
 | macOS | The system's libcurl, which has HTTP/2 | The same |
+| iOS | URLSession's, which picks HTTP/2 itself whenever the server takes it, for `Http1` too, and HTTP/3 where the server offers it | `Unavailable`: URLSession has none |
 
-A server that doesn't take HTTP/2 makes `Http2Only` over `https://` fail: with `Protocol` on Windows, and on Linux and macOS with `Tls`, as libcurl offers only HTTP/2 in the handshake and the server refuses it, or `Protocol` if it answers in HTTP/1.1 all the same. A server that speaks only HTTP/2 answers an HTTP/1.1 request with something that isn't HTTP/1.1, which is `Protocol`; `Version.Http2` is the cure.
+A server that doesn't take HTTP/2 makes `Http2Only` over `https://` fail: with `Protocol` on Windows, and on Linux and macOS with `Tls`, as libcurl offers only HTTP/2 in the handshake and the server refuses it, or `Protocol` if it answers in HTTP/1.1 all the same. On iOS, where URLSession picks the version, it's `Protocol`. A server that speaks only HTTP/2 answers an HTTP/1.1 request with something that isn't HTTP/1.1, which is `Protocol`; `Version.Http2` is the cure.
 
 HTTP/2 sends header names in lower case. libcurl gives them so, and WinHTTP in its own case, so `resp.header(name)`, which ignores case, finds them on every system.
 
@@ -162,7 +163,7 @@ Requests that ask for HTTP/2 never go over a kept HTTP/1.1 connection that an `H
 | `first_byte_ns` | The response's first byte came. On Windows, its headers, which are mostly in the first packet |
 | `total_ns` | The whole body had come |
 
-They come from libcurl, and from WinHTTP's request times on Windows. A Windows whose WinHTTP doesn't give those gives the total alone, and `reused` is false there.
+They come from libcurl, from URLSession's task metrics on iOS, and from WinHTTP's request times on Windows. A Windows whose WinHTTP doesn't give those gives the total alone, and `reused` is false there.
 
 ## Forms and file uploads
 
@@ -207,7 +208,7 @@ Why a request got no response, as `Error`:
 | `Timeout` | The response didn't come within the time | timed out |
 | `Protocol` | The server closed the connection early, or what it sent isn't HTTP/1.1 or HTTP/2: an HTTP/2-only server's answer to HTTP/1.1, or something that isn't HTTP at all, such as an SSH server on the port. With `Http2Only`, a server that doesn't take HTTP/2 | the response ended early, or the server didn't answer in HTTP/1.1 or HTTP/2 |
 | `TooLong` | The body is longer than the limit | the body is longer than the limit |
-| `Unavailable` | There's no HTTP client on the system that can make the request: on Linux, libcurl isn't installed, or for `Http2Only`, it's built without HTTP/2; on Windows, `Http2Only` over `http://` | there's no HTTP client on this system for the request; on Linux, install libcurl |
+| `Unavailable` | There's no HTTP client on the system that can make the request: on Linux, libcurl isn't installed, or for `Http2Only`, it's built without HTTP/2; on Windows and iOS, `Http2Only` over `http://` | there's no HTTP client on this system for the request; on Linux, install libcurl |
 | `Os(code)` | Something else, with the system's error code | system error 7 |
 
 ## What's sent
@@ -215,7 +216,7 @@ Why a request got no response, as `Error`:
 Both clients are set up to send the same request:
 
 - HTTP/1.1, or HTTP/2 when `version` asks for it, with a `User-Agent` of `Calx` unless a header gives another.
-- No `Accept` or `Accept-Encoding` header unless the caller gives one, so bodies come back as they are, not compressed.
+- No `Accept` or `Accept-Encoding` header unless the caller gives one, so bodies come back as they are, not compressed. On iOS, URLSession adds `Accept: */*` and an `Accept-Language` of its own where the caller gives none, and `Accept-Encoding` is `identity`, so bodies come back as they are there too.
 - No proxy.
 - Redirects are followed up to 10 times, but never from HTTPS to HTTP.
 - The fragment, after `#`, isn't sent, as Java and browsers don't send it.
@@ -226,7 +227,9 @@ Header values that aren't ASCII are read as Latin-1, as Java reads them, and giv
 
 The [tests](../../tests/std/http.calx) run a server on [`std.net`](net.md) in the same program, and make requests to it on loopback. They check status codes, headers in both directions, POST bodies, a redirect, an empty 204, a body over the limit, a server that never answers, one that doesn't answer in HTTP, and URLs that aren't HTTP. They give the same results on Windows and Linux.
 
-[Others](../../tests/std/http_version.calx) check kept connections and timings over HTTP/1.1, that `Http2` is HTTP/1.1 over `http://`, and, with a server that speaks enough HTTP/2 to answer a GET, that two `Http2Only` requests go over one h2c connection at once, the server answering neither until both have come. WinHTTP has no h2c, so on Windows that part checks that the requests are `Unavailable`.
+[Others](../../tests/std/http_version.calx) check kept connections and timings over HTTP/1.1, that `Http2` is HTTP/1.1 over `http://`, and, with a server that speaks enough HTTP/2 to answer a GET, that two `Http2Only` requests go over one h2c connection at once, the server answering neither until both have come. WinHTTP has no h2c, so on Windows that part checks that the requests are `Unavailable`, and so does it on iOS.
+
+[tests/std/http_ios.calx](../../tests/std/http_ios.calx) builds std.http's and std.net's tests for the iOS simulator and runs them there, on a Mac with Xcode. Each gives what it gives on the other systems, except for the `Accept` URLSession adds. From the simulator, `https://example.com` gave 200 over HTTP/2 with its timings, and `self-signed.badssl.com` gave `Tls`.
 
 These were also run against the real services, with the same results on both systems:
 
@@ -244,6 +247,7 @@ These were also run against the real services, with the same results on both sys
 | --- | --- |
 | Windows | WinHTTP, which comes with Windows. The time left is set again before each step, so the timeout is for the whole request. WinHTTP shares kept connections between all of a program's requests, and one that offers HTTP/2 would go over a kept HTTP/1.1 connection, so it requires HTTP/2, unless the host is known not to take it. A server that doesn't fails it, and it's made again in HTTP/1.1, once for the host. While one HTTP/2 request is opening a connection to a host, the others wait for it, as libcurl's `CURLOPT_PIPEWAIT` has them wait |
 | Linux and macOS | libcurl, found with `dlopen` when the first request starts, so a program that makes none doesn't need it installed. `libcurl.so.4` is in every major distribution, and every macOS has it |
+| iOS | URLSession, which iOS has instead of libcurl, on one ephemeral session with no proxy, cookies or cache. Each request is a data task, and the session's delegate, on a queue of its own, gathers the response, keeps to the limit and the redirect rules, and finishes the request. That part of the runtime is Objective-C and links Foundation by itself, so an app adds nothing. The app's App Transport Security applies, so a plain `http://` request to a host by name, not an IP address or a `.local` name, needs an exception in its `Info.plist` |
 | Threads | On Windows one for each request, joined by `wait`. On Linux and macOS, three for all of them, each with a libcurl multi handle and its connections: one for HTTP/1.1 requests, one for `Http2` over TLS and one for `Http2Only`, so an HTTP/2 request never goes over a kept HTTP/1.1 connection. A libcurl older than 7.28, which has no `curl_multi_wait`, gets one for each request, with no kept connections. Requests are slots in a table, named by an index and a generation, so a response that was taken can't be taken again |
 
 `std.http` is written in Calx over those runtime calls: [std/http.calx](../../std/http.calx).
