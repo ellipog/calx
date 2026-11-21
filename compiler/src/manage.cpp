@@ -358,7 +358,7 @@ const Command kCommands[] = {
     {"help", "list the commands"},
 };
 
-const char* const kBuildOptions = "--release --cpu --target --lib -o --timings --verbose --no-line --json --stdin";
+const char* const kBuildOptions = "--release --cpu --target --lib --staticlib --xcframework -o --timings --verbose --no-line --json --stdin";
 const char* const kUpdateOptions = "--check --nightly --stable --to --rollback --force";
 const char* const kServeOptions = "--port --bind";
 const char* const kShells = "bash zsh fish powershell";
@@ -413,7 +413,7 @@ std::string zsh() {
     std::string commands;
     for (const Command& c : kCommands) commands += std::string("        '") + c.name + ":" + c.about + "'\n";
     std::string options;
-    for (const std::string& o : std::vector<std::string>{"--release[optimize]", "--cpu[the processor a release build counts on]:level:", "--target[the system to build for]:target:(" + targets() + ")", "--lib[build a library]", "-o[where to write]:file:_files", "--timings[print how long each step took]",
+    for (const std::string& o : std::vector<std::string>{"--release[optimize]", "--cpu[the processor a release build counts on]:level:", "--target[the system to build for]:target:(" + targets() + ")", "--lib[build a library]", "--staticlib[build a static library]", "--xcframework[build an XCFramework for iOS]", "-o[where to write]:file:_files", "--timings[print how long each step took]",
                           "--verbose[print the clang commands]", "--no-line[leave #line directives out]", "--json[print errors as JSON]",
                           "--stdin[read the text from standard input]"}) {
         options += " '" + o + "'";
@@ -449,7 +449,7 @@ std::string fish() {
     const char* builds = "check build run test emit-c expand";
     out += std::string("complete -c calx -n '__fish_use_subcommand' -a '(__fish_complete_suffix .calx)'\n");
     out += std::string("complete -c calx -n '__fish_seen_subcommand_from ") + builds + "' -a '(__fish_complete_suffix .calx)'\n";
-    for (const char* o : {"release", "lib", "timings", "verbose", "no-line", "json", "stdin"}) {
+    for (const char* o : {"release", "lib", "staticlib", "xcframework", "timings", "verbose", "no-line", "json", "stdin"}) {
         out += std::string("complete -c calx -n '__fish_seen_subcommand_from ") + builds + "' -l " + o + "\n";
     }
     out += std::string("complete -c calx -n '__fish_seen_subcommand_from ") + builds + "' -s o -r -F\n";

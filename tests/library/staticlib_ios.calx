@@ -1,0 +1,389 @@
+// CLX-408: a static library for iOS, in an XCFramework, linked into a Swift app that runs on the
+// simulator, the way loom's iPhone app links its core. `core.calx` has the same shape as
+// staticlib.calx's: `core_start` starts a thread that runs a std.net event loop and calls the host
+// back from there. It also says what's different on iOS: `os()` says "ios", std.process refuses
+// to start a program, as the sandbox on an iPhone would, and threads, `parallel for` and the
+// Keychain work. `calx build --xcframework` builds it for an iPhone and for the simulator, in
+// debug and release. The Swift app, `App.swift`, imports it as a module, as an Xcode project does,
+// and calls it with a closure as the callback. It's built with Xcode's swiftc, with the entitlements
+// Xcode gives an app for the simulator, which the Keychain needs, signed ad hoc, installed on the
+// simulator and launched there, and what it prints is what the test prints. A C host, `host.c`,
+// links the iPhone's library too, which can't run here.
+// simulator: runs a Swift app that links the core
+// file: main.calx
+import std.bytes.{hex}
+import std.crypto.{random_bytes}
+import std.env.{script, variable}
+import std.fs.{exists, make_dir_all, read_text, remove_dir_all, write_text}
+import std.path.{join, parent_dir}
+import std.process.{Command}
+
+const PLIST: str = #"
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0">
+    <dict>
+        <key>CFBundleIdentifier</key><string>BUNDLE</string>
+        <key>CFBundleExecutable</key><string>CoreCheck</string>
+        <key>CFBundleName</key><string>CoreCheck</string>
+        <key>CFBundlePackageType</key><string>APPL</string>
+        <key>CFBundleVersion</key><string>1</string>
+        <key>CFBundleShortVersionString</key><string>1.0</string>
+        <key>MinimumOSVersion</key><string>18.0</string>
+        <key>CFBundleSupportedPlatforms</key><array><string>iPhoneSimulator</string></array>
+        <key>UIDeviceFamily</key><array><integer>1</integer></array>
+    </dict>
+    </plist>
+    "#
+
+// The entitlements Xcode gives an app it builds for the simulator, in a section of its own rather
+// than in its signature: an application identifier, which the Keychain keeps its items under.
+const ENTITLEMENTS: str = #"
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0">
+    <dict>
+        <key>application-identifier</key><string>CALXTESTS0.BUNDLE</string>
+        <key>keychain-access-groups</key><array><string>CALXTESTS0.BUNDLE</string></array>
+    </dict>
+    </plist>
+    "#
+
+// What a command printed, standard output and error together, or with how it ended if it failed.
+fn run(exe: String, args: List<String>, dir: String) -> String {
+    match Command.new(exe).args(args).dir(dir).output() {
+        ok(o) => {
+            let text = "{o.text()}{o.error_text()}".trim_end()
+            return if o.status.success() { text } else { "{text} [{o.status}]" }
+        },
+        err(e) => return "can't run {exe}: {e}",
+    }
+}
+
+fn main() {
+    let calx = variable("CALX") ?? String("calx")
+    let sim = variable("CALX_SIMULATOR") ?? String()
+    let dir = parent_dir(script()!)!
+    // Each run's apps are its own, so runs side by side don't replace each other's.
+    let tag = hex(random_bytes(4))
+    for mode in ["debug", "release"] {
+        let out = "out/{mode}"
+        let xcf = "{out}/Core.xcframework"
+        var words: List<String> = ["build", "--xcframework"]
+        if mode == "release" {
+            words.push("--release")
+        }
+        words.extend(["core.calx", "-o", xcf.copy()])
+        let built = run(calx.copy(), words, dir.copy())
+        if not built.is_empty() {
+            println("building the {mode} XCFramework: {built}")
+            continue
+        }
+        // A slice for each, with the header and a module map in a folder named for the library.
+        let plist = read_text(join(dir.copy(), "{xcf}/Info.plist"))! ?? String()
+        let device = "{xcf}/ios-arm64"
+        let simulator = "{xcf}/ios-arm64-simulator"
+        var parts: List<String> = []
+        for slice in [device.copy(), simulator.copy()] {
+            for file in ["libCore.a", "Headers/Core/Core.h", "Headers/Core/module.modulemap"] {
+                parts.push("{exists(join(dir.copy(), "{slice}/{file}"))}")
+            }
+        }
+        println("{plist.contains("<string>ios-arm64</string>")} {plist.contains("<string>simulator</string>")} {parts.join(" ")}")
+
+        // The iPhone's library links, with the iPhone's SDK.
+        let host = run("xcrun", ["-sdk", "iphoneos", "clang", "--target=arm64-apple-ios18.0", "host.c", "-I", "{device}/Headers/Core",
+                                 "{device}/libCore.a", "-o", "{out}/host"], dir.copy())
+        println("linked for an iPhone: {if host.is_empty() { String("yes") } else { host }}")
+
+        // The app: built against the simulator's library, signed ad hoc, installed and launched.
+        let app = "{out}/CoreCheck.app"
+        make_dir_all(join(dir.copy(), app.copy()))!
+        let bundle = "dev.calx.tests.staticlib-ios.{mode}.{tag}"
+        write_text(join(dir.copy(), "{app}/Info.plist"), PLIST.replace("BUNDLE", bundle.copy()))!
+        write_text(join(dir.copy(), "{out}/app.entitlements"), ENTITLEMENTS.replace("BUNDLE", bundle.copy()))!
+        let swift = run("xcrun", ["-sdk", "iphonesimulator", "swiftc", "-target", "arm64-apple-ios18.0-simulator", "-I",
+                                  "{simulator}/Headers", "App.swift", "{simulator}/libCore.a", "-Xlinker", "-sectcreate", "-Xlinker", "__TEXT",
+                                  "-Xlinker", "__entitlements", "-Xlinker", "{out}/app.entitlements", "-o", "{app}/CoreCheck"], dir.copy())
+        let signed = run("codesign", ["-s", "-", "-f", app.copy()], dir.copy())
+        if not swift.is_empty() or signed.contains("[") {
+            println("building the {mode} app: {swift} {signed}")
+            continue
+        }
+        let installed = run("xcrun", ["simctl", "install", sim.copy(), app.copy()], dir.copy())
+        if not installed.is_empty() {
+            println("installing the {mode} app: {installed}")
+            continue
+        }
+        // What the app printed, without the line simctl adds with its process's id.
+        let said = run("xcrun", ["simctl", "launch", "--console-pty", sim.copy(), bundle.copy()], dir.copy())
+        for line in said.lines() {
+            if not line.starts_with("{bundle}: ") {
+                println(line)
+            }
+        }
+        _ = run("xcrun", ["simctl", "uninstall", sim.copy(), bundle], dir.copy())
+    }
+    if exists(join(dir.copy(), "out")) {
+        remove_dir_all(join(dir, "out"))!
+    }
+    // out: true true true true true true true true
+    // out: linked for an iPhone: yes
+    // out: event: started loom, 2 tasks
+    // out: event: on ios: iOS doesn't let an app start other programs; parallel for gave 4032; the Keychain kept it
+    // out: event: worker's event loop echoed hello
+    // out: event: worker started
+    // out: event: worker got {"n":1}
+    // out: event: worker got {"n":2}
+    // out: event: worker stopped after 2
+    // out: the core says goodbye
+    // out: core_send gave 0, then 0, and -1 for text that isn't UTF-8; calx_shutdown gave 0
+    // out: true true true true true true true true
+    // out: linked for an iPhone: yes
+    // out: event: started loom, 2 tasks
+    // out: event: on ios: iOS doesn't let an app start other programs; parallel for gave 4032; the Keychain kept it
+    // out: event: worker's event loop echoed hello
+    // out: event: worker started
+    // out: event: worker got {"n":1}
+    // out: event: worker got {"n":2}
+    // out: event: worker stopped after 2
+    // out: the core says goodbye
+    // out: core_send gave 0, then 0, and -1 for text that isn't UTF-8; calx_shutdown gave 0
+}
+// file: core.calx
+import std.env.{os}
+import std.json
+import std.keyring
+import std.process.{Command}
+import std.json.{Json}
+import std.net.{Event, Net, NetError}
+import std.thread.{Task}
+
+/// Where the core tells its host what happened: the host's function, and the context it gave,
+/// which the host lets any thread use.
+struct Sink {
+    on_event: extern "C" fn(*u8, *const u8, usize)
+    ctx: *u8
+}
+
+unsafe impl Send for Sink {}
+
+impl Sink {
+    fn tell(self, message: String) {
+        unsafe { (self.on_event)(self.ctx, message.as_ptr(), message.len()) }
+    }
+}
+
+/// The thread the core runs its work on, which calls the host back from there.
+struct Worker {
+    sink: Sink
+    inbox: Receiver<String>
+}
+
+/// Text sent to a server of the thread's own over loopback, and echoed back, with an event loop
+/// that thread polls, as a network library's would.
+fn echo(text: String) -> String ! NetError {
+    let net = try Net.new()
+    let port = try net.listen("127.0.0.1", 0)
+    let client = try net.connect("127.0.0.1", port)
+    var events = List<Event>()
+    var got = List<u8>()
+    var done = false
+    while not done {
+        net.poll(5000, mut events)
+        if events.is_empty() {
+            break
+        }
+        for e in events {
+            match e {
+                Connected(c) => net.write(c, text.to_bytes()),
+                Received(c) => {
+                    if c.slot() == client.slot() {
+                        _ = net.read(c, mut got)
+                        if got.len() == text.len() {
+                            net.close(c)
+                        }
+                    } else {
+                        var bytes = List<u8>()
+                        _ = net.read(c, mut bytes)
+                        net.write(c, bytes)
+                    }
+                },
+                Closed(c) => {
+                    if c.slot() == client.slot() {
+                        done = true
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+    return String.from_utf8(got) ?? String("?")
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        match echo("hello") {
+            ok(s) => self.sink.tell("worker's event loop echoed {s}"),
+            err(e) => self.sink.tell("worker's event loop failed: {e}"),
+        }
+        self.sink.tell("worker started")
+        var n = 0
+        while let m = self.inbox.wait() {
+            self.sink.tell("worker got {m}")
+            n += 1
+        }
+        self.sink.tell("worker stopped after {n}")
+    }
+}
+
+/// What `core_start` gives the host, which it hands back to the others. `core_stop` takes its
+/// parts, since a value that owns memory stays in its box.
+struct Core {
+    outbox: Sender<String>?
+    worker: Thread?
+}
+
+/// The `len` bytes at `p`, as text, or none if they aren't UTF-8.
+unsafe fn text_at(p: *const u8, len: usize) -> String? {
+    var bytes = List<u8>()
+    bytes.reserve(len)
+    for i in 0..len {
+        bytes.push(unsafe { p.add(i).read() })
+    }
+    return String.from_utf8(bytes)
+}
+
+/// What's different on iOS: the system's name, a program it won't start, and threads and the
+/// Keychain, which work.
+fn ios_facts() -> String {
+    let started = match Command.new("ls").output() {
+        ok(_) => String("started ls"),
+        err(e) => "{e}",
+    }
+    var parts = [0i64; 64]
+    parallel for i in 0usize..64 {
+        parts[i] = i64.wrap(i) * 2
+    }
+    var total: i64 = 0
+    for p in parts {
+        total += p
+    }
+    let kept = match keyring.set("calx-test", "core", "secret") {
+        ok => match keyring.get("calx-test", "core") {
+            ok(v) => if v == some(String("secret")) { String("the Keychain kept it") } else { "the Keychain gave {v}" },
+            err(e) => "the Keychain: {e}",
+        },
+        err(e) => "the Keychain: {e}",
+    }
+    let gone = match keyring.delete("calx-test", "core") {
+        ok(found) => if found { String() } else { String(", but it wasn't there to delete") },
+        err(e) => ", but deleting it failed: {e}",
+    }
+    return "on {os()}: {started}; parallel for gave {total}; {kept}{gone}"
+}
+
+/// Starts the core with its configuration, JSON in the `len` bytes at `config`, and tells
+/// `on_event`, with `ctx`, what happens from then on. Gives back the core, for the other calls.
+@export_c
+fn core_start(config: *const u8, len: usize, on_event: extern "C" fn(*u8, *const u8, usize), ctx: *u8) -> *u8 {
+    let sink = unsafe { Sink { on_event: on_event, ctx: ctx } }
+    var name = String("?")
+    var tasks: i64 = 0
+    if let given = unsafe { text_at(config, len) } {
+        if let ok(Json.Object(o)) = json.parse(given) {
+            if let Json.Str(s) = o.find("name") {
+                name = s.copy()
+            }
+            if let Json.Int(t) = o.find("tasks") {
+                tasks = t
+            }
+        }
+    }
+    sink.tell("started {name}, {tasks} tasks")
+    sink.tell(ios_facts())
+    let inbox = Receiver<String>()
+    let core = Core { outbox: some(inbox.sender()), worker: some(unsafe { Thread.spawn(Worker { sink: sink, inbox: inbox }) }) }
+    unsafe {
+        return Box(core).into_ptr().cast<u8>()
+    }
+}
+
+/// Gives the core's thread the JSON in the `len` bytes at `message`. 0 if it went, -1 if it isn't
+/// UTF-8.
+@export_c
+fn core_send(core: *u8, message: *const u8, len: usize) -> i32 {
+    var c = unsafe { core.cast<Core>().to_box() }
+    var status: i32 = -1
+    if let m = unsafe { text_at(message, len) } {
+        if let o = mut c.value.outbox {
+            o.send(m)
+        }
+        status = 0
+    }
+    // C keeps the core.
+    unsafe {
+        _ = c.into_ptr()
+    }
+    return status
+}
+
+/// Stops the core's thread, waits for it, and frees the core.
+@export_c
+fn core_stop(core: *u8) {
+    var c = unsafe { core.cast<Core>().to_box() }
+    if let o = c.value.outbox.take() {
+        o.close()
+    }
+    if let w = c.value.worker.take() {
+        w.join()
+    }
+    println("the core says goodbye")
+}
+
+// file: App.swift
+import Core
+import Foundation
+
+/// What the core said, from whichever thread it said it on.
+final class Events {
+    let lock = NSLock()
+    var texts: [String] = []
+    func add(_ text: String) {
+        lock.lock()
+        texts.append(text)
+        lock.unlock()
+    }
+}
+
+calx_init()
+let events = Events()
+let ctx = Unmanaged.passRetained(events).toOpaque().assumingMemoryBound(to: UInt8.self)
+let config = Array(#"{"name": "loom", "tasks": 2}"#.utf8)
+let core = core_start(config, config.count, { ctx, text, len in
+    let events = Unmanaged<Events>.fromOpaque(UnsafeRawPointer(ctx!)).takeUnretainedValue()
+    events.add(String(decoding: UnsafeBufferPointer(start: text, count: len), as: UTF8.self))
+}, ctx)
+let one = Array(#"{"n":1}"#.utf8), two = Array(#"{"n":2}"#.utf8)
+let a = core_send(core, one, one.count)
+let b = core_send(core, two, two.count)
+let c = core_send(core, [0xFF], 1)
+core_stop(core)
+Unmanaged<Events>.fromOpaque(UnsafeRawPointer(ctx)).release()
+for text in events.texts {
+    print("event: \(text)")
+}
+print("core_send gave \(a), then \(b), and \(c) for text that isn't UTF-8; calx_shutdown gave \(calx_shutdown())")
+// file: host.c
+#include "Core.h"
+
+static void on_event(uint8_t* ctx, const uint8_t* text, size_t len) {
+    (void)ctx, (void)text, (void)len;
+}
+
+int main(void) {
+    calx_init();
+    uint8_t* core = core_start((const uint8_t*)"{}", 2, on_event, 0);
+    core_stop(core);
+    return calx_shutdown();
+}

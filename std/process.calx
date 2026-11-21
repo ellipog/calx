@@ -83,6 +83,8 @@ pub enum ProcessError {
     Failed { command: String, status: Status }
     /// It stopped reading its input before all of it was written. Only `Child.write` fails with it.
     InputClosed
+    /// The system starts no programs at all: iOS, where an app runs alone in its sandbox.
+    Unsupported
     /// Something else, with the system's error code.
     Os(i32)
 }
@@ -102,6 +104,7 @@ impl Display for ProcessError {
             BadArgument(why) => print(why),
             Failed { command, status } => print("`{command}` {status}"),
             InputClosed => print("the program stopped reading its input before all of it was written"),
+            Unsupported => print("iOS doesn't let an app start other programs"),
             Os(code) => print("the system couldn't start the program: error {code}"),
         }
     }
@@ -937,6 +940,7 @@ fn start(c: Command, in_default: Stdio, out_default: Stdio, err_default: Stdio, 
         } else {
             "the batch file {c.program} has a name cmd.exe can't be given"
         }),
+        7 => ProcessError.Unsupported,
         _ => ProcessError.Os(code),
     }
 }
