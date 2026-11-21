@@ -31,6 +31,13 @@ int cx_os_thread(pthread_t* thread, void* (*run)(void*), void* arg);
 #endif
 void cx_service_enter(void);
 void cx_service_leave(void);
+#ifdef CX_STATICLIB
+/* In calx_rt.c, for a static library (CLX-407). */
+cx_u32 cx_lib_run_now(void);
+void cx_lib_thread(void (*run)(void*), void* task, cx_u32 run_of);
+int cx_lib_told(void);
+extern void (*cx_lib_wake)(void);
+#endif
 
 struct cx_queue {
 #ifdef _WIN32
@@ -99,10 +106,17 @@ static cx_u64 now_ns(void) {
  * clock passes it. A thread whose wait goes on IDLE_NS is idle: it gives back what memory it keeps,
  * without the queue's lock, then waits on. A timed wait is woken early, as a condition's can be,
  * so it's counted again from the clock each time round. */
+#ifdef CX_STATICLIB
+/* A static library's thread stops waiting once the library has stopped, and gets `none`. */
+#define Q_TOLD() cx_lib_told()
+#else
+#define Q_TOLD() 0
+#endif
+
 static void q_wait_until(cx_queue* q, int limited, cx_u64 limit) {
     cx_u64 idle_at = 0;
     int idle = 0;
-    while (!q->len && q->senders) {
+    while (!q->len && q->senders && !Q_TOLD()) {
         cx_u64 now = now_ns();
         if (!idle_at) idle_at = now + IDLE_NS;
         if (limited && now >= limit) return;
@@ -241,14 +255,75 @@ cx_bool cx_queue_next(const cx_Receiver* r, void* out, const char* at) {
     return got;
 }
 
+#ifdef CX_STATICLIB
+/* The threads of a static library waiting on a queue now, so that each can be woken when the
+ * library stops, to see that it has (CLX-407). A thread joins the list before it takes the
+ * queue's lock, and leaves it after it gives that back, and the waking takes the list's lock and
+ * then each queue's, never the other way round. The library's stopping is stored before the
+ * waking looks for waiters, and a waiter looks at it under the queue's lock after it has joined,
+ * so either the waiter sees it or the waking finds the waiter. */
+typedef struct q_waiter {
+    cx_queue* q;
+    struct q_waiter* prev;
+    struct q_waiter* next;
+} q_waiter;
+
+static q_waiter* waiters;
+#ifdef _WIN32
+static SRWLOCK waiters_lock = SRWLOCK_INIT;
+static void waiters_take(void) { AcquireSRWLockExclusive(&waiters_lock); }
+static void waiters_give(void) { ReleaseSRWLockExclusive(&waiters_lock); }
+#else
+static pthread_mutex_t waiters_lock = PTHREAD_MUTEX_INITIALIZER;
+static void waiters_take(void) { pthread_mutex_lock(&waiters_lock); }
+static void waiters_give(void) { pthread_mutex_unlock(&waiters_lock); }
+#endif
+
+static void q_wake_waiters(void) {
+    waiters_take();
+    for (q_waiter* w = waiters; w; w = w->next) {
+        q_lock(w->q);
+        q_wake_all(w->q);
+        q_unlock(w->q);
+    }
+    waiters_give();
+}
+
+static void q_waiting(q_waiter* w, cx_queue* q) {
+    w->q = q;
+    w->prev = 0;
+    waiters_take();
+    w->next = waiters;
+    if (waiters) waiters->prev = w;
+    waiters = w;
+    waiters_give();
+    if (!__atomic_load_n(&cx_lib_wake, __ATOMIC_SEQ_CST)) __atomic_store_n(&cx_lib_wake, q_wake_waiters, __ATOMIC_SEQ_CST);
+}
+
+static void q_waited(q_waiter* w) {
+    waiters_take();
+    if (w->prev) w->prev->next = w->next;
+    else waiters = w->next;
+    if (w->next) w->next->prev = w->prev;
+    waiters_give();
+}
+#endif
+
 cx_bool cx_queue_wait(const cx_Receiver* r, void* out, const char* at) {
     q_check(at);
     cx_queue* q = r->q;
+#ifdef CX_STATICLIB
+    q_waiter me;
+    q_waiting(&me, q);
+#endif
     q_lock(q);
     q_wait_until(q, 0, 0);
     cx_bool got = q->len != 0;
     if (got) take(q, out);
     q_unlock(q);
+#ifdef CX_STATICLIB
+    q_waited(&me);
+#endif
     return got;
 }
 
@@ -256,6 +331,10 @@ cx_bool cx_queue_wait(const cx_Receiver* r, void* out, const char* at) {
 cx_bool cx_queue_wait_for(const cx_Receiver* r, void* out, cx_u64 ns, const char* at) {
     q_check(at);
     cx_queue* q = r->q;
+#ifdef CX_STATICLIB
+    q_waiter me;
+    q_waiting(&me, q);
+#endif
     q_lock(q);
     if (!q->len && q->senders && ns) {
         cx_u64 now = now_ns();
@@ -266,6 +345,9 @@ cx_bool cx_queue_wait_for(const cx_Receiver* r, void* out, cx_u64 ns, const char
     cx_bool got = q->len != 0;
     if (got) take(q, out);
     q_unlock(q);
+#ifdef CX_STATICLIB
+    q_waited(&me);
+#endif
     return got;
 }
 
@@ -310,14 +392,22 @@ void cx_drop_Receiver(cx_Receiver* r) {
 typedef struct {
     void (*run)(void*);
     void* task;
+    cx_u32 run_of; /* in a static library, the run the thread that started it works for */
 } thread_start;
 
 static void begin(thread_start* s) {
     void (*run)(void*) = s->run;
     void* task = s->task;
+    cx_u32 run_of = s->run_of;
     cx_free(s, sizeof *s);
     cx_service_enter();
+#ifdef CX_STATICLIB
+    /* A panic on the thread ends it here, and the host hears of it (CLX-407). */
+    cx_lib_thread(run, task, run_of);
+#else
+    (void)run_of;
     run(task);
+#endif
     cx_service_leave();
 }
 
@@ -337,6 +427,11 @@ cx_Thread cx_thread_spawn(void (*run)(void*), void* task) {
     thread_start* s = (thread_start*)cx_alloc(sizeof *s);
     s->run = run;
     s->task = task;
+#ifdef CX_STATICLIB
+    s->run_of = cx_lib_run_now();
+#else
+    s->run_of = 0;
+#endif
     /* Counted before it starts, so a program that ends at once knows a thread is running. */
     cx_service_started();
 #ifdef _WIN32

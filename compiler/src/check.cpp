@@ -1029,18 +1029,19 @@ private:
                                       "; export one that calls it");
                 } else if (it->export_c) {
                     error(a.span, "`@export_c` is already on " + q(text(it->name)));
-                } else if (a.args.size() > 1 || (a.args.size() == 1 && (a.args[0].name || a.args[0].value->kind != ExprKind::string_lit ||
-                                                                        !a.args[0].value->interpolations.empty() ||
-                                                                        a.args[0].value->literal.parts.size() != 1))) {
+                } else if (!export_c_args(a)) {
                     error(a.span, "`@export_c` takes the name C calls it by, as a string literal, such as `@export_c(\"app_start\")`, "
-                                  "or nothing for the function's own name");
+                                  "or nothing for the function's own name, then `on_panic:` and what it gives back when it "
+                                  "panics, such as `@export_c(on_panic: -1)`");
                 } else {
                     it->export_c = true;
-                    it->export_name = a.args.empty() ? text(it->name) : a.args[0].value->literal.parts[0].text;
+                    const Arg* named = !a.args.empty() && !a.args[0].name ? &a.args[0] : nullptr;
+                    if (!a.args.empty() && a.args[a.args.size() - 1].name) it->export_on_panic = a.args[a.args.size() - 1].value;
+                    it->export_name = named ? named->value->literal.parts[0].text : text(it->name);
                     std::string_view n = it->export_name;
                     bool ident = !n.empty() && !(n[0] >= '0' && n[0] <= '9');
                     for (char c : n) ident = ident && (std::isalnum(static_cast<unsigned char>(c)) || c == '_');
-                    Span at = a.args.empty() ? it->name_span : a.args[0].span;
+                    Span at = named ? named->span : it->name_span;
                     if (!ident) {
                         error(at, q(n) + " isn't a name C can call: it's letters, digits and `_`, and doesn't start with a digit");
                     } else if (n.substr(0, 3) == "cx_" || n.substr(0, 5) == "calx_") {
@@ -3302,6 +3303,54 @@ private:
             "true", "false", "_Bool", "_Complex", "_Imaginary", "_Alignas", "_Alignof", "_Atomic", "_Generic", "_Noreturn",
             "_Static_assert", "_Thread_local", "asm", "typeof", "main"};
         return words.count(s) != 0;
+    }
+
+    // `@export_c`'s arguments: the name C calls it by, as a plain string literal, then `on_panic:`
+    // and what it gives back when the static library panics inside it, each one optional.
+    bool export_c_args(const Attribute& a) const {
+        std::size_t i = 0;
+        if (i < a.args.size() && !a.args[i].name) {
+            const Expr* e = a.args[i].value;
+            if (e->kind != ExprKind::string_lit || !e->interpolations.empty() || e->literal.parts.size() != 1) return false;
+            i++;
+        }
+        if (i < a.args.size() && a.args[i].name && text(a.args[i].name) == "on_panic") i++;
+        return i == a.args.size();
+    }
+
+    // CLX-407: `on_panic:`, what an `@export_c` function gives C back when the static library
+    // panics inside it: a constant of its result type, an integer or a `bool`, seen from the
+    // module's level, as a constant's value is.
+    void check_on_panic(Item* f) {
+        Expr* e = f->export_on_panic;
+        Type* t = f->result_type;
+        if (!e || !t || is_bad(t)) return;
+        if (t->kind == TypeKind::unit) {
+            error(e->span, "`on_panic` is what the function gives back when it panics, and this one gives back nothing");
+            return;
+        }
+        if (!is_int(t) && t != T.bool_) {
+            error(e->span, "`on_panic` is for a function that gives back an integer or a `bool`; one that gives back " +
+                               a_type(t) + " gives its zero when it panics");
+            return;
+        }
+        InModule in(*this, f);
+        std::vector<Local*> saved_visible;
+        std::vector<std::size_t> saved_marks;
+        saved_visible.swap(visible_);
+        saved_marks.swap(scope_marks_);
+        Item* saved_fn = fn_;
+        Item* saved_item = current_item_;
+        fn_ = nullptr;
+        current_item_ = f;
+        Type* vt = check(e, t);
+        if (!is_bad(vt) && !(e->is_const && e->has_bits)) {
+            error(e->span, "`on_panic` must be known at compile time, such as `-1` or a constant");
+        }
+        fn_ = saved_fn;
+        current_item_ = saved_item;
+        visible_.swap(saved_visible);
+        scope_marks_.swap(saved_marks);
     }
 
     // A function C calls or is called by takes and gives C types, as plain values. `what` is "a C
@@ -12795,6 +12844,7 @@ private:
                 if (f->result_type && f->result_type->kind == TypeKind::never) {
                     error(f->result->span, std::string(what) + " returns to C, so it can't return `never`");
                 }
+                check_on_panic(f);
                 prog_.c_exports.push_back(f);
             }
         }

@@ -1075,6 +1075,7 @@ int main(int argc, char** argv) {
     eo.line_directives = opt.line_directives;
     eo.library = opt.library;
     eo.tests = opt.command == "test";
+    eo.staticlib = opt.staticlib;
     std::vector<CFile> files = emit_c(program, sources, names, eo);
     double emit_ms = ms(t1);
     if (opt.command == "emit-c") {

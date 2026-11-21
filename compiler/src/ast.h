@@ -564,6 +564,9 @@ struct Item {
     // as a library's entry point or a callback (CLX-333, CLX-334).
     bool export_c = false;
     std::string_view export_name;
+    // `@export_c(on_panic: -1)`: what it gives C back when the static library panics inside it, a
+    // constant of its result type, rather than the result type's zero (CLX-407).
+    Expr* export_on_panic = nullptr;
     // A `@handle` struct's `fn drop(mut self)`, which runs when a value of it is dropped (CLX-332).
     Item* drop_fn = nullptr;
     // A struct with `unsafe impl Send for S {}`: it's `Send` though its fields hold pointers, since

@@ -18,12 +18,13 @@
 /// - `s.send(m)` moves `m` into the queue. If every `Receiver` is gone, `m` is dropped.
 /// - `r.next()` takes the first message, or gives `none` at once if there isn't one.
 /// - `r.wait()` waits for a message, and gives `none` once the queue is empty and every
-///   `Sender` is gone.
+///   `Sender` is gone, or, in a static library, once the library has stopped.
 /// - `share()` makes another end of the same queue, and `close()` drops one now.
 ///
 /// A queue can't be used, and a thread can't be joined, inside a `parallel for`.
 ///
-/// `sleep(ns)` waits a while, as a thread that does something every second does.
+/// `sleep(ns)` waits a while, as a thread that does something every second does, and
+/// `stopping()` says whether the static library a thread works for has stopped.
 module std.thread
 
 /// What a thread does. `run` takes the task, which the thread owns from then on.
@@ -33,6 +34,19 @@ pub interface Task {
 
 extern "C" {
     fn cx_thread_sleep(ns: u64)
+    fn cx_thread_stopping() -> bool
+}
+
+/// Whether the static library this thread works for has stopped since the thread started, or
+/// since the call from C it's in began: by a panic, or by its host's `calx_shutdown` (CLX-407).
+/// Its threads keep running until they end by themselves, so one that loops on something other
+/// than a queue's `wait`, such as a `Net`'s `poll`, asks between turns and ends when it has. It's
+/// always false in a program, which a panic ends. Whether it's true depends on timing, so it's
+/// `unsafe`, and it can't be asked inside a `parallel for`.
+pub unsafe fn stopping() -> bool {
+    unsafe {
+        return cx_thread_stopping()
+    }
 }
 
 /// Waits `ns` nanoseconds, or a little longer, as a thread that does something every second

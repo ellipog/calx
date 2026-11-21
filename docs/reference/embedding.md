@@ -1,6 +1,6 @@
 ---
 title: Static libraries
-description: Building Calx into a C, C++, Rust or Swift program with calx build --staticlib - the functions it exports with @export_c, the header made for them, calx_init and calx_shutdown, linking on each platform, and threads.
+description: Building Calx into a C, C++, Rust or Swift program with calx build --staticlib - the functions it exports with @export_c, the header made for them, calx_init and calx_shutdown, panics the host hears of, linking on each platform, and threads.
 ---
 
 # Static libraries
@@ -97,12 +97,27 @@ Calx has no global variables, so what a library keeps between calls lives in a [
 extern "C" {
 #endif
 
-/* Starts the library's runtime. Calling it again while it runs does nothing. */
+/* Starts the library's runtime. Calling it again while it runs does nothing; after calx_shutdown(),
+ * it starts it again. */
 void calx_init(void);
 
-/* Ends it: what the library printed is written out. A debug build of the library then checks
- * that everything it allocated was freed, and returns 102 if not, having said so; otherwise 0. */
+/* Ends it: what the library printed is written out, and ... It returns 101 if a panic had stopped
+ * the library ... and it returns 0. */
 int calx_shutdown(void);
+
+/* A panic in the library: what went wrong, where, the Calx calls that led there, ... */
+typedef struct calx_panic {
+    const char* message;  /* "index 3 is out of bounds for length 2" */
+    const char* location; /* "core.calx:42:13", or the part of the runtime, such as "std.thread" */
+    const char* trace;
+    const char* function;
+} calx_panic;
+
+/* Has `hook` called with `ctx` for each panic in the library from now on, ... */
+void calx_on_panic(void (*hook)(void* ctx, const calx_panic* panic), void* ctx);
+
+/* The panic that stopped the library, or NULL if none has: valid until the next calx_init(). */
+const calx_panic* calx_panicked(void);
 
 /// Starts the core with its configuration, JSON in the `len` bytes at `config`, and tells
 /// `on_event`, with `ctx`, what happens. Gives back the core, which the other calls take.
@@ -124,12 +139,59 @@ Each function's `///` comment is copied into it. Calx's types are C's: `i32` is 
 
 The host calls `calx_init` before anything else in the library, and `calx_shutdown` last:
 
-- `calx_init` does what a program's start does for the whole process, without its command line, which is the host's: std.env's `args` is empty. Calling it again while the runtime runs does nothing.
-- `calx_shutdown` writes out what the library printed and puts the terminal back as it was. The library's threads must have stopped first, as a stop function of its own would see to. A debug build then checks that everything Calx allocated was freed, says what wasn't, and gives 102; otherwise it gives 0.
+- `calx_init` does what a program's start does for the whole process, without its command line, which is the host's: std.env's `args` is empty. Calling it again while the runtime runs does nothing, and calling it after `calx_shutdown` starts the library again.
+- `calx_shutdown` writes out what the library printed and puts the terminal back as it was. The library's threads must have stopped first, as a stop function of its own would see to. A debug build then checks that everything Calx allocated was freed, says what wasn't, and gives 102; otherwise it gives 0. After a [panic](#panics) it gives 101.
 - A call into the library before `calx_init`, or after `calx_shutdown`, is refused: the runtime says which function was called and ends the process with status 101.
-- A panic in the library ends the process, as it does in a program, having said where. Rust's `catch_unwind` and C++'s `catch` don't catch it. Code that can fail returns a status, such as a negative number, for the host to check.
+- A panic in the library doesn't end the process: the call returns, and the host hears why ([panics](#panics)).
 
 Any of the host's threads can call in, and the library's threads can call the host back, at the same time ([callbacks on C's threads](unsafe.md#callbacks-on-cs-threads)).
+
+## Panics
+
+A panic is a bug, such as an index past the end of a list or a division by zero. In a program it ends the process, saying where. A static library is part of its host's process, so a panic in it comes back to the host instead, which can say what went wrong, log it and start the library again, as a Rust host catches a panic in a Rust library with `catch_unwind` (CLX-407).
+
+```calx
+// kind: staticlib
+/// The `index`th of the core's numbers, or -1 if the library panics.
+@export_c(on_panic: -1)
+fn core_number(index: usize) -> i64 {
+    let numbers: List<i64> = [4, 8, 15]
+    return numbers[index]
+}
+```
+
+- **The call returns.** A panic inside an `@export_c` function returns from it to C, with what its `on_panic:` gives, or its result type's zero, `0`, `false` or `NULL`, without one ([calling Calx from C](unsafe.md#calling-calx-from-c)). A function whose every result means something, such as a count, can say whether it worked through a pointer it's given, or the host can ask `calx_panicked()` after the call.
+- **The host hears why.** `calx_on_panic(hook, ctx)` has the host's function called for each panic, on the thread that panicked, before the call returns: with `ctx`, and a `calx_panic` with the message, such as `index 5 is out of bounds for length 3`, where it happened, as `core.calx:6:12`, the Calx calls that led there, innermost first, a line each, and the `@export_c` function it was in, or `NULL` for a panic on a thread of the library's own. The `calx_panic` is only valid during the call, so the hook copies what it keeps. Without a hook, a panic is written to standard error, as a program's is. The hook is the host's from `calx_on_panic` on, before `calx_init` or after it, until it's set again, and `calx_on_panic(NULL, NULL)` takes it away.
+- **The library stops.** A panic leaves things half done: what the calls that panicked owned is never freed, since Calx doesn't unwind, and a value they were changing may be partly changed. So from the first panic on, every call into the library returns at once, with its `on_panic` value, without running any Calx, and `calx_panicked()` gives that first panic, until the library starts again. `calx_shutdown()` then gives 101, and `calx_init()` starts it again, from nothing: the boxes C still holds from before, such as a core `core_start` gave, are the old library's, and aren't passed to the new one. The memory the panic left is never freed, and a debug build no longer checks for leaks.
+- **The library's threads are told.** A panic on a thread the library started with `Thread.spawn` ends that thread there, and `join` on it returns. The library's other threads keep running, since nothing can stop a thread safely from outside, but a queue's `wait` gives `none` to each of them from then on, so a thread that takes its work from a queue ends its loop, and std.thread's [`stopping()`](../std/thread.md) turns true, for a thread that loops on something else, such as a `Net`'s `poll`, to ask between turns. `calx_shutdown` tells them too. A thread that doesn't ask runs on, and can still call the host back. Calls that were already running on other threads when the panic happened finish as they would have.
+- **`parallel for`.** A panic in an iteration of a `parallel for` comes back from the call that ran the loop, once the iterations before it have run, as in a program, and the threads that help with loops wait for the next one.
+- **A stack that overflows** isn't a panic in a static library. `calx_init` leaves the handlers for such faults to the host, since the host's own, such as Rust's, are for the whole process, so the process ends as the system or the host ends it, as for C code that recursed too deep.
+
+A host that starts the core again after a panic:
+
+```c
+#include <stdio.h>
+#include "core.h"
+
+static void on_panic(void* ctx, const calx_panic* p) {
+    (void)ctx;
+    fprintf(stderr, "the core panicked in %s: %s, at %s\n%s", p->function ? p->function : "a thread of its own",
+            p->message, p->location, p->trace);
+}
+
+int main(void) {
+    calx_on_panic(on_panic, NULL);
+    calx_init();
+    if (core_number(5) == -1 && calx_panicked()) {   /* on_panic has said why */
+        printf("the core stopped, as calx_shutdown says: %d\n", calx_shutdown());   /* 101 */
+        calx_init();                                 /* and it starts again */
+    }
+    printf("%lld\n", (long long)core_number(1));     /* 8 */
+    return calx_shutdown();
+}
+```
+
+In Rust, `calx_panic` is a `#[repr(C)]` struct of four `*const c_char`, and the hook an `extern "C" fn(*mut c_void, *const CalxPanic)` passed as an `Option`, so `None` is `NULL`. The test suite's [`tests/library/staticlib_panic.calx`](../../tests/library/staticlib_panic.calx) has a C host that panics in a call, on a thread of the library's and in a `parallel for`, and [`staticlib_panic_rust.calx`](../../tests/library/staticlib_panic_rust.calx) a Rust one.
 
 ## Linking
 
@@ -219,5 +281,5 @@ Without Cargo, `rustc main.rs -L native=out -l static=core` links it. The `ctx` 
 
 - The library is built from the same C as a program, with the runtime's parts the code uses, and archived with `llvm-lib` on Windows, `libtool` on macOS, and `llvm-ar` or `ar` on Linux. `--verbose` prints the commands.
 - A release build isn't built with link-time optimization, since the host's linker, not clang's, links it. On Linux and macOS the code is position-independent, as a Rust or Swift host's executables are.
-- Each `@export_c` function is a small C function of the name it's exported as, which checks that the runtime has started and calls the Calx function. Every other name in the library starts with `cx_` or `calx_`, so it doesn't meet the host's.
+- Each `@export_c` function is a small C function of the name it's exported as, which checks that the runtime has started and calls the Calx function through `cx_lib_call`. That marks the place a panic comes back to with `setjmp`, and a panic writes its message and trace for the host, rather than to standard error, then goes back there with `longjmp`, past the Calx calls in between, so no C++ or Rust frame is unwound. Each thread the library starts has such a place where it starts, and each thread that helps with `parallel for` loops one where it takes its part of a loop. Every other name in the library starts with `cx_` or `calx_`, so it doesn't meet the host's.
 - `--cdylib`, a shared library with the same C, isn't built yet.

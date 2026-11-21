@@ -1738,6 +1738,9 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // systems' compilers build by default, or into a shared library.
     if (staticlib) flags.push_back("-fPIC");
 #endif
+    // A static library's runtime catches a panic and gives it to the host, rather than ending the
+    // host's process (CLX-407).
+    if (staticlib) flags.push_back("-DCX_STATICLIB");
     std::string flag_text;
     for (const std::string& f : flags) flag_text += f + " ";
 

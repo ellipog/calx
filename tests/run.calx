@@ -47,6 +47,9 @@
 //   Windows' firewall ask the person at the desktop whether to allow it, each time the program is
 //   new, as every build's is. On Windows such a test runs only in CI, whose runners don't ask, and
 //   is skipped elsewhere, saying so.
+// - `// needs: PROGRAM` marks a test that runs PROGRAM, a tool Calx doesn't need, such as `rustc`
+//   for a Rust host of a static library. Where `PROGRAM --version` doesn't run, it's skipped, saying
+//   so.
 //
 // A test can be several modules. A line `// file: NAME.calx` starts each one, and the first is the
 // main module. Each file keeps its lines' numbers from the whole test, so errors in any of them are
@@ -107,7 +110,7 @@ struct Patterns {
 
 fn patterns() -> Patterns {
     return Patterns {
-        expect: Regex.new("//\\s*(out|error|panic|trace|stderr|stdin|args|status|lib|kind|firewall):(.*)$")!,
+        expect: Regex.new("//\\s*(out|error|panic|trace|stderr|stdin|args|status|lib|kind|firewall|needs):(.*)$")!,
         file: Regex.new("^// file: (\\S+)\\s*$")!,
         diag: Regex.new("^(.*?):(\\d+):(\\d+): error: (.*)$")!,
         panic_line: Regex.new("^panic at (.*?):(\\d+):(\\d+): (.*)$")!,
@@ -135,13 +138,14 @@ struct Test {
     libs: List<String>            // files to build as libraries first
     kind: String                  // what it's checked as: "library", "staticlib" or empty for a program
     firewall: String?             // why it listens on every address
+    needs: List<String>           // programs it runs that Calx doesn't need, such as `rustc`
     files: List<(String, String)> // (name, text) for a test of several modules, the main one first
 }
 
 fn parse_test(name: own String, source: String, file_path: own String?, p: mut Patterns) -> Test {
     var t = Test {
         name: name, source: source.copy(), file_path: file_path, out: [], errors: [], panics: none, trace: [], stderr: [],
-        stdin: [], args: [], status: 0, libs: [], kind: String(), firewall: none, files: [],
+        stdin: [], args: [], status: 0, libs: [], kind: String(), firewall: none, needs: [], files: [],
     }
     let lines = source.lines()
     var starts: List<(usize, String)> = []
@@ -184,6 +188,8 @@ fn parse_test(name: own String, source: String, file_path: own String?, p: mut P
                 t.kind = text.trim()
             } else if kind == "firewall" {
                 t.firewall = some(text.trim())
+            } else if kind == "needs" {
+                t.needs.push(text.trim())
             } else if kind == "trace" {
                 t.trace.push(text.trim())
             } else if kind == "error" {
@@ -194,6 +200,16 @@ fn parse_test(name: own String, source: String, file_path: own String?, p: mut P
         }
     }
     return t
+}
+
+// The first program a test runs that isn't installed, of those it `needs`.
+fn lacks(t: Test, missing: List<String>) -> String? {
+    for program in t.needs {
+        if missing.contains(program) {
+            return some(program.copy())
+        }
+    }
+    return none
 }
 
 // Paths with `/` only, which every system's calls take.
@@ -345,6 +361,31 @@ fn main() {
         }
     }
     tests.retain(|t| t.firewall == none or not asks)
+    // Tools a test runs that Calx doesn't need, such as a Rust host's `rustc`, each looked for once.
+    var missing: List<String> = []
+    var found: List<String> = []
+    for t in tests {
+        for program in t.needs {
+            if not found.contains(program) and not missing.contains(program) {
+                let runs = match Command.new(program.copy()).arg("--version").output() {
+                    ok(o) => o.status.success(),
+                    err(_) => false,
+                }
+                if runs {
+                    found.push(program.copy())
+                } else {
+                    missing.push(program.copy())
+                }
+            }
+        }
+    }
+    for t in tests {
+        if let program = lacks(t, missing) {
+            println("skipped {t.name}: it runs `{program}`, which isn't installed")
+            skipped += 1
+        }
+    }
+    tests.retain(|t| lacks(t, missing) == none)
     let tmp = slashes(fs.temp_dir()!)
 
     // The jobs, each test's files written into its folder, and the commands of each round.
