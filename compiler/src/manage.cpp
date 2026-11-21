@@ -358,7 +358,7 @@ const Command kCommands[] = {
     {"help", "list the commands"},
 };
 
-const char* const kBuildOptions = "--release --cpu --lib -o --timings --verbose --no-line --json --stdin";
+const char* const kBuildOptions = "--release --cpu --target --lib -o --timings --verbose --no-line --json --stdin";
 const char* const kUpdateOptions = "--check --nightly --stable --to --rollback --force";
 const char* const kServeOptions = "--port --bind";
 const char* const kShells = "bash zsh fish powershell";
@@ -366,6 +366,16 @@ const char* const kShells = "bash zsh fish powershell";
 std::string command_names() {
     std::string out;
     for (const Command& c : kCommands) out += std::string(out.empty() ? "" : " ") + c.name;
+    return out;
+}
+
+// The targets this calx builds for, by their Calx names, for `--target` (CLX-409).
+std::string targets() {
+    std::string out;
+    for (const TargetName* n = target_names(); n->name; n++) {
+        std::string why;
+        if (n->name == target_name(n->target) && can_build(kHost, n->target, why)) out += std::string(out.empty() ? "" : " ") + n->name;
+    }
     return out;
 }
 
@@ -403,10 +413,10 @@ std::string zsh() {
     std::string commands;
     for (const Command& c : kCommands) commands += std::string("        '") + c.name + ":" + c.about + "'\n";
     std::string options;
-    for (const char* o : {"--release[optimize]", "--cpu[the processor a release build counts on]:level:", "--lib[build a library]", "-o[where to write]:file:_files", "--timings[print how long each step took]",
+    for (const std::string& o : std::vector<std::string>{"--release[optimize]", "--cpu[the processor a release build counts on]:level:", "--target[the system to build for]:target:(" + targets() + ")", "--lib[build a library]", "-o[where to write]:file:_files", "--timings[print how long each step took]",
                           "--verbose[print the clang commands]", "--no-line[leave #line directives out]", "--json[print errors as JSON]",
                           "--stdin[read the text from standard input]"}) {
-        options += std::string(" '") + o + "'";
+        options += " '" + o + "'";
     }
     return "#compdef calx\n"
            "# calx completions for zsh: add `eval \"$(calx completions zsh)\"` to ~/.zshrc, after compinit\n"
@@ -444,8 +454,9 @@ std::string fish() {
     }
     out += std::string("complete -c calx -n '__fish_seen_subcommand_from ") + builds + "' -s o -r -F\n";
     std::string levels;
-    for (const char* const* l = cpu_levels(kTarget); *l; l++) levels += std::string(levels.empty() ? "" : " ") + *l;
+    for (const char* const* l = cpu_levels(kHost); *l; l++) levels += std::string(levels.empty() ? "" : " ") + *l;
     out += std::string("complete -c calx -n '__fish_seen_subcommand_from ") + builds + "' -l cpu -r -a '" + levels + "'\n";
+    out += std::string("complete -c calx -n '__fish_seen_subcommand_from ") + builds + "' -l target -r -a '" + targets() + "'\n";
     out += "complete -c calx -n '__fish_seen_subcommand_from eval' -l release\n";
     for (const char* o : {"check", "nightly", "stable", "to", "rollback", "force"}) {
         out += std::string("complete -c calx -n '__fish_seen_subcommand_from update' -l ") + o + "\n";

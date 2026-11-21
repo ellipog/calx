@@ -20,7 +20,7 @@ namespace calx {
 
 namespace {
 
-constexpr const char* kExe = exe_suffix(kTarget.os);
+constexpr const char* kExe = exe_suffix(kHost.os);
 
 int failures = 0;
 
@@ -235,12 +235,12 @@ int run_doctor() {
     }
     // What it builds programs for, and the processor a release build counts on (D612), which
     // CALX_CPU can change (CLX-381).
-    std::string cpu = default_cpu(kTarget);
+    std::string cpu = default_cpu(kHost);
     const char* cpu_env = std::getenv("CALX_CPU");
     std::string cpu_error;
-    if (cpu_env && *cpu_env && !cpu_flag(kTarget, cpu_env, cpu_error).empty()) cpu = std::string(cpu_env) + " (from CALX_CPU)";
-    ok("builds for " + target_name(kTarget) + " (" + target_label(kTarget) + "), release builds for " + cpu, "target",
-       target_name(kTarget) + term::dim(c, "  " + target_label(kTarget) + ", release builds for " + cpu));
+    if (cpu_env && *cpu_env && !cpu_flag(kHost, cpu_env, cpu_error).empty()) cpu = std::string(cpu_env) + " (from CALX_CPU)";
+    ok("builds for " + target_name(kHost) + " (" + target_label(kHost) + "), release builds for " + cpu, "target",
+       target_name(kHost) + term::dim(c, "  " + target_label(kHost) + ", release builds for " + cpu));
     if (!cpu_error.empty()) {
         fail("CALX_CPU: " + cpu_error, "CALX_CPU", cpu_error);
         fix("Set CALX_CPU to one of those, or unset it for the default.");

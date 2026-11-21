@@ -16,6 +16,7 @@ calx build --release hello.calx
 calx build --release --cpu x86-64-v2 hello.calx   # for a processor without AVX2
 calx build --lib plugin.calx   # build a library, which a program opens while it runs
 calx build --staticlib core.calx  # build a static library, which a C, C++, Rust or Swift program links
+calx build --staticlib --target aarch64-ios core.calx  # the same for an iPhone, from a Mac
 calx test tool.calx           # run its @test functions, each in a process of its own
 calx eval "1 << 20"           # run code given on the command line, and print its value
 calx fmt                       # format the .calx files here, in Calx's one format
@@ -40,6 +41,7 @@ Before it checks a program, each command runs the [attributes](attributes.md) th
 | --- | --- |
 | `--release` | Optimize. Without it, programs build in debug mode, which builds fastest |
 | `--cpu LEVEL` | The processor a release build counts on: `x86-64-v2` for one without AVX2, and the others [below](#processor-levels). `--cpu=LEVEL` is the same |
+| `--target TARGET` | The system to build for: the machine calx runs on by default, or from a Mac `aarch64-ios` for an iPhone and `aarch64-ios-sim` for the simulator, and the others [below](#targets). `--target=TARGET` is the same |
 | `-o PATH` | Where `build` writes the executable, or `emit-c` the C: a file for one module, a folder for several. Folders on the way are made if they aren't there. `build` defaults to the file's name in the current folder |
 | `--lib` | Build or check a [library](libraries.md): a `.dll` or `.so` with the functions marked `@export`, which a program opens while it runs. `calx run` doesn't take it |
 | `--staticlib` | Build or check a [static library](embedding.md): a `.lib` on Windows or a `.a` elsewhere, with the runtime and the functions marked `@export_c`, which a program in another language links, and a C header for them beside it. Only `build`, `check` and `emit-c` take it |
@@ -303,11 +305,35 @@ calx build --release --cpu x86-64-v2 server.calx
 | --- | --- |
 | x86-64 | `x86-64`, any 64-bit processor; `x86-64-v2`, with SSE4.2 and POPCNT, as nearly every one since 2009 has; `x86-64-v3`, the default, with AVX2; and `x86-64-v4`, with AVX-512 |
 | Arm Linux and Windows | `armv8-a`, any Arm64 processor, the Raspberry Pi 4's too; and `armv8.2-a`, the default |
-| macOS | `apple-m1`, the default |
+| macOS, and the iOS simulator | `apple-m1`, the default |
+| iOS | `apple-a12`, the default, which every iPhone that runs iOS 18 has |
 
 The program gives the same output at every level. Where the runtime has AVX2 code, either it asks the processor as the program runs, as the hashes, Adler-32 and the CRCs do, so a build for an older level still takes it on a processor that has it, or it has SSE2 code that a build without AVX2 takes, as `find`, zstd's encoder and JPEG's writer do, which are slower there. A level is part of every key in the [object cache](#fast-builds), so builds for two levels never share a compiled file. A level another target has, such as `x86-64-v2` on Arm64, is an error, as is one that isn't a level, and so is either in `CALX_CPU`. A debug build counts on nothing past the architecture, whatever the level, but still checks it. `--verbose` shows the `-march` the build passes, and `calx doctor` the level release builds count on.
 
 A program built for `x86-64-v4` runs only on processors with AVX-512. The runtime has no AVX-512 code of its own, so only the loops clang vectorizes can gain from it.
+
+## Targets
+
+A target is the system and processor a build is for. Without `--target`, calx builds for the machine it runs on. `--target` names another, by its Calx name or by the triple Rust and LLVM give it, and `--target=NAME` is the same (CLX-409):
+
+```sh
+calx build --staticlib --target aarch64-ios core.calx      # for an iPhone, from a Mac
+calx build --staticlib --target aarch64-ios-sim core.calx  # for the iOS simulator
+```
+
+| Target | Also named | Built from |
+| --- | --- | --- |
+| `x86_64-windows` | `x86_64-pc-windows-msvc`, `x86_64-pc-windows-gnu` | Windows on x64 |
+| `aarch64-windows` | `aarch64-pc-windows-msvc`, `aarch64-pc-windows-gnullvm` | Windows on Arm64 |
+| `x86_64-linux` | `x86_64-unknown-linux-gnu` | Linux on x64 |
+| `aarch64-linux` | `aarch64-unknown-linux-gnu` | Linux on Arm64 |
+| `aarch64-macos` | `aarch64-apple-darwin`, `arm64-apple-macos` | a Mac with Apple Silicon |
+| `aarch64-ios` | `aarch64-apple-ios`, `arm64-apple-ios` | a Mac with Xcode |
+| `aarch64-ios-sim` | `aarch64-apple-ios-sim`, `arm64-apple-ios-simulator` | a Mac with Xcode |
+
+Every calx builds for the machine it runs on, and a Mac builds for iOS too, an iPhone or the simulator, with the SDKs Xcode installs, which `xcrun` finds. A build for any other system needs that system's C library and SDK, which nothing gives calx yet, so it's an error that says where to build instead: build for Linux on Arm64 on an Arm64 Linux machine, for one. A name that isn't a target is an error too.
+
+What's built for another system runs there, so with another target `run`, `test` and `eval` are errors, and `build`, `check` and `emit-c` work. iOS lets an app open no library it didn't come with, so `--lib` is an error for it, and an app links Calx as a [static library](embedding.md). A build for iOS runs on iOS 18 and later, which runs on the iPhone XS and XR and every iPhone since. The target is part of every key in the [object cache](#fast-builds), with the SDK's path for iOS, so builds for two targets, or against two Xcodes, never share a compiled file, and `--verbose` shows the `--target` and `-isysroot` clang gets.
 
 ## Fast builds
 
@@ -356,7 +382,7 @@ Windows Defender scans every new executable the first time it starts, which cost
 | `CALX_HOME` | Where the runtime and the [standard library](modules.md#the-standard-library) are. Otherwise, the installation `calx` is in: the folder above its `bin`, which holds `runtime` and `std`. A compiler built from source that isn't in one uses the checkout it was built from |
 | `CALX_CACHE` | The object cache, which holds the git [packages](#packages) fetched too. Otherwise `%LOCALAPPDATA%\calx\cache` on Windows, `$XDG_CACHE_HOME/calx`, or else `~/.cache/calx` on Linux and `~/Library/Caches/calx` on macOS. On Windows it can be at any length: past 100 characters, calx names what's under it in the `\\?\` form, which Windows, clang and lld take past the usual 260 |
 | `CALX_CACHE_MB` | How many megabytes the cache keeps of compiled files, and of programs, however many files that is. Otherwise the limits below hold. For a CI job that builds more than they hold and keeps the cache for its next run |
-| `CALX_CPU` | The [processor level](#processor-levels) a release build counts on when `--cpu` doesn't say, such as `x86-64-v2`. Otherwise x86-64-v3 on x86, the M1's on macOS and ARMv8.2 on Arm Linux and Windows |
+| `CALX_CPU` | The [processor level](#processor-levels) a release build counts on when `--cpu` doesn't say, such as `x86-64-v2`. Otherwise x86-64-v3 on x86, the M1's on macOS and the iOS simulator, the A12's on iOS, and ARMv8.2 on Arm Linux and Windows |
 | `CALX_LEAKS` | Set to `1`, a program built in debug keeps where each block of memory was allocated, so if it ends with blocks still allocated, it says where each came from ([build modes](#build-modes)). The program reads it, not `calx` |
 | `CALX_TRACE_DEBUG` | Set to `1`, a program on Windows writes what dbghelp says of each frame of a stack trace to standard error: its address, its name and line or the error, and the PDB it came from. For bringing traces up on a new system. The program reads it, not `calx` |
 | `CALX_LTO` | Set to `0`, release builds leave out ThinLTO and optimize each file alone, as they do without lld. Each file's machine code is then kept in the object cache, so a build that finds all its files there only links, where ThinLTO makes the machine code again in every link. That suits a test run that builds many programs and keeps its cache. Their code can be slower, since a call to another module no longer inlines |

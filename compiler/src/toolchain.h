@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "target.h"
+
 namespace calx {
 
 enum class BuildMode { debug, release };
@@ -17,6 +19,9 @@ enum class BuildMode { debug, release };
 enum class BuildKind { program, library, staticlib };
 
 struct Toolchain {
+    // What it builds for: the host, or what `--target` named, which find_toolchain checks it can
+    // build for and finds the SDK of (CLX-409).
+    Target target = kHost;
     std::string clang;    // the clang executable
     bool lld = false;     // whether lld is next to it, or on PATH
     std::string lld_path;    // where, or ""
@@ -27,8 +32,9 @@ struct Toolchain {
     // On macOS, dsymutil, which gathers a program's DWARF from its objects into a file beside it
     // for stack traces and debuggers, as the PDB is on Windows (CLX-278); "" where there's none.
     std::string dsymutil;
-    // On macOS, the SDK: libSystem's headers and stubs, from Apple's Command Line Tools or Xcode,
+    // For macOS, the SDK: libSystem's headers and stubs, from Apple's Command Line Tools or Xcode,
     // passed as -isysroot, which LLVM's own clang needs and Apple's finds itself; "" if there's none.
+    // For iOS, Xcode's SDK for an iPhone or the simulator, which xcrun names (CLX-408).
     std::string sdk;
     std::string identity; // what changes when clang does: its path, size and modification time
     std::string home;     // the Calx installation: runtime/ and std/ are under it
@@ -51,6 +57,11 @@ bool find_toolchain(Toolchain& tc, std::string& error);
 // The macOS SDK's folder: SDKROOT, or the one the Command Line Tools or Xcode installed, found
 // without starting xcrun; "" if there's none.
 std::string find_sdk();
+
+// Xcode's iOS SDK, for an iPhone or with `simulator` the simulator, as `xcrun --sdk iphoneos
+// --show-sdk-path` names it, which DEVELOPER_DIR and `xcode-select` choose between; "" with the
+// reason in `error` if there's none (CLX-408).
+std::string find_ios_sdk(bool simulator, std::string& error);
 
 // The program `name` (with `.exe` on Windows) in the first folder on PATH that has it, or "".
 std::string which(const std::string& name);
@@ -141,12 +152,12 @@ extern const std::chrono::minutes kCacheGrace;
 void trim_cache(const std::string& dir, std::size_t keep, std::uintmax_t budget);
 
 // What a built library's file name ends with: `.dll`, `.so` or `.dylib`.
-const char* library_suffix();
+const char* library_suffix(Target t);
 
 // CLX-334: what a static library's file name ends with, `.lib` on Windows and `.a` elsewhere, and
 // the name `calx build --staticlib` gives one built from `stem`: `stem.lib`, or `libstem.a`.
-const char* staticlib_suffix();
-std::string staticlib_name(const std::string& stem);
+const char* staticlib_suffix(Target t);
+std::string staticlib_name(Target t, const std::string& stem);
 
 // Puts `objects` in the static library `output`, with the first archiver it finds: on Windows
 // llvm-lib or lld, beside clang or on PATH, or Visual Studio's lib.exe; on macOS libtool; and

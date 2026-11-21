@@ -27,7 +27,7 @@ In a terminal, Calx's mark dissolves in, each download draws a bar with how much
 
 On Linux, the script needs `curl` or `wget`, `sha256sum`, and `tar` with `xz` for the toolchain, which most systems have. It says how to install the C library's headers if they're missing ([clang](#clang)), and libcurl, which `calx update` downloads with: on Ubuntu or Debian, `sudo apt install libcurl4`.
 
-On macOS, the script needs Apple's Command Line Tools, for the SDK programs are built against, and says to run `xcode-select --install` if they're missing. Calx is signed ad hoc, not by an Apple developer, so install it with the script: a copy downloaded with a browser is quarantined, and macOS won't open it. An Intel Mac has no release; it can [build from source](#building-from-source).
+On macOS, the script needs Apple's Command Line Tools, for the SDK programs are built against, and says to run `xcode-select --install` if they're missing. Calx is signed ad hoc, not by an Apple developer, so install it with the script: a copy downloaded with a browser is quarantined, and macOS won't open it. An Intel Mac has no release; it can [build from source](#building-from-source). Building for iOS, with `--target aarch64-ios` or `aarch64-ios-sim`, takes Xcode as well, for its iOS SDKs ([targets](../reference/command.md#targets)).
 
 Calx is pre-release, so until the first stable release, the scripts install the newest nightly: the newest build of `main` that passed every test.
 

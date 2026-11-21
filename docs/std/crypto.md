@@ -1,6 +1,6 @@
 ---
 title: std.crypto
-description: Random bytes from the system, AES-128 in CFB8 mode, RSA with PKCS#1 v1.5 padding and signatures - what Minecraft's online-mode login and signed chat use - and argon2id password hashing in PHC strings, Ed25519 signatures, and authenticated encryption with ChaCha20-Poly1305, XChaCha20-Poly1305 and AES-GCM, as Python's argon2-cffi and cryptography give them.
+description: Random bytes from the system, AES-128 in CFB8 mode, RSA with PKCS#1 v1.5 padding and signatures - what Minecraft's online-mode login and signed chat use - and argon2id password hashing in PHC strings, Ed25519 signatures, ES256 signatures on P-256 for JWTs and Apple's push service, and authenticated encryption with ChaCha20-Poly1305, XChaCha20-Poly1305 and AES-GCM, as Python's argon2-cffi and cryptography give them.
 ---
 
 # `std.crypto`
@@ -15,7 +15,7 @@ Each gives what Java's `Cipher`, `KeyPairGenerator` and `SecureRandom` give for 
 
 Signed chat uses RSA signatures. Mojang's key signs each player's key, and the player's key signs each of their messages. The server checks both as Java's `Signature` checks `SHA1withRSA` and `SHA256withRSA`.
 
-For everything else there are [passwords](#passwords), hashed with argon2id into the PHC strings Python's argon2-cffi writes, [Ed25519](#ed25519) signatures, which minisign and SSH keys are, as Python's `cryptography` makes and checks them, and [authenticated encryption](#authenticated-encryption), ChaCha20-Poly1305, XChaCha20-Poly1305 and AES-GCM, for keeping secrets that only a key opens and that can't be changed unnoticed, as `cryptography` seals them.
+For everything else there are [passwords](#passwords), hashed with argon2id into the PHC strings Python's argon2-cffi writes, [Ed25519](#ed25519) signatures, which minisign and SSH keys are, as Python's `cryptography` makes and checks them, [ES256](#es256) signatures, ECDSA on P-256, which JWTs for Apple's push service and App Store Connect are signed with, and [authenticated encryption](#authenticated-encryption), ChaCha20-Poly1305, XChaCha20-Poly1305 and AES-GCM, for keeping secrets that only a key opens and that can't be changed unnoticed, as `cryptography` seals them.
 
 ```calx
 import std.crypto.{Cfb8, RsaKey, random_bytes}
@@ -180,6 +180,85 @@ fn main() {
 - There's no X25519 key exchange yet.
 - The [tests](../../tests/std/ed25519.calx) hold RFC 8032's five Ed25519 vectors, each signed and verified, and not verified with a bit flipped in R or S or a byte added to the message, then keys that aren't points or aren't in their one encoding, and an S of L more than a good one.
 
+## ES256
+
+ECDSA signatures on NIST's P-256 curve with SHA-256, which JWS calls ES256, as FIPS 186-5 makes them and Python's `cryptography` signs and checks them with `ec.ECDSA(hashes.SHA256())`. They're what Apple's push service, App Store Connect's API and Sign in with Apple take tokens signed with, and what WebAuthn's passkeys and most JWTs that aren't HMACs sign. A private key is a number below the curve's order n, kept in a PKCS#8 file, which an Apple `.p8` key is, its public key a point on the curve, and a signature two numbers, r and s, 64 bytes in all. The nonce each signature needs is RFC 6979's, worked out from the key and the message, so the same message always signs the same, and no random source, good or bad, is involved.
+
+```calx
+import std.bytes.{base64_url}
+import std.crypto.{P256Key}
+
+fn main() {
+    // An Apple `.p8` key, which a program reads from its file, or better from std.keyring.
+    let p8 = #"
+        -----BEGIN PRIVATE KEY-----
+        MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg8lII81RsHjtyNXs7
+        AkKCMjf7SN74PY8j9FdqZs1yygehRANCAATupd5738oc+V1By/ZfP6WI8G5QnCuA
+        vkcoCMf56atYEW1bINrp+SYamNe+1p1P3L3Yb/LFQ2i2ObrjBbHxyi18
+        -----END PRIVATE KEY-----
+        "#
+    let key = P256Key.from_pem(p8)!
+
+    // APNs' provider token: a JWT with the key's ID in its header and the team's in its claims,
+    // signed with ES256. The signature is r then s, 64 bytes, as JWS wants them.
+    let header = base64_url(#"{"alg":"ES256","kid":"ABC123DEFG"}"#.to_bytes())
+    let claims = base64_url(#"{"iss":"DEF123GHIJ","iat":1795256000}"#.to_bytes())
+    let input = "{header}.{claims}"
+    let token = "{input}.{base64_url(key.sign(input.to_bytes()))}"
+    println(token)    // out: eyJhbGciOiJFUzI1NiIsImtpZCI6IkFCQzEyM0RFRkcifQ.eyJpc3MiOiJERUYxMjNHSElKIiwiaWF0IjoxNzk1MjU2MDAwfQ.icuTi1VbAcFuDA4kc8pRx0_7ERna3SoNZeTNlcLRE0sHpTFLrVC0umpF---o3plx8ir4HPibdvRUsjQK53lTqQ
+}
+```
+
+```calx
+import std.crypto.{P256Key, P256PublicKey}
+
+fn main() {
+    // A new key, saved as PKCS#8, and its public key, as an X.509 SubjectPublicKeyInfo.
+    let key = P256Key.generate()
+    let saved = key.pem()
+    println(saved.lines()[0])    // out: -----BEGIN PRIVATE KEY-----
+    let public = P256PublicKey.from_pem(key.public_key().pem())!
+
+    let message = "order 1234 paid".to_bytes()
+    let sig = P256Key.from_pem(saved)!.sign(message.copy())
+    println("{sig.len()} {public.verify(message.copy(), sig.copy())} {public.verify("order 1235 paid".to_bytes(), sig)}")    // out: 64 true false
+
+    // In DER, as `cryptography`'s `sign` gives it and its `verify` takes it, and X.509 and TLS
+    // hold it.
+    let der = key.sign_der(message.copy())
+    println("{public.verify_der(message.copy(), der)}")    // out: true
+
+    // The point as 65 bytes, 4 then x and y, as WebAuthn and JWKs hold it, or 33 compressed.
+    println("{public.sec1().len()} {public.sec1(compressed: true).len()}")    // out: 65 33
+}
+```
+
+| Item | Gives |
+| --- | --- |
+| `P256Key.generate() -> P256Key` | A new key from the system's random source, as `ec.generate_private_key(ec.SECP256R1())` |
+| `P256Key.from_pem(pem: String) -> P256Key?` | The key in a `-----BEGIN PRIVATE KEY-----` block, PKCS#8, as Apple's `.p8` files and `openssl genpkey` write it, or in a `-----BEGIN EC PRIVATE KEY-----` one, SEC1, as `openssl ecparam -genkey` writes it, as `serialization.load_pem_private_key(pem, None)` reads them. Text around the block is skipped. `none` if there's no such block, or it's encrypted, another curve's, or broken |
+| `P256Key.from_der(der: List<u8>) -> P256Key?` | The same in DER, as `serialization.load_der_private_key(der, None)`. Every length must be in its shortest form, with nothing after, and a public key in it must be the private key's |
+| `P256Key.from_scalar(bytes: List<u8>) -> P256Key?` | The key whose private number d is these 32 bytes, big-endian, as `ec.derive_private_key(d, ec.SECP256R1())`; `none` unless they're 32 bytes of a number from 1 to n − 1 |
+| `k.scalar() -> List<u8>` | d, 32 bytes, big-endian. Anyone with it can sign as the key |
+| `k.der() -> List<u8>`, `k.pem() -> String` | The key as unencrypted PKCS#8 with the public key in it, 138 bytes of DER, as `private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())` and OpenSSL write it, and as a PEM block, base64 in lines of 64 |
+| `k.public_key() -> P256PublicKey` | The public key, which checks what `k` signs |
+| `k.sign(message: List<u8>) -> List<u8>` | The ES256 signature of the message: r then s, 32 bytes each, big-endian, as JWS, COSE and WebAuthn hold it, and as `utils.decode_dss_signature` takes `cryptography`'s apart. The same each time for the same message |
+| `k.sign_der(message: List<u8>) -> List<u8>` | The same signature in DER, a SEQUENCE of two INTEGERs, as `k.sign(message, ec.ECDSA(hashes.SHA256()))` gives it: 70 to 72 bytes, most often |
+| `P256PublicKey.from_sec1(bytes: List<u8>) -> P256PublicKey?` | The point in X9.62's encoding, 65 bytes, 4 then x and y, or 33, 2 or 3 for y's parity then x, as `EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), bytes)`; `none` unless it's that, with x and y below the field's prime and the point on the curve |
+| `P256PublicKey.from_der(der: List<u8>) -> P256PublicKey?`, `P256PublicKey.from_pem(pem: String) -> P256PublicKey?` | The key in an X.509 SubjectPublicKeyInfo, in DER or a `-----BEGIN PUBLIC KEY-----` block, as `load_der_public_key` and `load_pem_public_key` read it; `none` for anything but a P-256 key |
+| `p.sec1(compressed: bool = false) -> List<u8>` | The point in X9.62's encoding, as `public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)`, or `CompressedPoint` with `compressed: true` |
+| `p.x() -> List<u8>`, `p.y() -> List<u8>` | The point's coordinates, 32 bytes each, big-endian, a JWK's `x` and `y` before they're base64url |
+| `p.der() -> List<u8>`, `p.pem() -> String` | The key as a SubjectPublicKeyInfo, 91 bytes of DER, as `public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)`, and as a PEM block |
+| `p.verify(message: List<u8>, signature: List<u8>) -> bool` | Whether the signature, r then s, is the key's of the message, as `cryptography`'s `verify` decides, where it raises `InvalidSignature` for no. One that isn't 64 bytes isn't |
+| `p.verify_der(message: List<u8>, signature: List<u8>) -> bool` | The same for a signature in DER, which must be DER and not BER |
+
+- `verify` decides as OpenSSL, which `cryptography` is, decides: r and s from 1 to n − 1, and the x of [e/s]G + [r/s]Q, mod n, must be r, for e the message's SHA-256 and Q the key. An s and n − s both pass, as they do there: JWS and APNs don't ask for the lower one, and a program that keeps signatures as IDs shouldn't count on there being one form.
+- `verify_der` takes DER alone, as Wycheproof says to: a long length the short form would do, a 0 in front of a number that doesn't need it, a negative number, or a byte after the end, and the signature is refused.
+- An APNs token is good for an hour, and Apple refuses new ones made more often than every 20 minutes, so a program signs one and sends it with every push until it's due.
+- There's no ECDH yet, and no other curve: not P-384, P-521 or secp256k1.
+- The [tests](../../tests/std/p256.calx) hold RFC 6979's test of P-256 with SHA-256, its key's public key and its signatures of "sample" and "test", byte for byte, a key OpenSSL 3.5 made, in PKCS#8 and SEC1, with its signature, then keys, points and signatures that aren't. [Those of Wycheproof](../../tests/std/p256_wycheproof.calx) hold all of its ECDSA P-256 SHA-256 vectors, 484 signatures in DER and 262 as r then s under 225 keys, each valid one taken and each invalid one refused, as it says.
+- Checked wider than the tests: for 300 random keys and messages of up to 765 bytes, OpenSSL 3.5 verified every signature `sign_der` made, and its own RFC 6979 signatures, from `pkeyutl -pkeyopt nonce-type:1`, were the same bytes. 300 keys from `openssl genpkey` read in PKCS#8, in SEC1 from `openssl ec`, and in SEC1's DER, all to the same number; `der` wrote each back as the bytes `openssl pkcs8 -topk8` gave, and each of OpenSSL's signatures with them verified, and didn't with a byte added to its message.
+
 ## Authenticated encryption
 
 Each of the three seals a message with a key and a nonce: the ciphertext, as long as the message, with a 16-byte tag after it. Opening it takes the same key and nonce, and gives the message back only if the tag matches, so a sealed value that someone changed, or moved, or made up, opens as `none` rather than as other bytes. Associated data, such as the id of the record a secret is stored in, isn't encrypted or put in the sealed bytes, but the tag covers it, so the secret opens only as that record's. They're RFC 8439's ChaCha20-Poly1305, its XChaCha20-Poly1305 variant from draft-irtf-cfrg-xchacha, and NIST's AES-GCM, and each seals the bytes Python's `cryptography` does, in `ChaCha20Poly1305` and `AESGCM`.
@@ -300,6 +379,26 @@ On the same desktop, an i9-13900K, the best of several runs, against OpenSSL 3.5
 | An Ed25519 verify | 87 µs | 127 µs |
 
 OpenSSL's `kdf` command ran argon2's lanes one after another, as it had no thread pool to run them on. Working G out in vector registers, as the reference implementation's AVX2 code does, would make each lane faster still.
+
+ES256 is [runtime/calx_p256.c](../../runtime/calx_p256.c), written from FIPS 186-5, SEC 1, RFC 6979 and Renes, Costello and Batina's paper on complete formulas. It's linked only into programs that call it, with [`std.hash`](hash.md)'s runtime for SHA-256 and HMAC-SHA256.
+
+| Part | How |
+| --- | --- |
+| P-256's numbers | Mod p and mod n in four 64-bit limbs, in Montgomery form, multiplied through 128-bit products with Montgomery's reduction a limb at a time. Mod p it takes one multiply a limb, not four, from p's shape. Every sum, difference and product ends with a subtraction of the modulus that's always made and kept or dropped by a mask. Inverses are powers, x^(m − 2), four bits of the public exponent at a time |
+| P-256's points | Projective coordinates, with the complete sum and doubling for a = −3 of Renes, Costello and Batina's paper: one formula for every pair of points, the neutral point and a point with itself among them, so nothing branches on them, and a verifier's sums that pass through the neutral point need nothing of their own |
+| Signing | RFC 6979's nonce from HMAC-SHA256, then [k]G four bits at a time from a table of G's first 16 multiples, each entry picked by reading all 16 under masks, as Ed25519's signing does, so neither the time nor the memory touched depends on the nonce or the key. Making a public key is the same multiply by d. What's secret is wiped from the stack before the call returns |
+| Verifying | [e/s]G + [r/s]Q with a table of each, four bits at a time, picked directly, since everything in it is public |
+| Keys | PKCS#8, SEC1 and SubjectPublicKeyInfo read and written in Calx, in [std/crypto.calx](../../std/crypto.calx), with the DER reader RSA's keys use |
+
+On the same desktop, the best of 7 rounds of 2,000, against OpenSSL 3.5's `speed ecdsap256` in WSL, which signs a digest:
+
+| | Calx | OpenSSL 3.5 |
+| --- | --- | --- |
+| An ES256 signature | 64 µs | 13.5 µs |
+| An ES256 verify | 77 µs | 43 µs |
+| A new P-256 key | 86 µs | |
+
+OpenSSL's P-256 is assembly, with G's multiples worked out beforehand into a table it ships, so signing does no doublings at all. A table like it is what would close most of the gap in signing. An APNs token is signed once in 20 minutes or more, so it doesn't count there.
 
 The authenticated ciphers are [runtime/calx_aead.c](../../runtime/calx_aead.c), linked only into programs that call them, written from RFC 8439 (ChaCha20 and Poly1305), draft-irtf-cfrg-xchacha-03 (HChaCha20), FIPS 197 (AES) and NIST SP 800-38D (GCM).
 
