@@ -1,0 +1,11 @@
+// XChaCha20-Poly1305 takes a 24-byte nonce, and sealing with another length panics where
+// opening gives none.
+
+import std.crypto.{XChaCha20Poly1305}
+
+fn main() {
+    let x = XChaCha20Poly1305.new(XChaCha20Poly1305.generate_key())
+    let sealed = x.encrypt([9; 24], "hi".to_bytes())
+    println("{sealed.len()} {x.decrypt([9; 12], sealed, []) == none}")    // out: 18 true
+    _ = x.encrypt([9; 12], "hi".to_bytes())    // panic: XChaCha20-Poly1305 takes a nonce of 24 bytes, not 12
+}

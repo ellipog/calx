@@ -10,6 +10,10 @@
 /// Beside those, argon2id for storing passwords (CLX-384), as Python's argon2-cffi does, in the
 /// PHC strings it writes, and Ed25519 signatures (CLX-379), which minisign and SSH keys are, as
 /// Python's `cryptography` signs and checks them.
+///
+/// And authenticated encryption (CLX-397), sealing secrets so that reading them takes the key and
+/// changing them is noticed: ChaCha20-Poly1305 and XChaCha20-Poly1305, and AES-GCM, as Python's
+/// `cryptography` gives them in `ChaCha20Poly1305` and `AESGCM`.
 module std.crypto
 
 import std.bytes.{base64, from_base64}
@@ -50,6 +54,11 @@ extern "C" {
     fn cx_ed25519_sign(seed: *const u8, public: *const u8, msg: *const u8, len: usize, out: *u8)
     fn cx_ed25519_check(public: *const u8) -> bool
     fn cx_ed25519_verify(public: *const u8, msg: *const u8, len: usize, sig: *const u8) -> bool
+    fn cx_aead_chacha_seal(key: *const u8, nonce: *const u8, nonce_len: usize, pt: *const u8, n: usize, aad: *const u8, alen: usize, out: *u8)
+    fn cx_aead_chacha_open(key: *const u8, nonce: *const u8, nonce_len: usize, sealed: *const u8, n: usize, aad: *const u8, alen: usize, out: *u8) -> bool
+    fn cx_gcm_start(ctx: *u8, key: *const u8, len: usize)
+    fn cx_gcm_seal(ctx: *const u8, iv: *const u8, ivlen: usize, pt: *const u8, n: usize, aad: *const u8, alen: usize, out: *u8)
+    fn cx_gcm_open(ctx: *const u8, iv: *const u8, ivlen: usize, sealed: *const u8, n: usize, aad: *const u8, alen: usize, out: *u8) -> bool
 }
 
 /// `n` random bytes from the system's generator, which is good for keys, secrets and tokens.
@@ -584,6 +593,204 @@ impl Ed25519PublicKey {
         return unsafe { cx_ed25519_verify(self.encoded.as_ptr(), message.as_ptr(), message.len(), signature.as_ptr()) }
     }
 }
+
+/// ChaCha20-Poly1305, RFC 8439's authenticated encryption, as Python's `cryptography`
+/// `ChaCha20Poly1305` gives it: a 32-byte key and a 12-byte nonce, and what it seals is the
+/// ciphertext with a 16-byte tag after it, which `decrypt` checks before it gives anything back.
+/// A nonce must never seal two messages with one key, which would give away the xor of the two
+/// and let someone forge others. A counter is safe. For random nonces, use `XChaCha20Poly1305`,
+/// whose nonce is long enough for them.
+pub struct ChaCha20Poly1305 {
+    key: List<u8>,
+}
+
+impl ChaCha20Poly1305 {
+    /// A new key, 32 bytes from the system's random source, as `ChaCha20Poly1305.generate_key()`.
+    pub fn generate_key() -> List<u8> {
+        return random_bytes(32)
+    }
+
+    /// The cipher with the key, as `ChaCha20Poly1305(key)`. Panics unless it's 32 bytes.
+    @track_caller
+    pub fn new(key: List<u8>) -> ChaCha20Poly1305 {
+        if key.len() != 32 {
+            panic("ChaCha20-Poly1305 takes a key of 32 bytes, not {key.len()}")
+        }
+        return ChaCha20Poly1305 { key: key.copy() }
+    }
+
+    /// The plaintext encrypted, with the tag after it, 16 bytes longer, as `encrypt(nonce,
+    /// plaintext, aad)`. `aad` is associated data, which isn't encrypted or put in, but which the
+    /// tag covers, so `decrypt` opens the message only with the same: a record's id, say, so a
+    /// sealed value can't be moved to another record. Panics unless the nonce is 12 bytes, or if
+    /// the plaintext is over 256 GiB less 64 bytes, as far as the cipher's block counter goes.
+    @track_caller
+    pub fn encrypt(self, nonce: List<u8>, plaintext: List<u8>, aad: List<u8> = []) -> List<u8> {
+        if nonce.len() != 12 {
+            panic("ChaCha20-Poly1305 takes a nonce of 12 bytes, not {nonce.len()}")
+        }
+        return chacha_seal(self.key, nonce, plaintext, aad)
+    }
+
+    /// The plaintext `encrypt` sealed with this key, nonce and `aad`, or `none` if `sealed` isn't
+    /// that, as when a byte of it, the nonce or the associated data has changed, or the key is
+    /// another, where `cryptography` raises `InvalidTag`. The tag is compared in constant time,
+    /// before anything is decrypted. `none` too unless the nonce is 12 bytes.
+    pub fn decrypt(self, nonce: List<u8>, sealed: List<u8>, aad: List<u8> = []) -> List<u8>? {
+        if nonce.len() != 12 {
+            return none
+        }
+        return chacha_open(self.key, nonce, sealed, aad)
+    }
+}
+
+/// XChaCha20-Poly1305, as draft-irtf-cfrg-xchacha makes it and libsodium's
+/// `crypto_aead_xchacha20poly1305_ietf` gives it: ChaCha20-Poly1305 with a 24-byte nonce, from
+/// which HChaCha20 makes a key for each message. Nonces of 24 random bytes from `random_bytes`
+/// are safe for as many messages as a key will ever seal, so a program needn't keep a counter.
+pub struct XChaCha20Poly1305 {
+    key: List<u8>,
+}
+
+impl XChaCha20Poly1305 {
+    /// A new key, 32 bytes from the system's random source.
+    pub fn generate_key() -> List<u8> {
+        return random_bytes(32)
+    }
+
+    /// The cipher with the key. Panics unless it's 32 bytes.
+    @track_caller
+    pub fn new(key: List<u8>) -> XChaCha20Poly1305 {
+        if key.len() != 32 {
+            panic("XChaCha20-Poly1305 takes a key of 32 bytes, not {key.len()}")
+        }
+        return XChaCha20Poly1305 { key: key.copy() }
+    }
+
+    /// The plaintext encrypted, with the 16-byte tag of it and `aad` after it, as
+    /// `ChaCha20Poly1305.encrypt` seals it. Panics unless the nonce is 24 bytes, or if the
+    /// plaintext is over 256 GiB less 64 bytes.
+    @track_caller
+    pub fn encrypt(self, nonce: List<u8>, plaintext: List<u8>, aad: List<u8> = []) -> List<u8> {
+        if nonce.len() != 24 {
+            panic("XChaCha20-Poly1305 takes a nonce of 24 bytes, not {nonce.len()}")
+        }
+        return chacha_seal(self.key, nonce, plaintext, aad)
+    }
+
+    /// The plaintext `encrypt` sealed with this key, nonce and `aad`, or `none` if `sealed` isn't
+    /// that, or the nonce isn't 24 bytes. The tag is compared in constant time, before anything
+    /// is decrypted.
+    pub fn decrypt(self, nonce: List<u8>, sealed: List<u8>, aad: List<u8> = []) -> List<u8>? {
+        if nonce.len() != 24 {
+            return none
+        }
+        return chacha_open(self.key, nonce, sealed, aad)
+    }
+}
+
+// The most ChaCha20 encrypts under one nonce: 2^32 - 1 blocks of 64 bytes, block 0 making the
+// Poly1305 key.
+const CHACHA_MAX: u64 = 274877906880
+
+@track_caller
+fn chacha_seal(key: List<u8>, nonce: List<u8>, plaintext: List<u8>, aad: List<u8>) -> List<u8> {
+    if u64(plaintext.len()) > CHACHA_MAX {
+        panic("ChaCha20-Poly1305 seals up to {CHACHA_MAX} bytes under a nonce, not {plaintext.len()}")
+    }
+    var out: List<u8> = [0; plaintext.len() + 16]
+    unsafe {
+        cx_aead_chacha_seal(key.as_ptr(), nonce.as_ptr(), nonce.len(), plaintext.as_ptr(), plaintext.len(), aad.as_ptr(), aad.len(), out.as_mut_ptr())
+    }
+    return out
+}
+
+fn chacha_open(key: List<u8>, nonce: List<u8>, sealed: List<u8>, aad: List<u8>) -> List<u8>? {
+    if sealed.len() < 16 or u64(sealed.len() - 16) > CHACHA_MAX {
+        return none
+    }
+    var out: List<u8> = [0; sealed.len() - 16]
+    let opened = unsafe { cx_aead_chacha_open(key.as_ptr(), nonce.as_ptr(), nonce.len(), sealed.as_ptr(), sealed.len(), aad.as_ptr(), aad.len(), out.as_mut_ptr()) }
+    if not opened {
+        return none
+    }
+    return some(out)
+}
+
+/// AES in Galois/Counter Mode, NIST SP 800-38D's authenticated encryption, as Python's
+/// `cryptography` `AESGCM` gives it: a key of 16, 24 or 32 bytes, for AES-128, AES-192 or
+/// AES-256, a nonce of 12 bytes, and the ciphertext with a 16-byte tag after it. As with
+/// `ChaCha20Poly1305`, a nonce must never seal two messages with one key, and here a repeat gives
+/// away what forges any message under the key. Random 12-byte nonces are safe for 2^32 messages
+/// a key, as NIST counts it.
+pub struct AesGcm {
+    ctx: List<u8>,
+}
+
+impl AesGcm {
+    /// A new key of `bits` bits, 128, 192 or 256, from the system's random source, as
+    /// `AESGCM.generate_key(bit_length)`. Panics for any other size.
+    @track_caller
+    pub fn generate_key(bits: u32 = 256) -> List<u8> {
+        if bits != 128 and bits != 192 and bits != 256 {
+            panic("AES keys are 128, 192 or 256 bits, not {bits}")
+        }
+        return random_bytes(usize(bits / 8))
+    }
+
+    /// The cipher with the key, as `AESGCM(key)`, its round keys and GHASH key worked out once.
+    /// Panics unless it's 16, 24 or 32 bytes.
+    @track_caller
+    pub fn new(key: List<u8>) -> AesGcm {
+        if key.len() != 16 and key.len() != 24 and key.len() != 32 {
+            panic("AES-GCM takes a key of 16, 24 or 32 bytes, not {key.len()}")
+        }
+        var ctx: List<u8> = [0; 400]
+        unsafe {
+            cx_gcm_start(ctx.as_mut_ptr(), key.as_ptr(), key.len())
+        }
+        return AesGcm { ctx: ctx }
+    }
+
+    /// The plaintext encrypted, with the 16-byte tag of it and `aad` after it, as
+    /// `encrypt(nonce, plaintext, aad)`; `aad` is as `ChaCha20Poly1305.encrypt` takes it. The
+    /// nonce is 12 bytes, as NIST advises, or 8 to 128, as `cryptography` takes them. Panics for
+    /// another length, or if the plaintext is over 64 GiB less 32 bytes, as far as GCM's counter
+    /// goes.
+    @track_caller
+    pub fn encrypt(self, nonce: List<u8>, plaintext: List<u8>, aad: List<u8> = []) -> List<u8> {
+        if nonce.len() < 8 or nonce.len() > 128 {
+            panic("AES-GCM takes a nonce of 12 bytes, or 8 to 128, not {nonce.len()}")
+        }
+        if u64(plaintext.len()) > GCM_MAX {
+            panic("AES-GCM seals up to {GCM_MAX} bytes under a nonce, not {plaintext.len()}")
+        }
+        var out: List<u8> = [0; plaintext.len() + 16]
+        unsafe {
+            cx_gcm_seal(self.ctx.as_ptr(), nonce.as_ptr(), nonce.len(), plaintext.as_ptr(), plaintext.len(), aad.as_ptr(), aad.len(), out.as_mut_ptr())
+        }
+        return out
+    }
+
+    /// The plaintext `encrypt` sealed with this key, nonce and `aad`, or `none` if `sealed` isn't
+    /// that, as when a byte of it, the nonce or the associated data has changed, or the key is
+    /// another, where `cryptography` raises `InvalidTag`. The tag is compared in constant time,
+    /// before anything is decrypted. `none` too unless the nonce is 8 to 128 bytes.
+    pub fn decrypt(self, nonce: List<u8>, sealed: List<u8>, aad: List<u8> = []) -> List<u8>? {
+        if nonce.len() < 8 or nonce.len() > 128 or sealed.len() < 16 or u64(sealed.len() - 16) > GCM_MAX {
+            return none
+        }
+        var out: List<u8> = [0; sealed.len() - 16]
+        let opened = unsafe { cx_gcm_open(self.ctx.as_ptr(), nonce.as_ptr(), nonce.len(), sealed.as_ptr(), sealed.len(), aad.as_ptr(), aad.len(), out.as_mut_ptr()) }
+        if not opened {
+            return none
+        }
+        return some(out)
+    }
+}
+
+// The most GCM encrypts under one nonce: 2^32 - 2 blocks of 16 bytes, NIST's 2^39 - 256 bits.
+const GCM_MAX: u64 = 68719476704
 
 // What PKCS#1 v1.5 signs, EMSA-PKCS1-v1_5: 0, 1, 0xFF bytes, 0, then the digest's DigestInfo, the
 // hash's identifier and the digest, `size` bytes in all; `none` if that's too long for the key.

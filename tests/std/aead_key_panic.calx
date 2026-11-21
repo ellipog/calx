@@ -1,0 +1,9 @@
+// ChaCha20-Poly1305's key is 32 bytes, and AES-GCM's 16, 24 or 32.
+
+import std.crypto.{AesGcm, ChaCha20Poly1305, random_bytes}
+
+fn main() {
+    let g = AesGcm.new(random_bytes(24))
+    println("{g.encrypt(random_bytes(12), [1, 2, 3]).len()}")    // out: 19
+    _ = ChaCha20Poly1305.new(random_bytes(16))    // panic: ChaCha20-Poly1305 takes a key of 32 bytes, not 16
+}
