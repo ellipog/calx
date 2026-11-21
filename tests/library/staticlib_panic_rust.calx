@@ -5,18 +5,42 @@
 // needs: rustc
 // file: main.calx
 import std.env.{os, script, variable}
+import std.fs.{is_file}
 import std.path.{join, parent_dir}
 import std.process.{Command}
 
-/// What `exe` printed, and how it ended, or what went wrong.
-fn run(exe: String, args: List<String>, dir: String) -> String {
-    match Command.new(exe.copy()).args(args).dir(dir).output() {
+/// What `command` printed, and how it ended, or what went wrong.
+fn run_command(command: own Command, what: String) -> String {
+    match command.output() {
         ok(o) => {
             let text = "{o.text()}{o.error_text()}".trim_end()
             return if o.status.success() { text } else { "{text}\n{o.status}" }
         },
-        err(e) => return "can't run {exe}: {e}",
+        err(e) => return "can't run {what}: {e}",
     }
+}
+
+fn run(exe: String, args: List<String>, dir: String) -> String {
+    return run_command(Command.new(exe.copy()).args(args).dir(dir), exe)
+}
+
+/// On Windows, PATH without the folders whose `link.exe` isn't Visual Studio's, such as Git's
+/// usr/bin, which has coreutils' `link`. Where Visual Studio's environment is set, as CI's is,
+/// `rustc` runs the first `link.exe` on PATH, and Git's bash puts its own first. Visual Studio's
+/// has `cl.exe` beside it, which is how clang tells them apart too.
+fn msvc_path() -> String? {
+    if os() != "windows" {
+        return none
+    }
+    let path = variable("PATH") ?? String()
+    var kept: List<String> = []
+    for folder in path.split(";") {
+        let other_link = is_file(join(folder.copy(), "link.exe")) and not is_file(join(folder.copy(), "cl.exe"))
+        if not folder.is_empty() and not other_link {
+            kept.push(folder.copy())
+        }
+    }
+    return some(kept.join(";"))
 }
 
 fn main() {
@@ -39,7 +63,11 @@ fn main() {
             continue
         }
         let exe = "out/{mode}/host{if windows { ".exe" } else { "" }}"
-        let linked = run(String("rustc"), ["--edition", "2021", "main.rs", "-L", "native=out/{mode}", "-l", "static=engine", "-o", exe.copy()], dir.copy())
+        var rustc = Command.new("rustc").args(["--edition", "2021", "main.rs", "-L", "native=out/{mode}", "-l", "static=engine", "-o", exe.copy()]).dir(dir.copy())
+        if let path = msvc_path() {
+            rustc = rustc.env("PATH", path)
+        }
+        let linked = run_command(rustc, "rustc")
         if not linked.is_empty() {
             println("linking the {mode} host: {linked}")
             continue
@@ -48,7 +76,7 @@ fn main() {
     }
     // out: engine_divide(7, 2) gave 3
     // out: engine_divide(1, 0) gave -1
-    // out: the hook heard: engine_divide: division by zero, at engine.calx:71:12
+    // out: the hook heard: engine_divide: division by zero, at engine.calx:99:12
     // out: calx_panicked: division by zero
     // out: engine_divide(8, 2) gave -1, as the library has stopped
     // out: calx_shutdown gave 101
@@ -56,7 +84,7 @@ fn main() {
     // out: calx_shutdown gave 0
     // out: engine_divide(7, 2) gave 3
     // out: engine_divide(1, 0) gave -1
-    // out: the hook heard: engine_divide: division by zero, at engine.calx:71:12
+    // out: the hook heard: engine_divide: division by zero, at engine.calx:99:12
     // out: calx_panicked: division by zero
     // out: engine_divide(8, 2) gave -1, as the library has stopped
     // out: calx_shutdown gave 101
