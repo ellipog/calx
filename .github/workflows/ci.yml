@@ -161,7 +161,9 @@ jobs:
         run: '"$CALX_BIN" run --release tests/run.calx -- --modes debug,release'
       # std.net.mdns beside the system's own responder (CLX-412): it finds a service avahi or
       # Bonjour announces, and avahi-browse or dns-sd finds and resolves one it announces, with
-      # its TXT record. On Windows the tests run beside Windows' own responder already.
+      # its TXT record. On Windows the tests run beside Windows' own responder already. On macOS
+      # it runs as root, since the runner's programs haven't the permission for the local network
+      # that macOS asks for (TN3179), and root needs none.
       - name: mDNS with avahi and Bonjour
         if: (runner.os == 'Linux' && runner.arch == 'X64') || runner.os == 'macOS'
         shell: bash
@@ -169,6 +171,9 @@ jobs:
           set -eu
           out="$RUNNER_TEMP/mdns-interop"
           "$CALX_BIN" build tools/mdns/interop.calx -o "$out"
+          interop() {
+            if [ "$RUNNER_OS" = macOS ]; then sudo "$out" "$@"; else "$out" "$@"; fi
+          }
           kind=_calxci._tcp
           if [ "$RUNNER_OS" = Linux ]; then
             sudo apt-get install -y -qq avahi-daemon avahi-utils > /dev/null
@@ -179,12 +184,12 @@ jobs:
           fi
           other=$!
           if [ "$RUNNER_OS" = Linux ]; then
-            "$out" find "$kind" "Avahi Side" id=av
+            interop find "$kind" "Avahi Side" id=av
           else
-            "$out" find "$kind" "Bonjour Side" id=bj
+            interop find "$kind" "Bonjour Side" id=bj
           fi
           kill "$other"
-          "$out" announce "$kind" "Calx Side" 25 id=ca &
+          interop announce "$kind" "Calx Side" 25 id=ca &
           calx=$!
           sleep 3
           if [ "$RUNNER_OS" = Linux ]; then
