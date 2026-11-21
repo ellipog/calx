@@ -153,6 +153,7 @@ struct DepSpec {
 struct Manifest {
     std::uint32_t file = 0;
     std::string name, version;
+    std::string description, company, copyright;  // optional, for a Windows program's version resource
     Span name_at;
     std::vector<DepSpec> deps;
 };
@@ -467,6 +468,9 @@ public:
         Package p;
         p.name = main.m.name;
         p.version = main.m.version;
+        p.description = main.m.description;
+        p.company = main.m.company;
+        p.copyright = main.m.copyright;
         p.dir = display(dir);
         p.source = p.dir;
         out_.packages.push_back(p);
@@ -549,8 +553,16 @@ private:
                                                                  "them if wanted, as \"1.0.0-beta.1\"");
                     }
                 }
+            } else if (k == "description" || k == "company" || k == "copyright") {
+                // What Windows shows in a program's Properties, from its version resource (CLX-414).
+                if (v.kind != toml::Kind::string) {
+                    diags_.error(span(id, v), q(k) + " must be a string, in quotes, not " + toml::kind_name(v.kind));
+                } else {
+                    (k == "description" ? m.description : k == "company" ? m.company : m.copyright) = v.string;
+                }
             } else {
-                diags_.error(key_span(id, v), "[package] has no " + q(k) + "; it has `name` and `version`");
+                diags_.error(key_span(id, v), "[package] has no " + q(k) +
+                                                  "; it has `name` and `version`, and may have `description`, `company` and `copyright`");
             }
         }
         Span header = package->end > package->begin ? span(id, *package) : top;

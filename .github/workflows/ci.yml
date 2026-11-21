@@ -435,6 +435,11 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           COMMIT: ${{ steps.version.outputs.commit }}
           DATE: ${{ steps.version.outputs.date }}
+          # A code-signing certificate, as a base64 .pfx, and its password: with them, calx and
+          # calx-update are signed on Windows before they're packaged (CLX-414). Without them, as
+          # in a fork, nothing is signed.
+          SIGNING_CERT: ${{ secrets.WINDOWS_SIGNING_CERT }}
+          SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
         run: |
           exe=""
           link=()
@@ -461,8 +466,14 @@ jobs:
           # calx-update built with the toolchain, as a user's programs are.
           export CALX_CC="$PWD/build/toolchain/bin/clang$exe"
           build/release/calx$exe build --release tools/update/update.calx -o build/release/calx-update$exe
+          # package.calx signs with signtool, which the MSVC environment put on PATH.
+          if [[ "$RUNNER_OS" == Windows && -n "$SIGNING_CERT" ]]; then
+            printf '%s' "$SIGNING_CERT" | base64 -d > "$RUNNER_TEMP/signing.pfx"
+            export CALX_SIGN_CERT="$RUNNER_TEMP/signing.pfx" CALX_SIGN_PASSWORD="$SIGNING_PASSWORD"
+          fi
           build/release/calx$exe run tools/release/package.calx -- "$VERSION" ${{ matrix.platform }} \
             build/release/calx$exe build/release/calx-update$exe build/dist build/toolchain
+          rm -f "$RUNNER_TEMP/signing.pfx"
       - name: Try the release
         shell: bash
         run: |

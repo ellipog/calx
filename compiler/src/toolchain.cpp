@@ -195,6 +195,9 @@ HANDLE open_for(const std::string& path, bool write) {
                        nullptr);
 }
 
+// Why this thread's last start failed, for why_not_started.
+thread_local DWORD start_error = 0;
+
 // Starts a program, with its streams where `r` says, in `job` if there's one.
 HANDLE start(const std::vector<std::string>& argv, Redirect r = {}, HANDLE job = nullptr, const std::string& name = "") {
     std::wstring cmd;
@@ -239,6 +242,7 @@ HANDLE start(const std::vector<std::string>& argv, Redirect r = {}, HANDLE job =
     PROCESS_INFORMATION pi{};
     std::wstring app = widen(argv[0]);
     BOOL ok = CreateProcessW(app.c_str(), cmd.data(), nullptr, nullptr, TRUE, job ? CREATE_SUSPENDED : 0, nullptr, nullptr, &si, &pi);
+    start_error = ok ? 0 : GetLastError();
     close_all();
     if (!ok) return nullptr;
     if (job) {
@@ -624,6 +628,21 @@ int run_process(const std::vector<std::string>& argv, const std::string& name) {
     if (h < 0) return -1;
 #endif
     return finish(h);
+}
+
+std::string why_not_started() {
+#ifdef _WIN32
+    // ERROR_VIRUS_INFECTED and ERROR_VIRUS_DELETED: an antivirus stopped it as it started. A
+    // program missing from the cache just after it was built was most likely taken by one too.
+    if (start_error == 225 || start_error == 226 || start_error == ERROR_FILE_NOT_FOUND) {
+        return std::string(start_error == ERROR_FILE_NOT_FOUND ? "it's gone from the cache since it was built, as when an antivirus takes it"
+                                                               : "Windows says it holds a threat") +
+               ". Microsoft Defender's machine-learning models (names ending in !ml) take a program\n"
+               "Calx built for malware now and then, by mistake. `calx doctor` says what Defender took and\n"
+               "what to do";
+    }
+#endif
+    return {};
 }
 
 int run_last(const std::vector<std::string>& argv, const std::string& name) {
@@ -1644,7 +1663,7 @@ bool place_build(const std::string& built, const std::string& out, std::string& 
 }
 
 BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c_sources_in, BuildMode mode, BuildKind kind,
-                          bool verbose, const std::string& cpu) {
+                          bool verbose, const std::string& cpu, const ProgramInfo& info) {
     BuildResult r;
     // The processor a release build counts on, in its compile and its link, and so in every key.
     const std::string march = cpu.empty() ? std::string(release_cpu_flag(tc.target)) : cpu;
@@ -1959,8 +1978,13 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     link_flags.push_back("-g");  // writes the PDB that holds the line tables
     if (tc.mingw) {
         // A PDB beside the image, named for it, as Visual Studio's linker writes, and the sections
-        // nothing reads dropped.
+        // nothing reads dropped. Nothing else of the debug info stays in the image, as with Visual
+        // Studio's linker: mingw-w64's start-up code and libraries carry DWARF, which lld would
+        // otherwise keep in sections named like `/4`, with a symbol table for their names, which
+        // no program of Visual Studio's has and Windows Defender's models count against one
+        // (CLX-414). Stack traces read the PDB, which keeps everything.
         link_flags.push_back("-Wl,--pdb=");
+        link_flags.push_back("-Wl,--strip-all");
         link_flags.push_back("-Wl,--gc-sections");
         // The system libraries the runtime's parts use, which Visual Studio's linker takes from the
         // `#pragma comment(lib)` in each. A program imports from one only what it calls.
@@ -1971,6 +1995,8 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         link_flags.push_back("-Wl,/OPT:REF");
         // The driver always names the static C runtime when linking; the objects name the DLL one.
         if (mode == BuildMode::debug) link_flags.push_back("-Wl,-nodefaultlib:libcmt");
+        // The manifest is in the resources below, so the linker makes none of its own.
+        if (!staticlib) link_flags.push_back("-Wl,/manifest:no");
     }
 #elif defined(__APPLE__)
     // ld64 drops what nothing reaches with -dead_strip, as ld.lld does with --gc-sections, and the
@@ -2028,6 +2054,17 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
             link_flags.push_back(f);
         }
 #endif
+    }
+    // For Windows a program or library carries a version resource and a manifest, as Visual
+    // Studio's builds do, without which Windows Defender's models took some for malware
+    // (CLX-414). They're a `.res` file, which lld links as it would an object, kept in the cache
+    // under its own hash; the same info always gives the same bytes.
+    std::string res_text, res_obj;
+    if (!staticlib && tc.target.os == Os::windows) {
+        res_text = windows_resources(info, library);
+        std::string res_key = hash_hex({"resources", res_text});
+        res_obj = (fs::path(obj_dir) / (res_key + ".res")).string();
+        all_keys += " " + res_key;
     }
     std::string link_text;
     for (const std::string& f : link_flags) link_text += f + " ";
@@ -2088,6 +2125,15 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
                     }
                     compile((runtime / "sqlite" / "sqlite3.c").string(), sqlite_obj, {"-D_CRT_SECURE_NO_WARNINGS"}, &sqlite_flags);
                 }
+            }
+        }
+        // Another build of a program of the same name may write the same file at the same time.
+        if (!res_obj.empty()) {
+            if (file_exists(res_obj)) {
+                touch(res_obj);
+            } else if (!write_file_atomic(res_obj, res_text) && !file_exists(res_obj)) {
+                std::fprintf(stderr, "calx: can't write %s\n", res_obj.c_str());
+                return false;
             }
         }
         // Each build writes its C under a name of its own: two builds that need the same module, such
@@ -2158,6 +2204,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         for (const auto& [file, obj] : parts) inputs.push_back(obj);
         if (!sqlite_obj.empty()) inputs.push_back(sqlite_obj);
     }
+    if (!res_obj.empty()) inputs.push_back(res_obj);
     term::step(staticlib ? "Making the static library" : lto ? "Linking, and optimizing across modules" : "Linking");
     auto put_together = [&]() {
         return staticlib ? archive_objects(tc, inputs, temp_exe, verbose) : link_program(tc, inputs, temp_exe, link_flags, verbose);

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "target.h"
+#include "winres.h"
 
 namespace calx {
 
@@ -92,6 +93,11 @@ int run_process(const std::vector<std::string>& argv, const std::string& name = 
 // started, and elsewhere as run_process, which ties the program's life to this process's.
 int run_last(const std::vector<std::string>& argv, const std::string& name);
 
+// Why the last program this thread tried to start couldn't, when there's more to say than that it
+// couldn't: on Windows, that an antivirus stopped it or took it from the cache, and what to do
+// (CLX-414). "" otherwise.
+std::string why_not_started();
+
 // Sets this process's environment for the program `calx run` starts next: CALX, this compiler's
 // path, for a script that builds or checks with the compiler that ran it, as Python's
 // `sys.executable`, and CALX_SCRIPT, the full path of `source`, which is `std.env.script()`. The
@@ -134,9 +140,10 @@ struct BuildResult {
 // parallel (D64), at most one clang for each logical processor on the machine at a time
 // (run_parallel, CLX-205), and an unchanged program is reused whole. A library has no runtime of
 // its own: it takes the program's when the program opens it (D123). A release build counts on the
-// processor `cpu` names, clang's flag for it, or on the default with "" (CLX-381).
+// processor `cpu` names, clang's flag for it, or on the default with "" (CLX-381). On Windows a
+// program or library carries a version resource and a manifest made from `info` (CLX-414).
 BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c_sources, BuildMode mode, BuildKind kind,
-                          bool verbose, const std::string& cpu = "");
+                          bool verbose, const std::string& cpu = "", const ProgramInfo& info = {});
 
 // A hash of the compiler's own bytes, as 32 hex digits, kept in the cache under its size and time
 // so it's worked out once per build of the compiler.

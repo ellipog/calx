@@ -82,6 +82,9 @@ pinned = { git = "https://git.example.com/pinned.git", rev = "3f9c2a1b" }
 | --- | --- |
 | `name` | How programs import the package: lowercase letters, digits and `_`, starting with a letter, and not a keyword or `std` |
 | `version` | Three numbers, as `"0.3.0"`, with `-pre` after them if wanted, as `"1.0.0-beta.1"` |
+| `description` | If wanted, what the program is, which Windows shows as its description in the file's Properties. Otherwise its name |
+| `company` | If wanted, who makes it, which Windows shows as its company. Otherwise its name |
+| `copyright` | If wanted, its copyright notice, as `"Copyright 2026 Hird AS"`. Otherwise there's none |
 | `path` | A package in a folder, from the folder this calx.toml is in |
 | `git` | A package in a git repository, at the repository's root. With it, one of: |
 | `tag` | a tag |
@@ -89,6 +92,8 @@ pinned = { git = "https://git.example.com/pinned.git", rev = "3f9c2a1b" }
 | `rev` | a commit, by its hash or at least its first 4 digits |
 
 A `git` dependency with none of the three uses the repository's default branch. Each dependency can be a table of its own too, as `[dependencies.util]` with `path = "../util"` under it. The name a calx.toml lists a dependency by is that package's own name.
+
+`name`, `version`, `description`, `company` and `copyright` go in the [version resource](../reference/command.md#windows-programs) of a Windows program built from the package, which Explorer shows. Only the main package's are used.
 
 calx reads TOML strictly: a key it doesn't know is an error that says which ones it has, so a typo like `brnach` doesn't quietly do nothing.
 

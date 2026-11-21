@@ -116,7 +116,9 @@ fn main() {
     put("{app}/calx.toml", "[package]\nname = \"app\"\nversion = 0.1\n")
     println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:3:11: error: `0.1` isn't read here: calx.toml has whole numbers, and a version is a string, as "1.2.0"
     put("{app}/calx.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nauthor = \"me\"\n")
-    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:4:1: error: [package] has no `author`; it has `name` and `version`
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:4:1: error: [package] has no `author`; it has `name` and `version`, and may have `description`, `company` and `copyright`
+    put("{app}/calx.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\ncompany = 1\n")
+    println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:4:11: error: `company` must be a string, in quotes, not a number
     put("{app}/calx.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nname = \"twice\"\n")
     println(calx(exe.copy(), ["check", "main.calx"], app.copy(), tmp.copy()))    // out: calx.toml:4:1: error: the key `name` is given twice
     put("{app}/calx.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nutil = \{ path = \"../util\", version = \"1.0.0\" \}\n")
