@@ -25,10 +25,13 @@
 #include <psapi.h> /* K32GetProcessMemoryInfo, which kernel32 has */
 /* WaitOnAddress and WakeByAddressAll, for the workers of `parallel for`. */
 #pragma comment(lib, "synchronization.lib")
+/* OpenProcessToken, GetTokenInformation and GetUserNameW, for std.env's user. */
+#pragma comment(lib, "advapi32.lib")
 #else
 #include <errno.h>
 #include <limits.h>
 #include <pthread.h>
+#include <pwd.h>
 #include <sched.h>
 #include <signal.h>
 #include <sys/ioctl.h>
@@ -703,6 +706,69 @@ cx_u32 cx_env_native_arch(void) {
     if (sysctlbyname("sysctl.proc_translated", &translated, &size, NULL, 0) == 0 && translated == 1) return 2;
 #endif
     return cx_env_arch();
+}
+
+/* Declared by std/env.calx (CLX-402): 1 if the program runs with the system's full rights, which
+ * is an effective user id of 0 on Linux and macOS, and on Windows a process token that's elevated,
+ * as an Administrator's is once UAC has asked, or always where UAC is off, and SYSTEM's. */
+cx_u32 cx_env_elevated(void) {
+#ifdef _WIN32
+    HANDLE token;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return 0;
+    TOKEN_ELEVATION elevation = {0};
+    DWORD size = 0;
+    BOOL ok = GetTokenInformation(token, TokenElevation, &elevation, sizeof elevation, &size);
+    CloseHandle(token);
+    return ok && elevation.TokenIsElevated ? 1 : 0;
+#else
+    return geteuid() == 0 ? 1 : 0;
+#endif
+}
+
+/* Declared by std/env.calx: the effective user id, or -1 on Windows, which has none. */
+cx_i64 cx_env_user_id(void) {
+#ifdef _WIN32
+    return -1;
+#else
+    return (cx_i64)geteuid();
+#endif
+}
+
+/* Declared by std/env.calx: the name of the user the program runs as, as cx_env_get gives a
+ * value: written to `out` if its UTF-8 fits in `cap` bytes, its length, or -1 if there's none.
+ * Windows' is the account's name, without its domain, as GetUserNameW gives it; Linux's and
+ * macOS's is the effective user id's entry in the user database, which a user id that has none,
+ * such as one a container is started as, hasn't. Bytes that aren't UTF-8 become U+FFFD. */
+cx_i64 cx_env_user_name(cx_u8* out, cx_usize cap) {
+    arg_text name;
+#ifdef _WIN32
+    wchar_t w[257]; /* UNLEN + 1 */
+    DWORD n = 257;
+    if (!GetUserNameW(w, &n) || n <= 1) return -1;
+    name = wide_text(w, (int)n - 1); /* n counts the terminator */
+#else
+    long guess = sysconf(_SC_GETPW_R_SIZE_MAX);
+    size_t size = guess > 0 ? (size_t)guess : 1024;
+    struct passwd entry;
+    struct passwd* found = NULL;
+    char* buf = NULL;
+    for (;;) {
+        buf = must_alloc(size);
+        int err = getpwuid_r(geteuid(), &entry, buf, size, &found);
+        if (err != ERANGE || size >= ((size_t)1 << 20)) break;
+        free(buf);
+        size *= 4;
+    }
+    if (!found || !found->pw_name || !*found->pw_name) {
+        free(buf);
+        return -1;
+    }
+    name = byte_text(found->pw_name);
+    free(buf);
+#endif
+    if (name.len <= cap) memcpy(out, name.ptr, name.len);
+    free(name.ptr);
+    return (cx_i64)name.len;
 }
 
 /* Declared by std/env.calx. The value of the environment variable named by the `n` bytes of

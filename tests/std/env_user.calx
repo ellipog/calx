@@ -1,0 +1,63 @@
+// std.env's user (CLX-402): is_elevated, user_name and user_id say what the system's own tools
+// say, `id` on Linux and macOS and `whoami` on Windows, and what Python says where there's one to
+// ask: `os.geteuid() == 0`, `os.geteuid()` and the user database's name for it, or on Windows
+// `ctypes.windll.shell32.IsUserAnAdmin()` and `getpass.getuser()`. Where there's no Python, its
+// line says true, as the suite needs none.
+import std.env
+import std.process.{Command, which}
+
+const PY: str = "import os, getpass; nt = os.name == 'nt'; e = bool(__import__('ctypes').windll.shell32.IsUserAnAdmin()) if nt else os.geteuid() == 0; n = getpass.getuser() if nt else __import__('pwd').getpwuid(os.geteuid()).pw_name; print(str(e).lower(), -1 if nt else os.geteuid(), n)"
+
+fn main() {
+    let windows = env.os() == "windows"
+    let elevated = env.is_elevated()
+    let name = env.user_name()
+    let id = env.user_id()
+    println("{name != none} {(id == none) == windows} {is_elevated_again(elevated)}")    // out: true true true
+
+    // The system's tools. A Windows token that's elevated has the high integrity level, or
+    // SYSTEM's, which `whoami /groups` lists by its SID in any language. It's Windows' own
+    // whoami, not one from a Unix toolset earlier on PATH.
+    var tools = String()
+    if windows {
+        let whoami = "{env.variable("SystemRoot") ?? String("C:\\Windows")}\\System32\\whoami.exe"
+        let groups = Command.new(whoami).arg("/groups").read()!
+        let high = groups.contains("S-1-16-12288") or groups.contains("S-1-16-16384")
+        tools = "{elevated == high} {name == env.variable("USERNAME")}"
+    } else {
+        let uid = Command.new("id").arg("-u").read()!
+        let uname = Command.new("id").arg("-un").read()!
+        let mine = "{id ?? 4294967295u32}"
+        tools = "{mine == uid and elevated == (uid == "0")} {name == some(uname)}"
+    }
+    println(tools)    // out: true true
+
+    // Python's answer, as "elevated id name", where there's a Python to ask.
+    let said = python()
+    let shown_id: String = if windows { String("-1") } else { "{id ?? 0u32}" }
+    let ours = "{elevated} {shown_id} {name ?? String()}"
+    println("{said == none or said == some(ours)}")    // out: true
+}
+
+// The same answer each time it's asked.
+fn is_elevated_again(first: bool) -> bool {
+    return env.is_elevated() == first
+}
+
+// What Python prints for PY, or none if there's no Python that runs it. On Windows `py` comes
+// first, as a `python` there can be the Store's stand-in, which fails.
+fn python() -> String? {
+    let names = if env.os() == "windows" { ["py", "python"] } else { ["python3", "python"] }
+    for n in names {
+        let found = which(n) else {
+            continue
+        }
+        let ok(out) = Command.new(found).arg("-c").arg(PY).env("PYTHONUTF8", "1").env("PYTHONIOENCODING", "utf-8").output() else {
+            continue
+        }
+        if out.status.success() {
+            return some(out.text().trim())
+        }
+    }
+    return none
+}
