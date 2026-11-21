@@ -1,11 +1,11 @@
 ---
 title: std.tar
-description: Tar archives, plain, gzipped, xz'd or zstd'd, read and written in memory - ustar, GNU long names and pax headers, links, modes, and extracting that no path can climb out of.
+description: Tar archives, plain, gzipped, bzip2'd, xz'd or zstd'd, read and written in memory - ustar, GNU long names and pax headers, links, modes, and extracting that no path can climb out of.
 ---
 
 # `std.tar`
 
-Tar archives, plain, gzipped, xz'd or zstd'd, read from memory and written to it. It reads what GNU tar and bsdtar write: POSIX ustar, GNU's long names, and pax headers. Calx's updater reads its Linux releases with it.
+Tar archives, plain, gzipped, bzip2'd, xz'd or zstd'd, read from memory and written to it. It reads what GNU tar and bsdtar write: POSIX ustar, GNU's long names, and pax headers. Calx's updater reads its Linux releases with it.
 
 ```calx
 import std.tar.{Kind, Tar, Writer}
@@ -33,7 +33,7 @@ fn main() {
 
 | Item | Gives |
 | --- | --- |
-| `Tar.open(bytes: own List<u8>) -> Tar ! String` | The archive, or why it can't be read. Gzipped bytes, which start `1f 8b`, are inflated first, xz'd bytes are decompressed with [`std.xz`](xz.md), and zstd'd ones with [`std.zstd`](zstd.md), so a `.tar.gz`, a `.tar.xz` or a `.tar.zst` opens the same way |
+| `Tar.open(bytes: own List<u8>) -> Tar ! String` | The archive, or why it can't be read. Gzipped bytes, which start `1f 8b`, are inflated first, bzip2'd bytes, which start `BZh` and a digit, are decompressed with [`std.bz2`](bz2.md), xz'd ones with [`std.xz`](xz.md), and zstd'd ones with [`std.zstd`](zstd.md), so a `.tar.gz`, a `.tar.bz2` or `.tbz2`, a `.tar.xz` or a `.tar.zst` opens the same way |
 | `t.entries() -> List<Entry>` | Its entries, in order |
 | `t.len() -> usize`, `t.name(i: usize) -> String` | How many there are, and the path of one |
 | `t.find(name: String) -> usize?` | The index of the entry at `name`. A later entry of the same name wins, as it does when tar extracts |
@@ -58,11 +58,12 @@ fn main() {
 | `w.set_time(at: Timestamp)` | Dates the entries added after it |
 | `w.finish() -> List<u8>` | The archive, ended with its two empty blocks |
 | `w.finish_gz(level: u32) -> List<u8>` | The archive gzipped at `level`, from 1 to 9: a `.tar.gz` |
+| `w.finish_bz2(level: u32 = 9) -> List<u8>` | The archive compressed by [`std.bz2`](bz2.md) at `level`, from 1 to 9, into the bytes `bzip2 -1` to `bzip2 -9` make of it: a `.tar.bz2` |
 | `w.finish_xz(preset: u32 = 6) -> List<u8>` | The archive compressed by [`std.xz`](xz.md) at `preset`, from 0 to 9, as `xz -0` to `xz -9` do: a `.tar.xz` |
 | `w.finish_zst(level: i32 = 3) -> List<u8>` | The archive compressed by [`std.zstd`](zstd.md) at `level`, from 1 to 22 as `zstd -1` to `zstd --ultra -22` do, or negative for faster: a `.tar.zst` |
 
-- **The same files make the same bytes.** Entries are dated 1970-01-01 and owned by user and group 0 until `set_time` says otherwise. `finish_gz`, `finish_xz` and `finish_zst` give the same bytes on any machine, however many processors it has.
+- **The same files make the same bytes.** Entries are dated 1970-01-01 and owned by user and group 0 until `set_time` says otherwise. `finish_gz`, `finish_bz2`, `finish_xz` and `finish_zst` give the same bytes on any machine, however many processors it has.
 - **Long paths** of up to 255 bytes are split between ustar's prefix and name at a `/`. Longer ones, and ones with no `/` to split at, get a pax `path` header, as GNU tar and bsdtar write them, and so do files of 8 GiB or more.
 - **Non-ASCII names get a pax `path` too.** A header's name field has no encoding, and bsdtar on Windows reads it in the console's code page. A pax path is always UTF-8.
 
-`std.tar` is written in Calx over [std.zlib](zlib.md), [std.xz](xz.md) and [std.zstd](zstd.md): [std/tar.calx](../../std/tar.calx). GNU tar and bsdtar read what it writes, and it reads what they write in the gnu, pax and ustar formats.
+`std.tar` is written in Calx over [std.zlib](zlib.md), [std.bz2](bz2.md), [std.xz](xz.md) and [std.zstd](zstd.md): [std/tar.calx](../../std/tar.calx). GNU tar and bsdtar read what it writes, and it reads what they write in the gnu, pax and ustar formats.

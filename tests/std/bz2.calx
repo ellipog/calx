@@ -1,0 +1,139 @@
+// std.bz2 reads what Python 3.14's bz2.decompress reads, with libbzip2 1.0.8, and fails where it
+// fails. The hex below is Python's bz2.compress's, and so is each outcome: Format, Corrupt and
+// Checksum are Python's OSError "Invalid data stream", and Truncated its ValueError. Checked
+// outside the tests on every truncation and every flipped bit of three small files, 1,500
+// flipped bits and 200 truncations of one of two blocks, trailing bytes of 21 kinds after one
+// and two streams, and 600 runs of random bytes: 7,653 inputs, each the same as Python's.
+
+import std.bz2.{Error, decompress, decompress_into, is_bz2}
+import std.bytes.{from_hex, hex}
+import std.hash.{sha256}
+import std.tar.{Tar}
+
+fn text(bytes: own List<u8>) -> String {
+    return String.from_utf8(bytes) ?? "not UTF-8"
+}
+
+fn outcome(bytes: List<u8>, limit: u64 = u64.MAX) -> String {
+    return match decompress(bytes, limit) {
+        ok(b) => if b.len() < 40 { "ok {text(b).trim_end()}" } else { "ok {b.len()} bytes" },
+        err(e) => "{e}",
+    }
+}
+
+fn joined(a: List<u8>, b: List<u8>) -> List<u8> {
+    var out = a.copy()
+    out.extend(b)
+    return out
+}
+
+fn flipped(bytes: List<u8>, at: usize, bit: u32) -> List<u8> {
+    var out = bytes.copy()
+    out[at] = out[at] ^ u8.wrap(1u32 << bit)
+    return out
+}
+
+fn main() {
+    // `bz2.compress(b"hello, bz2\n")`.
+    let hello = from_hex("425a683931415926535976f92ca800000359800010400410001244801020003100302069a3200995a9c3f17724538509076f92ca80")!
+    println(outcome(hello))    // out: ok hello, bz2
+    println("{is_bz2(hello)} {is_bz2("BZh0".to_bytes())} {is_bz2("BZ".to_bytes())} {is_bz2("hello".to_bytes())}")    // out: true false false false
+
+    // Level 1 writes the same block, with a 1 for its size.
+    println(outcome(from_hex("425a683131415926535976f92ca800000359800010400410001244801020003100302069a3200995a9c3f17724538509076f92ca80")!))    // out: ok hello, bz2
+
+    // Nothing at all is nothing, as in Python, and so is a stream with no blocks.
+    println("[{outcome([])}]")    // out: [ok ]
+    println("[{outcome(from_hex("425a683917724538509000000000")!)}]")    // out: [ok ]
+
+    // Cut short anywhere, it's Truncated, Python's ValueError.
+    for n in [1usize, 3, 4, 10, 20, 52] {
+        println("{n}: {outcome(hello[..n])}")
+    }
+    // out: 1: the data ends early
+    // out: 3: the data ends early
+    // out: 4: the data ends early
+    // out: 10: the data ends early
+    // out: 20: the data ends early
+    // out: 52: the data ends early
+
+    // Not bzip2: the header is wrong, or its size isn't 1 to 9.
+    println(outcome([0x50u8, 0x4b, 3, 4]))    // out: not a bzip2 file
+    println(outcome("BZx9".to_bytes()))    // out: not a bzip2 file
+    var zero = hello.copy()
+    zero[3] = 0x30
+    println(outcome(zero))    // out: not a bzip2 file
+
+    // A broken block marker, a block's CRC, and the stream's.
+    println(outcome(flipped(hello, 4, 0)))    // out: corrupt data
+    println(outcome(flipped(hello, 10, 0)))    // out: checksum mismatch
+    println(outcome(flipped(hello, 48, 1)))    // out: checksum mismatch
+    // The bits after the stream's CRC only pad it out to a byte, so a change there is nothing.
+    println(outcome(flipped(hello, 52, 0)))    // out: ok hello, bz2
+    // Nor is marking so short a block randomised, whose first change would be at byte 618.
+    println(outcome(flipped(hello, 14, 7)))    // out: ok hello, bz2
+
+    // Streams one after another, as `cat a.bz2 b.bz2` and pbzip2 make them.
+    let two = from_hex("425a683931415926535913cafd8d000000c180001001201c00200021800c03272ee2ee48a70a1202795fb1a0425a683931415926535996da59cf000003418000100e0188002000310c010d31a9ce0078bb9229c28484b6d2ce78")!
+    println(outcome(two).replace("\n", "|"))    // out: ok first|second
+
+    // After the first stream, bytes that aren't one are left alone, and so is a broken stream,
+    // without what it gave, as Python leaves them; but a stream cut short is still Truncated.
+    println(outcome(joined(hello, [0u8, 0, 0])))    // out: ok hello, bz2
+    println(outcome(joined(hello, "garbage\n".to_bytes())))    // out: ok hello, bz2
+    println(outcome(joined(hello, "BZh0".to_bytes())))    // out: ok hello, bz2
+    println(outcome(joined(hello, flipped(hello, 10, 0))))    // out: ok hello, bz2
+    println(outcome(joined(two, flipped(hello, 48, 1))).replace("\n", "|"))    // out: ok first|second
+    println(outcome(joined(hello, "B".to_bytes())))    // out: the data ends early
+    println(outcome(joined(hello, "BZh9".to_bytes())))    // out: the data ends early
+    println(outcome(joined(hello, hello[..20])))    // out: the data ends early
+    println(outcome(joined(hello, hello)).replace("\n", "|"))    // out: ok hello, bz2|hello, bz2
+
+    // A limit on what comes out: a megabyte of zeros is 48 bytes.
+    let zeros = from_hex("425a683931415926535979d39e480007a8c040c00000020008200030cc09aa69952436a9490f17724538509079d39e48")!
+    println(outcome(zeros.copy()))    // out: ok 1000000 bytes
+    println(outcome(zeros.copy(), 1000000))    // out: ok 1000000 bytes
+    println(outcome(zeros.copy(), 999999))    // out: longer than the limit when decompressed
+    println(outcome(hello, 11))    // out: ok hello, bz2
+    println(outcome(hello, 10))    // out: longer than the limit when decompressed
+    println(outcome(joined(hello, hello), 21))    // out: longer than the limit when decompressed
+    match decompress(zeros, 1000) {
+        ok(_) => println("?"),
+        err(Error.TooLong) => println("too long"),    // out: too long
+        err(e) => println("{e}"),
+    }
+
+    // Into a list that has bytes already, from a range; on an error it's as it was.
+    var out = "> ".to_bytes()
+    let framed = joined(joined([1u8, 2, 3], hello), [9u8])
+    decompress_into(framed, 3, 3 + hello.len(), u64.MAX, mut out)!
+    print(text(out.copy()))    // out: > hello, bz2
+    match decompress_into(framed, 3, 3 + 20, u64.MAX, mut out) {
+        ok => println("?"),
+        err(e) => println("{e} {out.len()}"),    // out: the data ends early 13
+    }
+
+    // A randomised block, as bzip2 before 0.9.5 wrote them when sorting took too long: 2,890
+    // bytes of text with a bit flipped every few hundred before sorting. Python reads it.
+    let random = from_hex("425a68393141592653594103c3aa8004d6f98041104010400150603c6fd0184001ea8d8e40932a524698d0261a06a7fa55500000008a2a64c0d00002a48a01a680f534f511db60c9bf98440e8eeea017221c441c5459b80ae5d3ce76fcfc0c66d4849ab4e2a1416263c4c6c739c9868a8573989ccccd4cace264b4c56668ccb25c7058199aa66ae34960acd22a9aac72d4b172e4a1638212404b3312434544a4122294114b8453b1148c6c76c063878be4e256626375e4a2871a2489a53695c94aba78cef44d1d08ab48c58944d2baa30a48dadd392f1d21d888cc11e11230446088dd046208c911b411999a488e9d736d6a2f4b53b5ecbd455e97a5e6c233899ca4233609ebb63f1301d4c6c3b1824d83bba299105144702e51dfd8951729c1fd1772453850904103c3aa")!
+    let unrandom = decompress(random)!
+    println("{unrandom.len()} {hex(sha256(unrandom))}")    // out: 2890 01c058a5309c3f41da3aa87f9b7954ce2527fc78c4547fd67291a80ac494729b
+
+    // std.tar opens a .tar.bz2, or a .tbz2, which is the same: Python's tarfile wrote this one,
+    // in its pax format, with a program, a README and a link to the program.
+    let tbz = from_hex("425a68393141592653591b8d72bd0000e77f81ce9010006801ff8026023c207ee79e00000808083000d8a0ca49930d260004d0668000600d343468c4640340068608a553f4a7e527934834cd21881a0f51ea3da953db1fe8ec2c822d2117a268291b23276ca2d1b0366aa49811210d78c2863605e0996daf68279c1ba26ee34bc203ca01b9e1ad900faf2e5343061d04df486d6c6cc38d1bf8e82f21d45d29b60a52b203092b45612049fee5299520888023abe0a8eecbe8db8838248a64a99df9fc66ddf553004c5eb54a5cd194dbbe5521e9c8a95f004398bb9229c28480dc6b95e8")!
+    let tar = Tar.open(tbz.copy())!
+    for e in tar.entries() {
+        println("{e.name} {e.kind} {e.size} {e.mode} {e.modified.unix_ms / 1000} link={e.link}")
+    }
+    // out: agent/bin/run File 18 493 1793491200 link=
+    // out: agent/README.md File 200 420 1793491200 link=
+    // out: agent/latest Symlink 0 420 1793491200 link=bin/run
+    print(text(tar.read_named("agent/bin/run")!))
+    // out: #!/bin/sh
+    // out: echo hi
+    match Tar.open(tbz[..100]) {
+        ok(_) => println("opened"),
+        err(e) => println(e),    // out: the bzip2 stream is broken: the data ends early
+    }
+}

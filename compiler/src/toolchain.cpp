@@ -1818,6 +1818,8 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     if (parts_ok && calls({"cx_xze_"})) parts_ok = part("calx_xzenc.c");
     if (parts_ok && calls({"cx_zstd_"})) parts_ok = part("calx_zstd.c");
     if (parts_ok && calls({"cx_zse_"})) parts_ok = part("calx_zstdenc.c");
+    if (parts_ok && calls({"cx_bz2_"})) parts_ok = part("calx_bz2.c");
+    if (parts_ok && calls({"cx_bz2e_"})) parts_ok = part("calx_bz2enc.c");
     if (parts_ok && calls({"cx_jpg_"})) parts_ok = part("calx_jpeg.c");
     if (parts_ok && calls({"cx_fs_"})) parts_ok = part("calx_fs.c");
     if (parts_ok && calls({"cx_proc_"})) parts_ok = part("calx_proc.c");

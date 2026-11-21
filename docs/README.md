@@ -96,7 +96,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 22. [std.text.utf8](std/text-utf8.md): bytes that may not be UTF-8 as text, with U+FFFD in their place, as Java reads them or as Python, Rust and browsers do
 23. [std.palette](std/palette.md): Minecraft's paletted containers, a chunk section's block states and biomes, grown, sent, saved and loaded as Java Edition 26.3 does them
 24. [std.zip](std/zip.md): zip archives read and written in memory, with Zip64, file modes, and extracting that no path can climb out of
-25. [std.tar](std/tar.md): tar archives, plain, gzipped, xz'd or zstd'd, read and written in memory: ustar, GNU long names and pax headers, links and modes
+25. [std.tar](std/tar.md): tar archives, plain, gzipped, bzip2'd, xz'd or zstd'd, read and written in memory: ustar, GNU long names and pax headers, links and modes
 26. [std.memory](std/memory.md): giving the system back the memory freed values held, for a program that's gone quiet after a busy while
 27. [std.path](std/path.md): paths as text, joined, taken apart, normalized and matched against globs such as `src/**/*.calx`, with Windows drives and shares
 28. [std.json](std/json.md): JSON parsed into a tree with the line and column of any mistake, read by JSON Pointers, written compact or indented with keys in order or sorted, exact 64-bit integers, and `@json`, which reads and writes a struct from its fields' types
@@ -137,6 +137,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 63. [std.http.websocket](std/http-websocket.md): a WebSocket client, `ws://` and `wss://` with the system's own TLS, text and binary messages sent and received, with pings and closes answered on a thread of its own, and pings of its own that notice a dead connection, as Python's `websockets` connects
 64. [std.signal](std/signal.md): Ctrl+C, SIGTERM, SIGHUP, Windows' console close and shutdown, and a service's stop, handled by the program as Python's `signal.signal` handles them, with a server's event loop woken to stop cleanly, and a program run as a Windows service
 65. [std.keyring](std/keyring.md): passwords and tokens kept in the system's own credential store, Credential Manager, the Keychain or the Secret Service, by service and account, as Python's `keyring` keeps them, with `Unavailable` where there's none, as on a headless server
+66. [std.bz2](std/bz2.md): bzip2 files decompressed as Python's `bz2.decompress` reads them, every stream in a file and randomised blocks too, with the same errors, and compressed byte for byte as `bz2.compress` writes them, several blocks at once
 
 ### Java compatibility
 

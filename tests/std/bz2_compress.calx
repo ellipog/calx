@@ -1,0 +1,137 @@
+// std.bz2's compress (CLX-400) writes the bytes Python 3.14's bz2.compress writes with libbzip2
+// 1.0.8, at each level: text, noise, runs, one piece repeated, and blocks that fill on the last
+// byte, the one before or after. The hashes are of Python's output and its input, from the same
+// generators. Outside the tests, 22 more inputs, at every level up to 200 KB and at 1, 5 and 9
+// above, came out the same too: 138 streams, 48 MB in all.
+
+import std.bytes.{from_hex, hex}
+import std.bz2.{compress, compress_into, decompress}
+import std.hash.{sha256}
+import std.pool.{set_workers, workers}
+import std.tar.{Tar, Writer}
+
+// Bytes like text: words from a small vocabulary, picked by a fixed generator.
+fn words(n: usize, seed: u64) -> List<u8> {
+    let vocab: List<str> = ["the ", "match ", "finder ", "slice ", "block ", "of ", "and ", "xz ", "range ", "coder ", "\n", "probability ", "literal ", "distance ", "length "]
+    var out = List<u8>()
+    out.reserve(n + 16)
+    var x = seed
+    while out.len() < n {
+        x = x * 6364136223846793005 + 1442695040888963407
+        let w = vocab[usize.wrap((x >> 33) % u64(vocab.len()))]
+        for i in 0..w.len() {
+            out.push(w.byte_at(i))
+        }
+        if (x >> 20) % 7 == 0 {
+            out.push(u8.wrap(48 + (x >> 40) % 10))
+        }
+    }
+    out.truncate(n)
+    return out
+}
+
+fn noise(n: usize, seed: u64) -> List<u8> {
+    var out = List<u8>()
+    out.reserve(n)
+    var x = seed
+    for _ in 0..n {
+        x ^= x << 13
+        x ^= x >> 7
+        x ^= x << 17
+        out.push(u8.wrap(x >> 24))
+    }
+    return out
+}
+
+// Runs of 1 to 600 of four bytes, which the first stage writes as counts.
+fn runs(n: usize, seed: u64) -> List<u8> {
+    var out = List<u8>()
+    out.reserve(n + 600)
+    var x = seed
+    while out.len() < n {
+        x = x * 6364136223846793005 + 1442695040888963407
+        let b = u8.wrap((x >> 40) % 4)
+        for _ in 0u64..1 + (x >> 20) % 600 {
+            out.push(b)
+        }
+    }
+    out.truncate(n)
+    return out
+}
+
+fn repeated(piece: List<u8>, times: usize) -> List<u8> {
+    var out = List<u8>()
+    for _ in 0..times {
+        out.extend(piece)
+    }
+    return out
+}
+
+// The size and hash of what compress makes, and whether it decompresses back.
+fn check(name: str, bytes: List<u8>, level: u32) {
+    let packed = compress(bytes, level)
+    let back = decompress(packed)!
+    println("{name} {level}: {packed.len()} {hex(sha256(packed))} {back == bytes}")
+}
+
+fn main() {
+    // `bz2.compress(b"hello, bz2\n")`, and at level 1.
+    println(hex(compress("hello, bz2\n".to_bytes())))    // out: 425a683931415926535976f92ca800000359800010400410001244801020003100302069a3200995a9c3f17724538509076f92ca80
+    println(hex(compress("hello, bz2\n".to_bytes(), 1)))    // out: 425a683131415926535976f92ca800000359800010400410001244801020003100302069a3200995a9c3f17724538509076f92ca80
+    // Nothing, four of a byte, which gains a count of 0, and 300, which is two runs.
+    println(hex(compress([])))    // out: 425a683917724538509000000000
+    println(hex(compress("aaaa".to_bytes())))    // out: 425a6839314159265359881233a600000241004000200020002100820b177245385090881233a6
+    println(hex(compress(repeated("z".to_bytes(), 300))))    // out: 425a6839314159265359654ed8310000029080802000100008200020aa6d4198c5478bb9229c284832a76c1880
+
+    // Text across several blocks at levels 1 and 5, and in one at 9.
+    let text = words(1000000, 1)
+    println(hex(sha256(text)))    // out: 61435d936ed0572b52a7564508827d6b4fdaccfea99f71fea1b425b9e138fce4
+    check("words", text, 1)    // out: words 1: 126836 7b067d166f204481f7f6a320def6ad44c62029624fcb5475d3bd018c49c2850d true
+    check("words", text, 5)    // out: words 5: 124103 81432534b1edc827ed3a5d312c5f68c61c5cf1d78f8969217a96085f35c29807 true
+    check("words", text, 9)    // out: words 9: 123999 81b8d59e8d7db5a177a7962ad930d756321efe6e4633196c0e9e15f6f508a202 true
+
+    // Its ten blocks at level 1 compress at once, into the same bytes on one worker or three.
+    let had = unsafe { workers() }
+    let packed = compress(text, 1)
+    set_workers(1)
+    let one = compress(text, 1) == packed
+    set_workers(3)
+    let three = compress(text, 1) == packed
+    set_workers(had)
+    println("{one} {three}")    // out: true true
+
+    // Noise, which comes out bigger.
+    let random = noise(300000, 7)
+    println(hex(sha256(random)))    // out: b331d69d39ee11ab61d81fb3f66fe6f4540b3a16686c19334f9b06966bab11c1
+    check("noise", random, 9)    // out: noise 9: 301792 ccc9813b88d19a02f8bf50ab973ff19e165513455f7dd51ae09f7de5679142e1 true
+
+    // Long runs, which go on from one block into the next.
+    let long = runs(700000, 3)
+    println(hex(sha256(long)))    // out: 0839b5cf9b45008bbc6460640c0f995db7f75f794cf6a3b743238bbf69d9085c
+    check("runs", long, 2)    // out: runs 2: 3518 7cbbd149058eb8f2c37dc9b0c9a3d32edf1bdea7eee3c750edf5c9c3dba05ed3 true
+    check("runs", long, 9)    // out: runs 9: 3518 d6726457ef87a224ea2fdca22a92ca56f39a5f92dbcd10b9cdb4aad4de059498 true
+
+    // One piece repeated, whose identical rotations are ordered as libbzip2 orders them.
+    check("ab", repeated("ab".to_bytes(), 200000), 9)    // out: ab 9: 43 c6001208817687756884557b1a1c7675470007b1d709337c4540ab3d1880228b true
+    let piece = words(5000, 3)
+    check("piece", repeated(piece, 50), 9)    // out: piece 9: 2261 e0fd00746db8bcc389267f4ef55bc5bbfe38b3eb131ce62960306e0dfa3d2bbe true
+
+    // A level 1 block holds 99,981 bytes, and fills when the byte after them is read, which goes
+    // into the next block with what follows it.
+    check("99981", noise(99981, 5), 1)    // out: 99981 1: 100787 2bf19a4a9bedd18514a4edaa5e4e1afd9b90c741c775f643899f943af38788bf true
+    check("99982", noise(99982, 5), 1)    // out: 99982 1: 100809 3b9787fb4da8288ceba2d31a64d073ccb38e6e42e4f765b9be6a85c7aafa1b36 true
+    check("99983", noise(99983, 5), 1)    // out: 99983 1: 100812 4ca3a3206f96369ba629963dbd8daceaaa5ece911681eb0b89cfca939e839daa true
+    check("runs", runs(99982, 9), 1)    // out: runs 1: 701 132328ceed9a61b4b30d765855c4aabb457e9ab94e6dcf2c5c9c7dac407173d8 true
+
+    // Onto the end of a list, from a range.
+    var out = from_hex("00ff")!
+    compress_into("[hello, bz2\n]".to_bytes(), 1, 12, 9, mut out)
+    println(hex(out))    // out: 00ff425a683931415926535976f92ca800000359800010400410001244801020003100302069a3200995a9c3f17724538509076f92ca80
+
+    // std.tar writes a .tar.bz2.
+    var w = Writer.new()
+    w.add("notes/a.txt", "hi\n".to_bytes())
+    w.add("notes/b.txt", piece.copy())
+    let tar = Tar.open(w.finish_bz2())!
+    println("{tar.len()} {tar.read_named("notes/a.txt")! == "hi\n".to_bytes()} {tar.read_named("notes/b.txt")! == piece}")    // out: 2 true true
+}
