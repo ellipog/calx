@@ -335,6 +335,36 @@ Every calx builds for the machine it runs on, and a Mac builds for iOS too, an i
 
 What's built for another system runs there, so with another target `run`, `test` and `eval` are errors, and `build`, `check` and `emit-c` work. iOS lets an app open no library it didn't come with, so `--lib` is an error for it, and an app links Calx as a [static library](embedding.md). A build for iOS runs on iOS 18 and later, which runs on the iPhone XS and XR and every iPhone since. The target is part of every key in the [object cache](#fast-builds), with the SDK's path for iOS, so builds for two targets, or against two Xcodes, never share a compiled file, and `--verbose` shows the `--target` and `-isysroot` clang gets.
 
+## Windows programs
+
+On Windows, every program and library calx builds is laid out as Visual Studio's are, so Windows and its antivirus treat it as they treat theirs ([CLX-414](https://acta.aaenz.no/aaen-studios/clx#CLX-414)):
+
+- **A version resource**, which Explorer shows in the file's Properties, under Details: the package's name as its product, its version, and the `description`, `company` and `copyright` its [calx.toml](../guide/packages.md#calxtoml) gives, or its name for the first two. A program with no calx.toml is named for its file, at version 0.0.0. Its original file name is its name with `.exe` or `.dll`, whatever `-o` calls the copy.
+- **A manifest.** A program's says it runs with the rights of whoever starts it, so Windows never guesses it's an installer and asks to elevate it, as it can for one whose name holds `setup`, `install` or `update`, and that it's made for Windows 10 and 11, so it gets their behavior rather than Windows 8's. A library's says only that it's one.
+- **The usual protections**: ASLR with high entropy, DEP, and no section both writable and executable, as `/DYNAMICBASE`, `/HIGHENTROPYVA` and `/NXCOMPAT` give Visual Studio's, for the console of Windows 6.0 and later.
+- **Debug info in the PDB alone.** With the toolchain a release carries, mingw-w64's start-up code and libraries hold DWARF, which lld kept in each program, in sections named like `/4`, with a symbol table for their names. No program of Visual Studio's has either, and [stack traces](printing.md#panics) read the PDB, so they're left out. Hello went from 80 KB to 34 KB in a debug build, and from 84 KB to 38 KB in a release one.
+
+The resources are a `.res` file calx writes itself, the same bytes llvm-rc would, which the object cache keeps and lld links as it does an object. Nothing in it is a time, so a program built again from the same code has the same resources, and the code and data in a program are the same bytes as before they were added: in a 4 MB server, the `.text`, `.rdata`, `.data`, `.pdata`, `.tls` and `.reloc` sections are the same in debug and release.
+
+### Microsoft Defender
+
+Without them, Microsoft Defender's machine-learning models took some programs calx built for malware, as `Trojan:Win32/Bearfoos.A!ml` or `Trojan:Win32/Commando.C!ml`, and quarantined them from the cache, so `calx run` said only that it couldn't run them. Programs that Rust and Go build get the same false positives, which a version resource and a manifest make rarer, but the models are Microsoft's, so nothing rules them out. When an antivirus stops a program, or takes it from the cache, `calx run` says so, and [`calx doctor`](#checking-the-toolchain) lists what Defender took from the cache in the last 30 days, with what to do:
+
+- Change the program and build it again. It's new to Defender then, and usually runs. The same code builds to the same bytes, which it would take again.
+- Report the program at [microsoft.com/wdsi/filesubmission](https://www.microsoft.com/wdsi/filesubmission) as "Incorrectly detected as malware/malicious", so the models learn.
+- Turning Defender off, or leaving the cache out of its scans, isn't needed, and makes the PC less safe.
+
+### Signing
+
+A program signed with a code-signing certificate says who made it, which Windows, Defender and SmartScreen all take into account. calx doesn't sign what it builds, since a certificate belongs to whoever owns it; sign a release once it's built, with `signtool` from the Windows SDK:
+
+```
+calx build --release app.calx -o app.exe
+signtool sign /fd sha256 /td sha256 /tr http://timestamp.digicert.com /f cert.pfx /p PASSWORD app.exe
+```
+
+A `calx build -o app.exe` after that writes the program over the signed one, since they differ, so sign after the last build. Calx's own releases are signed this way when CI has a certificate: [tools/release/package.calx](../../tools/release/package.calx) signs `calx` and `calx-update` before it packages them when `CALX_SIGN_CERT` names a `.pfx`, with its password in `CALX_SIGN_PASSWORD`, which CI sets from the repository's `WINDOWS_SIGNING_CERT` and `WINDOWS_SIGNING_PASSWORD` secrets. Without them, nothing is signed.
+
 ## Fast builds
 
 Building should take moments, so the command avoids every step it can:
@@ -412,12 +442,13 @@ calx doctor
   ok    builds and runs a program in a release build (190 ms)
   ok    calx on PATH is this one
   ok    build cache in C:\Users\you\AppData\Local\calx\cache, 412 MB
+  ok    Microsoft Defender: nothing in the build cache taken in the last 30 days
   ok    updates: `calx update` installs new releases, and a daily check says when there's one
 
 Everything works.
 ```
 
-The target is the system and processor it builds programs for, which is the one it runs on, and the processor a release build counts on: x86-64-v3, with AVX2, on x86; the M1's, which every Apple Silicon Mac has, on macOS; and ARMv8.2 on Arm Linux and Windows. With `CALX_CPU` set, it says that level, and fails if it isn't one the target has. It finds clang as a build does: `CALX_CC`, then the toolchain the installation carries, then `PATH`, and says if the toolchain the release builds with isn't the one installed, which `calx update --toolchain` mends. The real test is building a program, in debug and release, which is what everything else is for. When that fails, it shows what clang said and names what's missing: on Windows, mingw-w64's headers and libraries beside the toolchain's clang, or with another clang, the C runtime and SDK from Visual Studio's Build Tools; on Linux, the C library's headers. It exits with 1 if something needs fixing, and 0 if not. A failed build points at it too.
+The target is the system and processor it builds programs for, which is the one it runs on, and the processor a release build counts on: x86-64-v3, with AVX2, on x86; the M1's, which every Apple Silicon Mac has, on macOS; and ARMv8.2 on Arm Linux and Windows. With `CALX_CPU` set, it says that level, and fails if it isn't one the target has. It finds clang as a build does: `CALX_CC`, then the toolchain the installation carries, then `PATH`, and says if the toolchain the release builds with isn't the one installed, which `calx update --toolchain` mends. The real test is building a program, in debug and release, which is what everything else is for. When that fails, it shows what clang said and names what's missing: on Windows, mingw-w64's headers and libraries beside the toolchain's clang, or with another clang, the C runtime and SDK from Visual Studio's Build Tools; on Linux, the C library's headers. On Windows, it asks Microsoft Defender, with its own `Get-MpThreatDetection`, which needs no administrator, what it found in the last 30 days, and warns of any program it took from the build cache, by name, with what to do ([Microsoft Defender](#microsoft-defender)); where another antivirus has taken Defender's place, it says nothing. It exits with 1 if something needs fixing, and 0 if not. A failed build points at it too.
 
 ## Updating
 

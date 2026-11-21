@@ -21,11 +21,19 @@
 // - version.txt, holding VERSION.
 //
 // Files are added in sorted order with fixed dates, so the same inputs make the same archives.
+//
+// On Windows, with a code-signing certificate, CALX and UPDATER are signed in place before
+// they're packaged, so Windows and its antivirus can tell who made them (CLX-414). CALX_SIGN_CERT
+// is the certificate's .pfx file, CALX_SIGN_PASSWORD its password if it has one, and
+// CALX_SIGN_TIMESTAMP the timestamp server, DigiCert's unless set, or none if it's set empty, for
+// a test. It runs signtool, from the
+// Windows SDK, which must be on PATH, as Visual Studio's developer prompt puts it. Without
+// CALX_SIGN_CERT nothing is signed.
 
-import std.env.{arch, args}
+import std.env.{arch, args, variable}
 import std.fs.{is_dir, list, make_dir_all, metadata, read, write}
 import std.hash.{sha256}
-import std.process.{exit}
+import std.process.{Command, exit, which}
 import std.tar.{Writer as TarWriter}
 import std.zip.{Writer as ZipWriter}
 
@@ -45,6 +53,9 @@ fn main() {
 fn package(version: String, os: String, calx: String, updater: String, out: String, toolchain: String) ! String {
     let windows = os == "windows"
     let exe = if windows { ".exe" } else { "" }
+    if windows {
+        try sign([calx.copy(), updater.copy()])
+    }
     // (path in the archive, bytes, mode)
     var files = List<(String, List<u8>, u32)>()
     files.push(("calx/bin/calx{exe}", try load(calx), 0o755))
@@ -83,6 +94,45 @@ fn package(version: String, os: String, calx: String, updater: String, out: Stri
     try save("{out}/{name}.sha256", "{sum}  {name}\n".to_bytes())
     try save("{out}/version.txt", "{version}\n".to_bytes())
     println("{name}: {files.len()} files, {bytes.len()} bytes, sha256 {sum}")
+}
+
+// Signs each of `files` in place with the certificate CALX_SIGN_CERT names, if it names one. What
+// failed is said without signtool's command, which holds the password.
+fn sign(files: List<String>) ! String {
+    let cert = variable("CALX_SIGN_CERT") ?? String()
+    if cert.is_empty() {
+        return
+    }
+    let signtool = match which("signtool") {
+        some(path) => path,
+        none => fail "CALX_SIGN_CERT is set, but signtool isn't on PATH: it comes with the Windows SDK",
+    }
+    // Set but empty, there's no timestamp, and the signature ends with the certificate.
+    let server = variable("CALX_SIGN_TIMESTAMP") ?? String("http://timestamp.digicert.com")
+    var a: List<String> = ["sign", "/fd", "sha256", "/f", cert]
+    if not server.is_empty() {
+        for x in ["/td", "sha256", "/tr"] {
+            a.push(String(x))
+        }
+        a.push(server)
+    }
+    let password = variable("CALX_SIGN_PASSWORD") ?? String()
+    if not password.is_empty() {
+        a.push("/p")
+        a.push(password)
+    }
+    for f in files {
+        a.push(f.copy())
+    }
+    match Command.new(signtool).args(a).status() {
+        ok(s) => {
+            if not s.success() {
+                fail "signtool couldn't sign {files.len()} files: it {s}"
+            }
+        },
+        err(_) => fail "signtool at {signtool} didn't start",
+    }
+    println("signed {files.len()} files")
 }
 
 // The processor in the archives' names, as Windows names it: `x64` or `arm64`.

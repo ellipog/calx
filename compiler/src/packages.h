@@ -16,6 +16,9 @@ namespace calx {
 struct Package {
     std::string name;
     std::string version;
+    // What a Windows program built from it says it is, in its version resource, if calx.toml
+    // gives them (CLX-414). Only the main package's are read.
+    std::string description, company, copyright;
     // The folder its calx.toml is in, where its modules are found: as a path from the current
     // folder when it's under it, and otherwise whole.
     std::string dir;

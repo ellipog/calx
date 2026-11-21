@@ -806,6 +806,13 @@ std::string staticlib_stem(const Options& opt) {
     return stem;
 }
 
+// Says the program `exe` couldn't start, and why, when there's more to say: on Windows, that an
+// antivirus stopped it (CLX-414).
+void cant_run(const std::string& exe) {
+    std::string why = why_not_started();
+    std::fprintf(stderr, "calx: can't run %s%s%s\n", exe.c_str(), why.empty() ? "" : ": ", why.c_str());
+}
+
 // What `run`, `build` and `test` do with the program they built, or found unchanged in the cache,
 // `reused` saying which, the build having started at `t0`.
 int finish(const Options& opt, bool serve, const std::string& exe, const std::vector<std::string>& tests,
@@ -873,7 +880,7 @@ int finish(const Options& opt, bool serve, const std::string& exe, const std::ve
         std::fflush(stderr);
         int status = run_last(run, opt.command);
         if (status < 0) {
-            std::fprintf(stderr, "calx: can't run %s\n", exe.c_str());
+            cant_run(exe);
             return 1;
         }
         return status;
@@ -889,7 +896,7 @@ int finish(const Options& opt, bool serve, const std::string& exe, const std::ve
     set_run_environment(opt.input);
     int status = run_last(run, opt.input);
     if (status < 0) {
-        std::fprintf(stderr, "calx: can't run %s\n", exe.c_str());
+        cant_run(exe);
         return 1;
     }
     return status;
@@ -1184,12 +1191,21 @@ int main(int argc, char** argv) {
     } else {
         record.clear();
     }
+    // What a Windows program says it is, in its version resource (CLX-414): its package's name,
+    // version and the rest calx.toml gives, or else its file's name.
+    ProgramInfo info;
+    if (const PackageSet& packages = front->loader->packages(); packages.any()) {
+        const Package& p = packages.packages[0];
+        info = {p.name, p.version, p.description, p.company, p.copyright};
+    } else {
+        info.name = opt.staticlib ? staticlib_stem(opt) : std::filesystem::path(opt.input).stem().string();
+    }
     // The checked program isn't needed past here, and is left for the system to free as the
     // process ends: freeing its many small pieces one at a time took a cached build of a program
     // that uses std.regex half a millisecond (CLX-240).
     (void)front.release();
     BuildKind kind = opt.library ? BuildKind::library : opt.staticlib ? BuildKind::staticlib : BuildKind::program;
-    BuildResult b = build_program(tc, c_sources, opt.mode, kind, opt.verbose, march);
+    BuildResult b = build_program(tc, c_sources, opt.mode, kind, opt.verbose, march, info);
     building.reset();
     if (!b.ok) return 1;
     if (opt.staticlib) {

@@ -34,6 +34,7 @@ add_executable(calx
     src/format.cpp
     src/doctor.cpp
     src/term.cpp
+    src/winres.cpp
 )
 
 # The runtime's sources, which the driver compiles (once, then from the cache) into every program.
@@ -68,6 +69,12 @@ if(WIN32)
     # A manifest that makes the driver's code page UTF-8, so its arguments and paths aren't lossy.
     # The linker merges it into the one it writes.
     target_sources(calx PRIVATE src/calx.manifest)
+    # And a version resource, as the programs it builds have (CLX-414), with the version's three
+    # numbers and its text.
+    string(REGEX MATCH "^([0-9]+)\\.([0-9]+)\\.([0-9]+)" _ "${CALX_VERSION}")
+    target_sources(calx PRIVATE src/calx.rc)
+    set_source_files_properties(src/calx.rc PROPERTIES COMPILE_DEFINITIONS
+        "CALX_VERSION_MAJOR=${CMAKE_MATCH_1};CALX_VERSION_MINOR=${CMAKE_MATCH_2};CALX_VERSION_PATCH=${CMAKE_MATCH_3}")
     # Visual Studio's STL 14.52 refuses a clang older than 22 (error STL1000), and GitHub's
     # windows-latest image has that STL with LLVM 20 since 2026-11-18 (CLX-373). The compiler uses
     # nothing from the STL that clang 20 can't build, so an older clang is let through.
