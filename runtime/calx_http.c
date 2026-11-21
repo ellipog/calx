@@ -22,7 +22,8 @@
  * it's built with nghttp2, as Debian's, Ubuntu's, Fedora's and macOS's are, over TLS or as h2c. A
  * connection is kept for the requests after it, and HTTP/2 ones to a host go over one at once.
  *
- * WebSockets, behind std.http.websocket, are at the end of the file, on the same clients. */
+ * WebSockets, behind std.http.websocket, are at the end of the file: on libcurl's connections on
+ * Linux and macOS, and on Winsock and Schannel on Windows. */
 #include "calx_rt.h"
 
 #include <stdlib.h>
@@ -30,9 +31,14 @@
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
+#include <bcrypt.h>
 #include <winhttp.h>
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "bcrypt.lib")
 #else
 #include <dlfcn.h>
 #include <errno.h>
@@ -1237,24 +1243,26 @@ void cx_http_free(cx_u64 h) {
     if (r) request_free(r);
 }
 
-/* --- WebSockets, behind std.http.websocket (CLX-320) ---------------------------------------- *
+/* --- WebSockets, behind std.http.websocket (CLX-320, CLX-395) ------------------------------- *
  *
  * A WebSocket client, RFC 6455. Each connection runs on a thread of its own, which connects,
  * makes the handshake, then reads messages into a queue the program takes them from, answering
  * pings and the server's close by itself. Text is checked to be UTF-8, and a message longer than
  * the limit, or anything that breaks the protocol, closes the connection with the code RFC 6455
- * gives for it.
+ * gives for it. With a ping interval, the thread pings the server once nothing has come from it
+ * for that long, and ends the connection if nothing comes in the ping timeout after, so one whose
+ * server or network went away without a FIN, as a laptop's that slept, ends rather than looking
+ * open for minutes (CLX-395).
  *
- * On Linux and macOS, libcurl makes the connection, TCP and TLS with the system's certificate
- * checks, in its connect-only mode, and the handshake and the frames are written here: libcurl's
- * own WebSocket API is missing from most systems' builds. The thread does all the reading and
- * writing, as libcurl and TLS allow one thread at a time on a connection. What the program sends
- * goes into a queue for it, and a byte down a pipe wakes it.
- *
- * On Windows, WinHTTP's WebSocket API does the protocol. The thread receives, and the program's
- * sends go straight out under a lock, once the connection is open, or are kept until then.
- * WinHTTP checks the frames that come itself, and one that breaks the protocol, such as a masked
- * one or text that isn't UTF-8, ends the connection with no close sent, not with 1002 or 1007. */
+ * The handshake and the frames are written here, the same on every system, over a connection each
+ * system makes its own way. On Linux and macOS libcurl makes it, TCP and TLS with the system's
+ * certificate checks, in its connect-only mode, as libcurl's own WebSocket API is missing from
+ * most systems' builds. On Windows Winsock makes it, with Schannel, the system's TLS, which checks
+ * certificates as WinHTTP does: WinHTTP's own WebSocket API can't send a ping, never shows one,
+ * and takes no receive timeout once it's open, so with it a dead connection can't be told from a
+ * quiet one. The thread does all the reading and writing, as TLS allows one thread at a time on a
+ * connection. What the program sends goes into a queue for it, and a byte down a pipe, or an event
+ * on Windows, wakes it. */
 
 /* Beyond std.http's: the server answered the handshake with another status, and the connection
  * is closed, with the code and reason of the close. */
@@ -1263,7 +1271,7 @@ enum { WS_CONNECTING, WS_OPEN, WS_CLOSED };
 enum { OP_CONTINUE = 0, OP_TEXT = 1, OP_BINARY = 2, OP_CLOSE = 8, OP_PING = 9, OP_PONG = 10 };
 /* Close codes, RFC 6455 section 7.4.1. */
 enum { CLOSE_NORMAL = 1000, CLOSE_PROTOCOL = 1002, CLOSE_NO_STATUS = 1005, CLOSE_ABNORMAL = 1006, CLOSE_NOT_UTF8 = 1007,
-       CLOSE_TOO_BIG = 1009 };
+       CLOSE_TOO_BIG = 1009, CLOSE_SERVER_ERROR = 1011 };
 
 typedef struct ws_message {
     struct ws_message* next;
@@ -1278,12 +1286,13 @@ typedef struct {
     int tls;
     cx_u32 timeout_ms;
     size_t limit;
+    cx_u32 ping_interval_ms; /* 0 for no pings */
+    cx_u32 ping_timeout_ms;
 #ifdef _WIN32
     SRWLOCK mu;
     CONDITION_VARIABLE cv;
     HANDLE thread;
-    SRWLOCK send_mu; /* one send at a time on `ws`, the program's or the thread's */
-    HINTERNET ws;
+    HANDLE wake; /* the event that wakes the thread */
 #else
     pthread_mutex_t mu;
     pthread_cond_t cv;
@@ -1305,6 +1314,7 @@ typedef struct {
     int closing;         /* the program called close, with this code and reason */
     cx_u32 my_code;
     bytes my_reason;
+    cx_u64 heard_ms;     /* when anything last came from the server, in ws_now_ms's milliseconds, once open */
 } wsock;
 
 static cx_u64 ws_now_ms(void) {
@@ -1323,7 +1333,6 @@ static cx_u64 ws_now_ms(void) {
 static void ws_init_lock(wsock* w) {
     InitializeSRWLock(&w->mu);
     InitializeConditionVariable(&w->cv);
-    InitializeSRWLock(&w->send_mu);
 }
 static void ws_lock(wsock* w) { AcquireSRWLockExclusive(&w->mu); }
 static void ws_unlock(wsock* w) { ReleaseSRWLockExclusive(&w->mu); }
@@ -1384,7 +1393,9 @@ static void ws_free(wsock* w) {
     }
     free(w->url), free(w->host), free(w->target), free(w->head);
     free(w->close_reason.p), free(w->protocol.p), free(w->taken.p), free(w->out.p), free(w->my_reason.p);
-#ifndef _WIN32
+#ifdef _WIN32
+    if (w->wake) CloseHandle(w->wake);
+#else
     if (w->wake[0] >= 0) close(w->wake[0]);
     if (w->wake[1] >= 0) close(w->wake[1]);
     pthread_mutex_destroy(&w->mu);
@@ -1457,10 +1468,6 @@ static int ws_utf8(const cx_u8* p, size_t n) {
     return 1;
 }
 
-#ifndef _WIN32
-
-/* --- WebSockets on libcurl ------------------------------------------------------------------ */
-
 /* Whether a close frame may carry `code`: RFC 6455 section 7.4, with 1012 to 1014, which IANA
  * has registered since, and the codes for libraries and applications, 3000 to 4999. */
 static int ws_close_code_ok(cx_u32 code) {
@@ -1468,12 +1475,13 @@ static int ws_close_code_ok(cx_u32 code) {
     return code >= 1000 && code <= 1014 && code != 1004 && code != CLOSE_NO_STATUS && code != CLOSE_ABNORMAL;
 }
 
-
-enum { O_CONNECT_ONLY = 141, I_ACTIVESOCKET = 0x500000 + 44, I_LASTSOCKET = 0x200000 + 29, E_CURL_AGAIN = 81 };
-
 /* Random bytes from the system, for the handshake's key and each frame's mask. */
 static void ws_random(cx_u8* p, size_t n) {
-#ifdef __APPLE__
+#ifdef _WIN32
+    if (BCryptGenRandom(NULL, p, (ULONG)n, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
+        cx_panic_text("<websocket>", "the system gave no random bytes");
+    }
+#elif defined(__APPLE__)
     arc4random_buf(p, n);
 #else
     while (n) {
@@ -1575,19 +1583,16 @@ static void ws_close_frame(bytes* out, cx_u32 code, const cx_u8* reason, size_t 
     ws_frame(out, OP_CLOSE, body, n);
 }
 
-/* Waits for the socket, or the wake pipe, until `deadline`. */
-static void ws_poll(wsock* w, int sock, int writing, cx_u64 deadline) {
-    struct pollfd fds[2] = {{sock, (short)(POLLIN | (writing ? POLLOUT : 0)), 0}, {w->wake[0], POLLIN, 0}};
-    int ms = -1;
-    if (deadline != WS_FOREVER) {
-        cx_u64 now = ws_now_ms();
-        ms = now >= deadline ? 0 : deadline - now > 0x7FFFFFFF ? 0x7FFFFFFF : (int)(deadline - now);
-    }
-    if (poll(fds, 2, ms) > 0 && (fds[1].revents & POLLIN)) {
-        char drain[64];
-        while (read(w->wake[0], drain, sizeof drain) > 0) {
-        }
-    }
+/* The decimal digits of `port`. */
+static void ws_port_text(unsigned port, char out[8]) {
+    char digits[6];
+    int k = 0;
+    do {
+        digits[k++] = (char)('0' + port % 10);
+        port /= 10;
+    } while (port && k < 5);
+    for (int i = 0; i < k; i++) out[i] = digits[k - 1 - i];
+    out[k] = 0;
 }
 
 /* The value of the header `name` in the handshake's response `head`, or NULL, with its length. */
@@ -1623,43 +1628,40 @@ static int ws_has_token(const char* list, size_t n, const char* token) {
     return 0;
 }
 
-/* Sends what's in `out` from `*at`, as far as the connection takes it now. 0 if it failed. */
-static int ws_send_some(void* h, bytes* out, size_t* at) {
-    while (*at < out->len) {
-        size_t n = 0;
-        int e = curl.easy_send(h, out->p + *at, out->len - *at, &n);
-        if (e == E_CURL_AGAIN) break;
-        if (e != 0) return 0;
-        *at += n;
-    }
-    if (*at == out->len) out->len = 0, *at = 0;
-    return 1;
-}
+/* Each system's connection, `ws_link`, gives the rest of the client these:
+ *
+ *   ws_connect(w, l, deadline, &code)  makes the connection, TCP and TLS for wss://, by
+ *                                      `deadline`: 0, or what went wrong and the system's code
+ *   ws_send_some(l, out, &at)          sends what's in `out` from `at`, as far as the connection
+ *                                      takes it now: 0 if it failed
+ *   ws_unsent(l)                       whether the connection holds bytes it hasn't sent yet
+ *   ws_recv_some(l, in)                reads what has come onto `in`: 1 if anything came, 0 if
+ *                                      nothing has, -1 if the server ended the connection or it
+ *                                      failed, after what came before the end
+ *   ws_poll(w, l, writing, deadline)   waits for the connection, to read, or to write too, for
+ *                                      the program's wake, or for `deadline`
+ *   ws_disconnect(l)                   closes it and lets it go */
 
-/* Reads what has come onto `in`. 1 if anything came, 0 if nothing has, -1 if the server closed
- * the connection or it failed. */
-static int ws_recv_some(void* h, bytes* in) {
-    int got_any = 0;
-    for (;;) {
-        if (!grow(in, 65536)) cx_panic_capacity();
-        size_t n = 0;
-        int e = curl.easy_recv(h, in->p + in->len, 65536, &n);
-        if (e == E_CURL_AGAIN) return got_any;
-        if (e != 0 || n == 0) return -1;
-        in->len += n;
-        got_any = 1;
-    }
-}
+#ifndef _WIN32
 
-/* Connects, makes the handshake, then reads and writes frames until the connection ends. */
-static void ws_run(wsock* w) {
-    void* h = curl.easy_init();
-    if (!h) {
-        ws_fail(w, E_OS, ENOMEM);
-        return;
+/* --- WebSockets' connections on libcurl ----------------------------------------------------- */
+
+enum { O_CONNECT_ONLY = 141, I_ACTIVESOCKET = 0x500000 + 44, I_LASTSOCKET = 0x200000 + 29, E_CURL_AGAIN = 81 };
+
+typedef struct {
+    void* h;
+    int sock;
+} ws_link;
+
+static int ws_connect(wsock* w, ws_link* l, cx_u64 deadline, cx_i32* code) {
+    (void)deadline; /* libcurl's own timeout is the same */
+    l->sock = -1;
+    l->h = curl.easy_init();
+    if (!l->h) {
+        *code = ENOMEM;
+        return E_OS;
     }
-    cx_u64 deadline = ws_now_ms() + w->timeout_ms;
-    bytes out = {0}, in = {0}, message = {0};
+    void* h = l->h;
     curl.easy_setopt(h, O_NOSIGNAL, 1L);
     curl.easy_setopt(h, O_URL, w->url);
     curl.easy_setopt(h, O_PROXY, "");
@@ -1669,9 +1671,9 @@ static void ws_run(wsock* w) {
     curl.easy_setopt(h, O_TIMEOUT_MS, (long)w->timeout_ms);
     int e = curl.easy_perform(h);
     if (e != 0) {
-        ws_fail(w, curl_error(e), e);
+        *code = e;
         curl.easy_cleanup(h);
-        return;
+        return curl_error(e);
     }
     long sock_long = -1;
     int sock = -1;
@@ -1679,25 +1681,542 @@ static void ws_run(wsock* w) {
         if (curl.easy_getinfo(h, I_LASTSOCKET, &sock_long) == 0) sock = (int)sock_long;
     }
     if (sock < 0) {
-        ws_fail(w, E_OS, 0);
+        *code = 0;
         curl.easy_cleanup(h);
-        return;
+        return E_OS;
     }
+    l->sock = sock;
+    return 0;
+}
 
-    /* The handshake. */
+static void ws_disconnect(ws_link* l) { curl.easy_cleanup(l->h); }
+
+static int ws_send_some(ws_link* l, bytes* out, size_t* at) {
+    while (*at < out->len) {
+        size_t n = 0;
+        int e = curl.easy_send(l->h, out->p + *at, out->len - *at, &n);
+        if (e == E_CURL_AGAIN) break;
+        if (e != 0) return 0;
+        *at += n;
+    }
+    if (*at == out->len) out->len = 0, *at = 0;
+    return 1;
+}
+
+static int ws_unsent(ws_link* l) {
+    (void)l;
+    return 0;
+}
+
+static int ws_recv_some(ws_link* l, bytes* in) {
+    int got_any = 0;
+    for (;;) {
+        if (!grow(in, 65536)) cx_panic_capacity();
+        size_t n = 0;
+        int e = curl.easy_recv(l->h, in->p + in->len, 65536, &n);
+        if (e == E_CURL_AGAIN) return got_any;
+        if (e != 0 || n == 0) return -1;
+        in->len += n;
+        got_any = 1;
+    }
+}
+
+static void ws_poll(wsock* w, ws_link* l, int writing, cx_u64 deadline) {
+    struct pollfd fds[2] = {{l->sock, (short)(POLLIN | (writing ? POLLOUT : 0)), 0}, {w->wake[0], POLLIN, 0}};
+    int ms = -1;
+    if (deadline != WS_FOREVER) {
+        cx_u64 now = ws_now_ms();
+        ms = now >= deadline ? 0 : deadline - now > 0x7FFFFFFF ? 0x7FFFFFFF : (int)(deadline - now);
+    }
+    if (poll(fds, 2, ms) > 0 && (fds[1].revents & POLLIN)) {
+        char drain[64];
+        while (read(w->wake[0], drain, sizeof drain) > 0) {
+        }
+    }
+}
+
+#else
+
+/* --- WebSockets' connections on Winsock and Schannel ---------------------------------------- */
+
+/* Schannel's calls, from secur32.dll, looked up rather than linked, and the little of sspi.h and
+ * schannel.h they need, written out, as mingw-w64's headers lack SCH_CREDENTIALS. */
+typedef struct {
+    ULONG_PTR lower, upper;
+} ws_sec_handle;
+typedef struct {
+    ULONG size, type;
+    void* p;
+} ws_sec_buffer;
+typedef struct {
+    ULONG version, count;
+    ws_sec_buffer* buffers;
+} ws_sec_desc;
+typedef struct {
+    ULONG header, trailer, max_message, buffers, block_size;
+} ws_stream_sizes;
+/* SCH_CREDENTIALS, from Windows 10 1809, which TLS 1.3 needs. */
+typedef struct {
+    DWORD version, cred_format, creds;
+    void* cred_list;
+    void* root_store;
+    DWORD mappers;
+    void* mapper_list;
+    DWORD session_lifespan, flags, tls_parameters;
+    void* tls_parameter_list;
+} ws_sch_credentials;
+/* SCHANNEL_CRED, for the Windows before, which stop at TLS 1.2. */
+typedef struct {
+    DWORD version, creds;
+    void* cred_list;
+    void* root_store;
+    DWORD mappers;
+    void* mapper_list;
+    DWORD algs;
+    void* alg_list;
+    DWORD protocols, min_strength, max_strength, session_lifespan, flags, cred_format;
+} ws_schannel_cred;
+
+enum {
+    SSPI_CRED_OUTBOUND = 2,
+    SSPI_SCHANNEL_CRED_VERSION = 4,
+    SSPI_SCH_CREDENTIALS_VERSION = 5,
+    SSPI_NO_DEFAULT_CREDS = 0x10,
+    SSPI_AUTO_CRED_VALIDATION = 0x20,
+    SSPI_USE_STRONG_CRYPTO = 0x00400000,
+    /* ISC_REQ_SEQUENCE_DETECT, _REPLAY_DETECT, _CONFIDENTIALITY, _ALLOCATE_MEMORY, _EXTENDED_ERROR, _STREAM */
+    SSPI_WANT = 0x8 | 0x4 | 0x10 | 0x100 | 0x4000 | 0x8000,
+    SSPI_EMPTY = 0,
+    SSPI_DATA = 1,
+    SSPI_TOKEN = 2,
+    SSPI_EXTRA = 5,
+    SSPI_TRAILER = 6,
+    SSPI_HEADER = 7,
+    SSPI_ALERT = 17,
+    SSPI_STREAM_SIZES = 4,
+};
+#define SSPI_OK 0L
+#define SSPI_CONTINUE ((LONG)0x00090312L)
+#define SSPI_INCOMPLETE ((LONG)0x80090318L)
+#define SSPI_INCOMPLETE_CREDENTIALS ((LONG)0x00090320L)
+#define SSPI_CONTEXT_EXPIRED ((LONG)0x00090317L)
+#define SSPI_RENEGOTIATE ((LONG)0x00090321L)
+
+static struct {
+    LONG(WINAPI* acquire)(wchar_t*, wchar_t*, ULONG, void*, void*, void*, void*, ws_sec_handle*, LARGE_INTEGER*);
+    LONG(WINAPI* init)(ws_sec_handle*, ws_sec_handle*, wchar_t*, ULONG, ULONG, ULONG, ws_sec_desc*, ULONG, ws_sec_handle*, ws_sec_desc*,
+                       ULONG*, LARGE_INTEGER*);
+    LONG(WINAPI* delete_context)(ws_sec_handle*);
+    LONG(WINAPI* free_cred)(ws_sec_handle*);
+    LONG(WINAPI* free_buffer)(void*);
+    LONG(WINAPI* query)(ws_sec_handle*, ULONG, void*);
+    LONG(WINAPI* encrypt)(ws_sec_handle*, ULONG, ws_sec_desc*, ULONG);
+    LONG(WINAPI* decrypt)(ws_sec_handle*, ws_sec_desc*, ULONG, ULONG*);
+} sspi;
+static int sspi_loaded, wsa_started;
+static cx_u32 sspi_state, wsa_state;
+
+static void sspi_load(void) {
+    HMODULE m = LoadLibraryW(L"secur32.dll");
+    if (!m) return;
+    const char* names[8] = {"AcquireCredentialsHandleW", "InitializeSecurityContextW", "DeleteSecurityContext", "FreeCredentialsHandle",
+                            "FreeContextBuffer",         "QueryContextAttributesW",    "EncryptMessage",        "DecryptMessage"};
+    FARPROC fns[8];
+    for (int i = 0; i < 8; i++) {
+        fns[i] = GetProcAddress(m, names[i]);
+        if (!fns[i]) return;
+    }
+    memcpy(&sspi.acquire, &fns[0], sizeof(FARPROC));
+    memcpy(&sspi.init, &fns[1], sizeof(FARPROC));
+    memcpy(&sspi.delete_context, &fns[2], sizeof(FARPROC));
+    memcpy(&sspi.free_cred, &fns[3], sizeof(FARPROC));
+    memcpy(&sspi.free_buffer, &fns[4], sizeof(FARPROC));
+    memcpy(&sspi.query, &fns[5], sizeof(FARPROC));
+    memcpy(&sspi.encrypt, &fns[6], sizeof(FARPROC));
+    memcpy(&sspi.decrypt, &fns[7], sizeof(FARPROC));
+    sspi_loaded = 1;
+}
+
+static void wsa_start(void) {
+    WSADATA d;
+    wsa_started = WSAStartup(MAKEWORD(2, 2), &d) == 0;
+}
+
+typedef struct {
+    SOCKET s;
+    WSAEVENT ev;  /* set when the socket can be read, written after it was full, or closed */
+    int blocked;  /* a send found the socket full, and it hasn't said it has room since */
+    int tls;
+    ws_sec_handle cred, ctx;
+    int has_cred, has_ctx;
+    wchar_t* target; /* the host, which the certificate must name */
+    ws_stream_sizes sizes;
+    bytes raw;       /* what came and isn't decrypted yet */
+    bytes sealed;    /* what's encrypted and isn't sent yet, from sealed_at */
+    size_t sealed_at;
+    int renegotiating; /* TLS 1.3 sent a message after the handshake, which Schannel is reading */
+} ws_link;
+
+static void ws_poll(wsock* w, ws_link* l, int writing, cx_u64 deadline) {
+    /* The socket's event says it has room only after a send found it full, so a writer that
+     * hasn't found it full yet goes and tries. */
+    if (writing && !l->blocked) return;
+    DWORD ms = INFINITE;
+    if (deadline != WS_FOREVER) {
+        cx_u64 now = ws_now_ms();
+        ms = now >= deadline ? 0 : deadline - now > 0x7FFFFFFF ? 0x7FFFFFFF : (DWORD)(deadline - now);
+    }
+    HANDLE handles[2] = {l->ev, w->wake};
+    WaitForMultipleObjects(2, handles, FALSE, ms);
+    WSANETWORKEVENTS happened;
+    if (WSAEnumNetworkEvents(l->s, l->ev, &happened) == 0 && (happened.lNetworkEvents & (FD_WRITE | FD_CLOSE))) l->blocked = 0;
+}
+
+/* Sends what's sealed, as far as the socket takes it now: 0 if it failed. */
+static int ws_flush(ws_link* l) {
+    while (l->sealed_at < l->sealed.len) {
+        size_t n = l->sealed.len - l->sealed_at;
+        int k = send(l->s, l->sealed.p + l->sealed_at, n > (1 << 20) ? (1 << 20) : (int)n, 0);
+        if (k > 0) {
+            l->sealed_at += (size_t)k;
+            continue;
+        }
+        if (k < 0 && WSAGetLastError() == WSAEWOULDBLOCK) {
+            l->blocked = 1;
+            break;
+        }
+        return 0;
+    }
+    if (l->sealed_at == l->sealed.len) l->sealed.len = 0, l->sealed_at = 0;
+    return 1;
+}
+
+/* Sends all of `p`, waiting while the socket is full, until `deadline`: 0 if it couldn't. */
+static int ws_send_all(wsock* w, ws_link* l, const void* p, size_t n, cx_u64 deadline) {
+    if (n && !add(&l->sealed, p, n)) cx_panic_capacity();
+    for (;;) {
+        if (!ws_flush(l)) return 0;
+        if (l->sealed.len == 0) return 1;
+        if (ws_now_ms() >= deadline) return 0;
+        ws_poll(w, l, 1, deadline);
+    }
+}
+
+/* Reads what has come onto `raw`, waiting for something until `deadline`: 1 if something came,
+ * 0 if the time is up, -1 if the connection ended or failed. */
+static int ws_read_raw(wsock* w, ws_link* l, cx_u64 deadline) {
+    for (;;) {
+        if (!grow(&l->raw, 16384)) cx_panic_capacity();
+        int n = recv(l->s, l->raw.p + l->raw.len, 16384, 0);
+        if (n > 0) {
+            l->raw.len += (size_t)n;
+            return 1;
+        }
+        if (n == 0 || WSAGetLastError() != WSAEWOULDBLOCK) return -1;
+        if (ws_now_ms() >= deadline) return 0;
+        ws_poll(w, l, 0, deadline);
+    }
+}
+
+/* What Schannel gave to send, sealed already, onto `sealed`, and the buffers it gave let go. */
+static void ws_take_token(ws_link* l, ws_sec_buffer* outb) {
+    if (outb[0].p && outb[0].size && !add(&l->sealed, outb[0].p, outb[0].size)) cx_panic_capacity();
+    if (outb[0].p) sspi.free_buffer(outb[0].p);
+    if (outb[1].p) sspi.free_buffer(outb[1].p);
+}
+
+/* What InitializeSecurityContext didn't read of `raw`, kept for the next call or the first
+ * records, and what it read dropped. */
+static void ws_keep_extra(ws_link* l, ws_sec_buffer* inb) {
+    size_t rest = inb[1].type == SSPI_EXTRA ? inb[1].size : 0;
+    if (rest > l->raw.len) rest = l->raw.len;
+    memmove(l->raw.p, l->raw.p + l->raw.len - rest, rest);
+    l->raw.len = rest;
+}
+
+/* One step of the handshake, or of reading what TLS 1.3 sends after it, with what's in `raw`. */
+static LONG ws_tls_step(ws_link* l, int first) {
+    ws_sec_buffer inb[2] = {{(ULONG)l->raw.len, SSPI_TOKEN, l->raw.p}, {0, SSPI_EMPTY, NULL}};
+    ws_sec_desc ind = {0, 2, inb};
+    ws_sec_buffer outb[2] = {{0, SSPI_TOKEN, NULL}, {0, SSPI_ALERT, NULL}};
+    ws_sec_desc outd = {0, 2, outb};
+    ULONG got = 0;
+    LONG st = sspi.init(&l->cred, first ? NULL : &l->ctx, l->target, SSPI_WANT, 0, 0, first ? NULL : &ind, 0, &l->ctx, &outd, &got, NULL);
+    if (first && (st == SSPI_OK || st == SSPI_CONTINUE || st == SSPI_INCOMPLETE_CREDENTIALS)) l->has_ctx = 1;
+    ws_take_token(l, outb);
+    if (!first && st != SSPI_INCOMPLETE) ws_keep_extra(l, inb);
+    return st;
+}
+
+/* The TLS handshake, by `deadline`: 0, or what went wrong. */
+static int ws_tls_handshake(wsock* w, ws_link* l, cx_u64 deadline, cx_i32* code) {
+    once(&sspi_state, sspi_load);
+    if (!sspi_loaded) {
+        *code = (cx_i32)GetLastError();
+        return E_OS;
+    }
+    ws_sch_credentials creds = {0};
+    creds.version = SSPI_SCH_CREDENTIALS_VERSION;
+    creds.flags = SSPI_NO_DEFAULT_CREDS | SSPI_AUTO_CRED_VALIDATION;
+    wchar_t package[] = L"Microsoft Unified Security Protocol Provider";
+    LONG st = sspi.acquire(NULL, package, SSPI_CRED_OUTBOUND, NULL, &creds, NULL, NULL, &l->cred, NULL);
+    if (st != SSPI_OK) {
+        ws_schannel_cred old = {0};
+        old.version = SSPI_SCHANNEL_CRED_VERSION;
+        old.flags = SSPI_NO_DEFAULT_CREDS | SSPI_AUTO_CRED_VALIDATION | SSPI_USE_STRONG_CRYPTO;
+        st = sspi.acquire(NULL, package, SSPI_CRED_OUTBOUND, NULL, &old, NULL, NULL, &l->cred, NULL);
+    }
+    if (st != SSPI_OK) {
+        *code = (cx_i32)st;
+        return E_TLS;
+    }
+    l->has_cred = 1;
+    l->target = widen(w->host);
+    st = ws_tls_step(l, 1);
+    for (;;) {
+        if (l->sealed.len && !ws_send_all(w, l, NULL, 0, deadline)) {
+            *code = 0;
+            return ws_now_ms() >= deadline ? E_TIMEOUT : E_TLS;
+        }
+        if (st == SSPI_OK) break;
+        if (st != SSPI_CONTINUE && st != SSPI_INCOMPLETE && st != SSPI_INCOMPLETE_CREDENTIALS) {
+            *code = (cx_i32)st;
+            return E_TLS;
+        }
+        /* With no certificate of its own to give, it goes on without. */
+        if (st == SSPI_INCOMPLETE || (st == SSPI_CONTINUE && l->raw.len == 0)) {
+            int r = ws_read_raw(w, l, deadline);
+            if (r == 0) {
+                *code = 0;
+                return E_TIMEOUT;
+            }
+            if (r < 0) {
+                *code = (cx_i32)WSAGetLastError();
+                return E_TLS;
+            }
+        }
+        st = ws_tls_step(l, 0);
+    }
+    st = sspi.query(&l->ctx, SSPI_STREAM_SIZES, &l->sizes);
+    if (st != SSPI_OK) {
+        *code = (cx_i32)st;
+        return E_TLS;
+    }
+    return 0;
+}
+
+static void ws_disconnect(ws_link* l) {
+    if (l->has_ctx) sspi.delete_context(&l->ctx);
+    if (l->has_cred) sspi.free_cred(&l->cred);
+    if (l->s != INVALID_SOCKET) closesocket(l->s);
+    if (l->ev != WSA_INVALID_EVENT) WSACloseEvent(l->ev);
+    free(l->target), free(l->raw.p), free(l->sealed.p);
+}
+
+/* Waits for a connect started on `s` until `deadline`: 0 once it's made, the WSA error that
+ * failed it, or -1 if the time's up. */
+static int ws_wait_connect(SOCKET s, cx_u64 deadline) {
+    cx_u64 now = ws_now_ms();
+    if (now >= deadline) return -1;
+    cx_u64 ms = deadline - now;
+    if (ms > 0x7FFFFFFF) ms = 0x7FFFFFFF;
+    fd_set wr, ex;
+    FD_ZERO(&wr);
+    FD_ZERO(&ex);
+    FD_SET(s, &wr);
+    FD_SET(s, &ex);
+    struct timeval tv = {(long)(ms / 1000), (long)(ms % 1000) * 1000};
+    int n = select(0, NULL, &wr, &ex, &tv);
+    if (n == 0) return -1;
+    if (n < 0) return WSAGetLastError();
+    int err = 0, len = sizeof err;
+    if (getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&err, &len) != 0) return WSAGetLastError();
+    return FD_ISSET(s, &ex) && !err ? WSAECONNREFUSED : err;
+}
+
+static int ws_connect(wsock* w, ws_link* l, cx_u64 deadline, cx_i32* code) {
+    memset(l, 0, sizeof *l);
+    l->s = INVALID_SOCKET;
+    l->ev = WSA_INVALID_EVENT;
+    l->tls = w->tls;
+    once(&wsa_state, wsa_start);
+    if (!wsa_started) {
+        *code = (cx_i32)WSAGetLastError();
+        return E_OS;
+    }
+    char port[8];
+    ws_port_text(w->port, port);
+    struct addrinfo hints = {0}, *found = NULL;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    int e = getaddrinfo(w->host, port, &hints, &found);
+    if (e != 0) {
+        *code = e;
+        return E_RESOLVE;
+    }
+    /* Each of the host's addresses in turn, until one answers or the time's up. */
+    int failed = E_CONNECT;
+    for (struct addrinfo* a = found; a && l->s == INVALID_SOCKET; a = a->ai_next) {
+        SOCKET s = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+        if (s == INVALID_SOCKET) {
+            *code = WSAGetLastError();
+            continue;
+        }
+        u_long on = 1;
+        ioctlsocket(s, FIONBIO, &on);
+        int r = connect(s, a->ai_addr, (int)a->ai_addrlen) == 0 ? 0 : WSAGetLastError();
+        if (r == WSAEWOULDBLOCK) r = ws_wait_connect(s, deadline);
+        if (r == 0) {
+            l->s = s;
+            break;
+        }
+        closesocket(s);
+        if (r < 0) {
+            failed = E_TIMEOUT, *code = 0;
+            break;
+        }
+        *code = r;
+    }
+    freeaddrinfo(found);
+    if (l->s == INVALID_SOCKET) return failed;
+    *code = 0;
+    BOOL nodelay = TRUE;
+    setsockopt(l->s, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof nodelay);
+    l->ev = WSACreateEvent();
+    if (l->ev == WSA_INVALID_EVENT || WSAEventSelect(l->s, l->ev, FD_READ | FD_WRITE | FD_CLOSE) != 0) {
+        *code = (cx_i32)WSAGetLastError();
+        ws_disconnect(l);
+        return E_OS;
+    }
+    if (l->tls) {
+        e = ws_tls_handshake(w, l, deadline, code);
+        if (e) {
+            ws_disconnect(l);
+            return e;
+        }
+    }
+    return 0;
+}
+
+static int ws_send_some(ws_link* l, bytes* out, size_t* at) {
+    if (!l->tls) {
+        while (*at < out->len) {
+            size_t n = out->len - *at;
+            int k = send(l->s, out->p + *at, n > (1 << 20) ? (1 << 20) : (int)n, 0);
+            if (k > 0) {
+                *at += (size_t)k;
+                continue;
+            }
+            if (k < 0 && WSAGetLastError() == WSAEWOULDBLOCK) {
+                l->blocked = 1;
+                break;
+            }
+            return 0;
+        }
+        if (*at == out->len) out->len = 0, *at = 0;
+        return 1;
+    }
+    /* Sealed into TLS records, at most the largest Schannel makes each, to go as the socket takes
+     * them. */
+    while (*at < out->len) {
+        size_t n = out->len - *at;
+        if (n > l->sizes.max_message) n = l->sizes.max_message;
+        if (!grow(&l->sealed, l->sizes.header + n + l->sizes.trailer)) cx_panic_capacity();
+        char* rec = l->sealed.p + l->sealed.len;
+        memcpy(rec + l->sizes.header, out->p + *at, n);
+        ws_sec_buffer b[4] = {{l->sizes.header, SSPI_HEADER, rec},
+                              {(ULONG)n, SSPI_DATA, rec + l->sizes.header},
+                              {l->sizes.trailer, SSPI_TRAILER, rec + l->sizes.header + n},
+                              {0, SSPI_EMPTY, NULL}};
+        ws_sec_desc d = {0, 4, b};
+        if (sspi.encrypt(&l->ctx, 0, &d, 0) != SSPI_OK) return 0;
+        l->sealed.len += (size_t)b[0].size + b[1].size + b[2].size;
+        *at += n;
+    }
+    out->len = 0, *at = 0;
+    return ws_flush(l);
+}
+
+static int ws_unsent(ws_link* l) { return l->sealed.len > l->sealed_at; }
+
+/* Decrypts the whole records in `raw` onto `in`: 1 if anything came, 0 if nothing did, -1 if the
+ * server ended the TLS session or it failed. */
+static int ws_unseal(ws_link* l, bytes* in) {
+    int got = 0;
+    for (;;) {
+        if (l->renegotiating) {
+            LONG st = ws_tls_step(l, 0);
+            if (st == SSPI_INCOMPLETE) break;
+            if (st != SSPI_OK && st != SSPI_CONTINUE) return -1;
+            l->renegotiating = st == SSPI_CONTINUE;
+            if (l->raw.len == 0) break;
+            continue;
+        }
+        if (l->raw.len == 0) break;
+        ws_sec_buffer b[4] = {{(ULONG)l->raw.len, SSPI_DATA, l->raw.p}, {0, SSPI_EMPTY, NULL}, {0, SSPI_EMPTY, NULL}, {0, SSPI_EMPTY, NULL}};
+        ws_sec_desc d = {0, 4, b};
+        LONG st = sspi.decrypt(&l->ctx, &d, 0, NULL);
+        if (st == SSPI_INCOMPLETE) break;
+        if (st != SSPI_OK && st != SSPI_RENEGOTIATE && st != SSPI_CONTEXT_EXPIRED) return -1;
+        size_t rest = 0;
+        for (int i = 0; i < 4; i++) {
+            if (b[i].type == SSPI_DATA && b[i].size) {
+                if (!add(in, b[i].p, b[i].size)) cx_panic_capacity();
+                got = 1;
+            } else if (b[i].type == SSPI_EXTRA) {
+                rest = b[i].size;
+            }
+        }
+        if (st == SSPI_CONTEXT_EXPIRED) return -1;
+        if (rest > l->raw.len) rest = l->raw.len;
+        memmove(l->raw.p, l->raw.p + l->raw.len - rest, rest);
+        l->raw.len = rest;
+        /* TLS 1.3's messages after the handshake, as a new session ticket or a key update, go
+         * back to InitializeSecurityContext. */
+        if (st == SSPI_RENEGOTIATE) l->renegotiating = 1;
+    }
+    return got;
+}
+
+static int ws_recv_some(ws_link* l, bytes* in) {
+    int got_any = 0, ended = 0;
+    bytes* to = l->tls ? &l->raw : in;
+    for (;;) {
+        if (!grow(to, 65536)) cx_panic_capacity();
+        int n = recv(l->s, to->p + to->len, 65536, 0);
+        if (n > 0) {
+            to->len += (size_t)n;
+            got_any = 1;
+            continue;
+        }
+        if (n == 0 || WSAGetLastError() != WSAEWOULDBLOCK) ended = 1;
+        break;
+    }
+    if (l->tls) {
+        got_any = 0;
+        int r = ws_unseal(l, in);
+        if (r > 0) got_any = 1;
+        if (r < 0) ended = 1;
+    }
+    return ended ? -1 : got_any;
+}
+
+#endif
+
+/* Makes the handshake over the connection `l`, by `deadline`, then reads and writes frames until
+ * the connection ends. */
+static void ws_talk(wsock* w, ws_link* l, cx_u64 deadline) {
+    bytes out = {0}, in = {0}, message = {0};
     cx_u8 nonce[16];
     ws_random(nonce, sizeof nonce);
     char key[25];
     ws_base64(nonce, sizeof nonce, key);
     int bracket = strchr(w->host, ':') != NULL;
-    char port[8] = "";
+    char port[9] = "";
     if (w->port != (w->tls ? 443u : 80u)) {
-        char digits[6];
-        int k = 0;
-        for (unsigned v = w->port; v; v /= 10) digits[k++] = (char)('0' + v % 10);
         port[0] = ':';
-        for (int i = 0; i < k; i++) port[1 + i] = digits[k - 1 - i];
-        port[1 + k] = 0;
+        ws_port_text(w->port, port + 1);
     }
     const char* parts[] = {"GET ", w->target, " HTTP/1.1\r\nHost: ", bracket ? "[" : "", w->host, bracket ? "]" : "", port,
                            "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ", key,
@@ -1709,11 +2228,11 @@ static void ws_run(wsock* w) {
     size_t sent = 0, head_end = 0, scanned = 0;
     int failed = 0;
     for (;;) {
-        if (!ws_send_some(h, &out, &sent)) {
+        if (!ws_send_some(l, &out, &sent)) {
             failed = E_PROTOCOL;
             break;
         }
-        int r = ws_recv_some(h, &in);
+        int r = ws_recv_some(l, &in);
         /* The head ends at its blank line, which may have come with the server's close, as a
          * refusal's does. */
         for (size_t i = scanned; i + 3 < in.len; i++) {
@@ -1736,7 +2255,7 @@ static void ws_run(wsock* w) {
             failed = E_TIMEOUT;
             break;
         }
-        if (r == 0) ws_poll(w, sock, out.len > 0, deadline);
+        if (r == 0) ws_poll(w, l, out.len > 0 || ws_unsent(l), deadline);
     }
     if (!failed) {
         /* "HTTP/1.1 101 Switching Protocols", the upgrade, and the key's answer. */
@@ -1774,6 +2293,7 @@ static void ws_run(wsock* w) {
                 ws_lock(w);
                 if (proto && pl && !add(&w->protocol, proto, pl)) cx_panic_capacity();
                 if (w->state == WS_CONNECTING) w->state = WS_OPEN;
+                w->heard_ms = ws_now_ms();
                 ws_signal(w);
                 ws_unlock(w);
             }
@@ -1782,7 +2302,6 @@ static void ws_run(wsock* w) {
     if (failed) {
         ws_fail(w, failed, 0);
         free(out.p), free(in.p);
-        curl.easy_cleanup(h);
         return;
     }
     /* What came after the handshake's head is the first frames. */
@@ -1790,9 +2309,12 @@ static void ws_run(wsock* w) {
     in.len -= head_end;
 
     /* Frames, until the connection ends. `fragment` is the opcode of the message whose frames are
-     * coming, or 0. */
+     * coming, or 0. The keepalive: when anything last came from the server, how many reads have
+     * brought something, and, while a ping waits, when it went and that count then. */
     int fragment = 0, close_sent = 0, close_got = 0;
     cx_u64 close_by = WS_FOREVER;
+    cx_u64 heard = ws_now_ms(), reads = 0, pinged = 0, pinged_reads = 0;
+    cx_u32 pings = 0;
     size_t taken_in = 0;
     bytes queued = {0};
     for (;;) {
@@ -1823,12 +2345,20 @@ static void ws_run(wsock* w) {
             cx_u64 wait = w->timeout_ms < 10000 ? w->timeout_ms : 10000;
             close_by = ws_now_ms() + wait;
         }
-        if (!ws_send_some(h, &out, &sent)) {
+        if (!ws_send_some(l, &out, &sent)) {
             ws_end(w, E_CLOSED, CLOSE_ABNORMAL, NULL, 0);
             break;
         }
-        if (close_got && out.len == 0) break;
-        int r = ws_recv_some(h, &in);
+        if (close_got && out.len == 0 && !ws_unsent(l)) break;
+        size_t before = in.len;
+        int r = ws_recv_some(l, &in);
+        if (in.len > before) {
+            heard = ws_now_ms();
+            reads++;
+            ws_lock(w);
+            w->heard_ms = heard;
+            ws_unlock(w);
+        }
         /* Each whole frame that has come. */
         int fail_code = 0, fail_error = 0;
         while (!fail_code && !close_got) {
@@ -1909,7 +2439,7 @@ static void ws_run(wsock* w) {
             /* Close with the code that says why, as far as the connection takes it now. */
             if (!close_sent) {
                 ws_close_frame(&out, (cx_u32)fail_code, NULL, 0);
-                ws_send_some(h, &out, &sent);
+                ws_send_some(l, &out, &sent);
             }
             ws_fail(w, fail_error, 0);
             break;
@@ -1918,7 +2448,7 @@ static void ws_run(wsock* w) {
             /* The answer to the server's close goes out, for a while at most, then it's done. */
             if (close_by == WS_FOREVER) close_by = ws_now_ms() + (w->timeout_ms < 10000 ? w->timeout_ms : 10000);
             if (ws_now_ms() >= close_by) break;
-            if (out.len) ws_poll(w, sock, 1, close_by);
+            if (out.len || ws_unsent(l)) ws_poll(w, l, 1, close_by);
             continue;
         }
         if (r < 0) {
@@ -1929,198 +2459,54 @@ static void ws_run(wsock* w) {
             ws_fail(w, E_TIMEOUT, 0);
             break;
         }
-        if (r == 0) ws_poll(w, sock, out.len > 0, close_by);
+        /* The keepalive: a ping once nothing has come for the interval, and the end if nothing
+         * comes for the timeout after it. Anything that comes answers it, not just its pong, as a
+         * pong may wait behind a long message. */
+        cx_u64 wake_at = close_by;
+        if (w->ping_interval_ms && !close_sent) {
+            cx_u64 now = ws_now_ms();
+            if (pinged && reads != pinged_reads) pinged = 0;
+            if (!pinged) {
+                cx_u64 due = heard + w->ping_interval_ms;
+                if (now >= due) {
+                    pings++;
+                    cx_u8 body[4] = {(cx_u8)(pings >> 24), (cx_u8)(pings >> 16), (cx_u8)(pings >> 8), (cx_u8)pings};
+                    ws_frame(&out, OP_PING, body, 4);
+                    pinged = now, pinged_reads = reads;
+                    continue;
+                }
+                if (due < wake_at) wake_at = due;
+            } else {
+                cx_u64 dead = pinged + w->ping_timeout_ms;
+                if (now >= dead) {
+                    /* Gone quiet: told so, as far as the connection takes it now, and let go. */
+                    static const char why[] = "keepalive ping timeout";
+                    ws_close_frame(&out, CLOSE_SERVER_ERROR, (const cx_u8*)why, sizeof why - 1);
+                    ws_send_some(l, &out, &sent);
+                    ws_fail(w, E_TIMEOUT, 0);
+                    break;
+                }
+                if (dead < wake_at) wake_at = dead;
+            }
+        }
+        if (r == 0) ws_poll(w, l, out.len > 0 || ws_unsent(l), wake_at);
     }
     free(out.p), free(in.p), free(message.p), free(queued.p);
-    curl.easy_cleanup(h);
 }
 
-#else
-
-/* --- WebSockets on WinHTTP ------------------------------------------------------------------ */
-
-#ifndef WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET
-#define WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET 114
-#endif
-
-/* WinHTTP's WebSocket calls, from Windows 8, looked up rather than linked, as Calx's headers
- * are Windows 7's. */
-static struct {
-    HINTERNET(WINAPI* complete_upgrade)(HINTERNET, DWORD_PTR);
-    DWORD(WINAPI* send)(HINTERNET, int, void*, DWORD);
-    DWORD(WINAPI* receive)(HINTERNET, void*, DWORD, DWORD*, int*);
-    DWORD(WINAPI* shutdown)(HINTERNET, USHORT, void*, DWORD);
-    DWORD(WINAPI* query_close)(HINTERNET, USHORT*, void*, DWORD, DWORD*);
-} wsapi;
-static int wsapi_loaded;
-static cx_u32 wsapi_state;
-
-static void wsapi_load(void) {
-    HMODULE m = GetModuleHandleW(L"winhttp.dll");
-    if (!m) m = LoadLibraryW(L"winhttp.dll");
-    if (!m) return;
-    FARPROC fns[5] = {GetProcAddress(m, "WinHttpWebSocketCompleteUpgrade"), GetProcAddress(m, "WinHttpWebSocketSend"),
-                      GetProcAddress(m, "WinHttpWebSocketReceive"), GetProcAddress(m, "WinHttpWebSocketShutdown"),
-                      GetProcAddress(m, "WinHttpWebSocketQueryCloseStatus")};
-    for (int i = 0; i < 5; i++) {
-        if (!fns[i]) return;
-    }
-    memcpy(&wsapi.complete_upgrade, &fns[0], sizeof(FARPROC));
-    memcpy(&wsapi.send, &fns[1], sizeof(FARPROC));
-    memcpy(&wsapi.receive, &fns[2], sizeof(FARPROC));
-    memcpy(&wsapi.shutdown, &fns[3], sizeof(FARPROC));
-    memcpy(&wsapi.query_close, &fns[4], sizeof(FARPROC));
-    wsapi_loaded = 1;
-}
-
-/* WinHTTP's buffer types. */
-enum { BT_BINARY = 0, BT_BINARY_FRAGMENT = 1, BT_TEXT = 2, BT_TEXT_FRAGMENT = 3, BT_CLOSE = 4 };
-
-/* Sends a message the program queued before the connection was open, or sends it now. Holds
- * send_mu. */
-static DWORD ws_win_send(wsock* w, int op, const cx_u8* p, size_t n) {
-    return wsapi.send(w->ws, op == OP_TEXT ? BT_TEXT : BT_BINARY, (void*)p, (DWORD)n);
-}
-
+/* Connects, makes the handshake, then reads and writes frames until the connection ends. */
 static void ws_run(wsock* w) {
-    once(&session_state, session_open);
-    once(&wsapi_state, wsapi_load);
-    if (!session || !wsapi_loaded) {
-        ws_fail(w, !session ? E_OS : E_UNAVAILABLE, (cx_i32)GetLastError());
+    cx_u64 deadline = ws_now_ms() + w->timeout_ms;
+    ws_link link;
+    cx_i32 code = 0;
+    int e = ws_connect(w, &link, deadline, &code);
+    if (e) {
+        ws_fail(w, e, code);
         return;
     }
-    wchar_t* host = widen(w->host);
-    wchar_t* target = widen(w->target);
-    wchar_t* head = widen(w->head);
-    HINTERNET c = NULL, q = NULL, ws = NULL;
-    DWORD e = 0;
-    int t = (int)w->timeout_ms;
-    c = WinHttpConnect(session, host, (INTERNET_PORT)w->port, 0);
-    if (!c) goto failed;
-    q = WinHttpOpenRequest(c, L"GET", target, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, w->tls ? WINHTTP_FLAG_SECURE : 0);
-    if (!q) goto failed;
-    if (!WinHttpSetTimeouts(q, t, t, t, t)) goto failed;
-    if (!WinHttpSetOption(q, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, NULL, 0)) goto failed;
-    if (!WinHttpSendRequest(q, head[0] ? head : WINHTTP_NO_ADDITIONAL_HEADERS, head[0] ? (DWORD)-1L : 0, NULL, 0, 0, 0)) goto failed;
-    if (!WinHttpReceiveResponse(q, NULL)) goto failed;
-    DWORD status = 0, size = sizeof status;
-    if (!WinHttpQueryHeaders(q, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &size,
-                             WINHTTP_NO_HEADER_INDEX)) {
-        goto failed;
-    }
-    if (status != 101) {
-        ws_lock(w);
-        w->status = status;
-        ws_unlock(w);
-        ws_fail(w, E_REFUSED, 0);
-        goto done;
-    }
-    wchar_t proto[256];
-    size = sizeof proto;
-    if (WinHttpQueryHeaders(q, WINHTTP_QUERY_CUSTOM, L"Sec-WebSocket-Protocol", proto, &size, WINHTTP_NO_HEADER_INDEX)) {
-        char p8[768];
-        int n8 = WideCharToMultiByte(CP_UTF8, 0, proto, (int)(size / sizeof(wchar_t)), p8, sizeof p8, NULL, NULL);
-        ws_lock(w);
-        if (n8 > 0 && !add(&w->protocol, p8, (size_t)n8)) cx_panic_capacity();
-        ws_unlock(w);
-    }
-    /* A receive waits as long as it takes, since a WebSocket may be quiet for hours: WinHTTP
-     * takes a timeout of 0 as none. The WebSocket's handle starts with the request's. */
-    DWORD forever = 0;
-    WinHttpSetTimeouts(q, t, t, t, 0);
-    ws = wsapi.complete_upgrade(q, 0);
-    if (!ws) goto failed;
-    WinHttpCloseHandle(q);
-    q = NULL;
-    WinHttpSetOption(ws, WINHTTP_OPTION_RECEIVE_TIMEOUT, &forever, sizeof forever);
-    /* Open: what the program queued goes first. */
-    AcquireSRWLockExclusive(&w->send_mu);
-    ws_lock(w);
-    w->ws = ws;
-    bytes queued = w->out;
-    w->out = (bytes){0};
-    int closing = w->closing;
-    if (w->state == WS_CONNECTING) w->state = WS_OPEN;
-    ws_signal(w);
-    ws_unlock(w);
-    for (size_t i = 0; i + 9 <= queued.len;) {
-        int op = (cx_u8)queued.p[i];
-        cx_u64 n = 0;
-        for (int k = 0; k < 8; k++) n = n << 8 | (cx_u8)queued.p[i + 1 + k];
-        if (!closing) ws_win_send(w, op, (const cx_u8*)queued.p + i + 9, (size_t)n);
-        i += 9 + (size_t)n;
-    }
-    free(queued.p);
-    if (closing) {
-        ws_lock(w);
-        wsapi.shutdown(ws, (USHORT)w->my_code, w->my_reason.len ? w->my_reason.p : NULL, (DWORD)w->my_reason.len);
-        ws_unlock(w);
-    }
-    ReleaseSRWLockExclusive(&w->send_mu);
-    /* Messages, until the connection ends. */
-    bytes message = {0};
-    for (;;) {
-        if (!grow(&message, 65536)) cx_panic_capacity();
-        DWORD got = 0;
-        int type = 0;
-        DWORD r = wsapi.receive(ws, message.p + message.len, 65536, &got, &type);
-        if (r == ERROR_WINHTTP_INVALID_SERVER_RESPONSE) {
-            /* WinHTTP checks frames itself: a masked one, or text that isn't UTF-8, fails the
-             * receive and ends the connection, with no close it lets us send. */
-            ws_fail(w, E_PROTOCOL, 0);
-            break;
-        }
-        if (r != 0) {
-            /* The handle closed under it by `close`, or the connection lost. */
-            ws_end(w, E_CLOSED, CLOSE_ABNORMAL, NULL, 0);
-            break;
-        }
-        if (type == BT_CLOSE) {
-            USHORT code = CLOSE_NO_STATUS;
-            char reason[123];
-            DWORD reason_len = 0;
-            if (wsapi.query_close(ws, &code, reason, sizeof reason, &reason_len) != 0) code = CLOSE_NO_STATUS, reason_len = 0;
-            AcquireSRWLockExclusive(&w->send_mu);
-            ws_lock(w);
-            int answered = w->closing;
-            ws_unlock(w);
-            if (!answered) wsapi.shutdown(ws, code == CLOSE_NO_STATUS ? CLOSE_NORMAL : code, NULL, 0);
-            ReleaseSRWLockExclusive(&w->send_mu);
-            ws_end(w, E_CLOSED, code, (const cx_u8*)reason, reason_len);
-            break;
-        }
-        message.len += got;
-        if (message.len > w->limit) {
-            AcquireSRWLockExclusive(&w->send_mu);
-            wsapi.shutdown(ws, CLOSE_TOO_BIG, NULL, 0);
-            ReleaseSRWLockExclusive(&w->send_mu);
-            ws_fail(w, E_TOO_LONG, 0);
-            break;
-        }
-        if (type == BT_TEXT || type == BT_BINARY) {
-            if (type == BT_TEXT && !ws_utf8((const cx_u8*)message.p, message.len)) {
-                AcquireSRWLockExclusive(&w->send_mu);
-                wsapi.shutdown(ws, CLOSE_NOT_UTF8, NULL, 0);
-                ReleaseSRWLockExclusive(&w->send_mu);
-                ws_fail(w, E_PROTOCOL, 0);
-                break;
-            }
-            ws_deliver(w, type == BT_TEXT ? OP_TEXT : OP_BINARY, (const cx_u8*)message.p, message.len);
-            message.len = 0;
-        }
-    }
-    free(message.p);
-    goto done;
-failed:
-    e = GetLastError();
-    ws_fail(w, win_error(e), (cx_i32)e);
-done:
-    if (q) WinHttpCloseHandle(q);
-    if (c) WinHttpCloseHandle(c);
-    free(host), free(target), free(head);
+    ws_talk(w, &link, deadline);
+    ws_disconnect(&link);
 }
-
-#endif
 
 #ifdef _WIN32
 static DWORD WINAPI ws_thread_main(LPVOID p) {
@@ -2135,14 +2521,18 @@ static void* ws_thread_main(void* p) {
 #endif
 
 /* Starts connecting to `url`, `ws://` or `wss://`, with the caller's header lines, each ending in
- * "\r\n", which std.http.websocket has checked. The connection may take `timeout_ms` to open, and
- * a message may be `limit` bytes long. */
-cx_u64 cx_http_ws_open(const cx_u8* url, cx_usize url_len, const cx_u8* head, cx_usize head_len, cx_u32 timeout_ms, cx_usize limit) {
+ * "\r\n", which std.http.websocket has checked. The connection may take `timeout_ms` to open, a
+ * message may be `limit` bytes long, and with a ping interval it's pinged when it's been quiet
+ * that long, and ends if it stays quiet for the ping timeout after. */
+cx_u64 cx_http_ws_open(const cx_u8* url, cx_usize url_len, const cx_u8* head, cx_usize head_len, cx_u32 timeout_ms, cx_usize limit,
+                       cx_u32 ping_interval_ms, cx_u32 ping_timeout_ms) {
     wsock* w = calloc(1, sizeof(wsock));
     if (!w) cx_panic_capacity();
     ws_init_lock(w);
     w->timeout_ms = timeout_ms;
     w->limit = limit;
+    w->ping_interval_ms = ping_interval_ms;
+    w->ping_timeout_ms = ping_timeout_ms;
     w->head = dup_text((const char*)head, head_len);
     w->state = WS_CONNECTING;
 #ifndef _WIN32
@@ -2168,7 +2558,12 @@ cx_u64 cx_http_ws_open(const cx_u8* url, cx_usize url_len, const cx_u8* head, cx
     }
     w->url = r.url, w->host = r.host, w->target = r.target, w->port = r.port, w->tls = r.https;
     int error = ok ? 0 : E_BAD_URL;
-#ifndef _WIN32
+#ifdef _WIN32
+    if (!error) {
+        w->wake = CreateEventW(NULL, FALSE, FALSE, NULL);
+        if (!w->wake) error = E_OS, w->code = (cx_i32)GetLastError();
+    }
+#else
     if (!error) {
         once(&curl_state, curl_load);
         if (!curl_loaded || !curl.easy_send || !curl.easy_recv) error = E_UNAVAILABLE;
@@ -2201,12 +2596,12 @@ static wsock* ws_of(cx_u64 h) { return table_find(&sockets, h); }
 
 /* Wakes the connection's thread to send what's queued. */
 static void ws_wake(wsock* w) {
-#ifndef _WIN32
+#ifdef _WIN32
+    if (w->wake) SetEvent(w->wake);
+#else
     char b = 1;
     ssize_t n = write(w->wake[1], &b, 1);
     (void)n;
-#else
-    (void)w;
 #endif
 }
 
@@ -2231,39 +2626,35 @@ cx_i32 cx_http_ws_wait_open(cx_u64 h) {
     return e;
 }
 
+/* The milliseconds since anything last came from the server, or since it opened: 0 while it's
+ * opening, or if it never opened. */
+cx_u64 cx_http_ws_idle_ms(cx_u64 h) {
+    wsock* w = ws_of(h);
+    if (!w) return 0;
+    ws_lock(w);
+    cx_u64 heard = w->heard_ms;
+    ws_unlock(w);
+    if (!heard) return 0;
+    cx_u64 now = ws_now_ms();
+    return now > heard ? now - heard : 0;
+}
+
 /* Sends a message, OP_TEXT or OP_BINARY, or queues it while the connection opens: 0, or what the
  * connection ended with. */
 cx_i32 cx_http_ws_send(cx_u64 h, cx_u32 op, const cx_u8* p, cx_usize n) {
     wsock* w = ws_of(h);
     if (!w) return -1;
-#ifdef _WIN32
-    AcquireSRWLockExclusive(&w->send_mu);
-#endif
     ws_lock(w);
     int state = w->state, error = w->error;
     if (state == WS_CLOSED || w->closing) {
         ws_unlock(w);
-#ifdef _WIN32
-        ReleaseSRWLockExclusive(&w->send_mu);
-#endif
         return state == WS_CLOSED ? error : E_CLOSED;
     }
-#ifdef _WIN32
-    if (state == WS_OPEN) {
-        ws_unlock(w);
-        DWORD e = ws_win_send(w, (int)op, p, n);
-        ReleaseSRWLockExclusive(&w->send_mu);
-        return e == 0 ? 0 : E_CLOSED;
-    }
-#endif
     cx_u8 rec[9];
     rec[0] = (cx_u8)op;
     for (int k = 0; k < 8; k++) rec[1 + k] = (cx_u8)((cx_u64)n >> (56 - 8 * k));
     if (!add(&w->out, rec, 9) || (n && !add(&w->out, p, n))) cx_panic_capacity();
     ws_unlock(w);
-#ifdef _WIN32
-    ReleaseSRWLockExclusive(&w->send_mu);
-#endif
     ws_wake(w);
     return 0;
 }
@@ -2341,9 +2732,6 @@ void cx_http_ws_close(cx_u64 h, cx_u32 code, const cx_u8* reason, cx_usize reaso
     if (!w) return;
     table_remove(&sockets, h);
     cx_u64 wait = w->timeout_ms < 10000 ? w->timeout_ms : 10000;
-#ifdef _WIN32
-    AcquireSRWLockExclusive(&w->send_mu);
-#endif
     ws_lock(w);
     int was = w->state;
     if (!w->closing) {
@@ -2351,14 +2739,7 @@ void cx_http_ws_close(cx_u64 h, cx_u32 code, const cx_u8* reason, cx_usize reaso
         w->my_code = code;
         if (reason_len && !add(&w->my_reason, reason, reason_len > 123 ? 123 : reason_len)) cx_panic_capacity();
     }
-#ifdef _WIN32
-    HINTERNET ws = w->ws;
-    if (was == WS_OPEN && ws) wsapi.shutdown(ws, (USHORT)code, w->my_reason.len ? w->my_reason.p : NULL, (DWORD)w->my_reason.len);
-#endif
     ws_unlock(w);
-#ifdef _WIN32
-    ReleaseSRWLockExclusive(&w->send_mu);
-#endif
     ws_wake(w);
     if (w->started) {
         /* The thread ends once the server answers, the time's up, or it fails. */
@@ -2368,8 +2749,6 @@ void cx_http_ws_close(cx_u64 h, cx_u32 code, const cx_u8* reason, cx_usize reaso
         }
         ws_unlock(w);
 #ifdef _WIN32
-        /* A receive still waiting returns once its handle closes. */
-        if (w->ws) WinHttpCloseHandle(w->ws);
         WaitForSingleObject(w->thread, INFINITE);
         CloseHandle(w->thread);
 #else
