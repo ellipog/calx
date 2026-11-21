@@ -957,6 +957,11 @@ CX_FN(void, cx_digest_hmac_sha256, (const cx_u8* key, cx_usize key_len, const cx
 CX_FN(void, cx_digest_blake2b_start, (cx_u8* ctx, cx_usize outlen, const cx_u8* key, cx_usize keylen));
 CX_FN(void, cx_digest_blake2b_add, (cx_u8* ctx, const cx_u8* p, cx_usize n));
 CX_FN(cx_usize, cx_digest_blake2b_finish, (cx_u8* ctx, cx_u8* out));
+/* BLAKE2s, in calx_digest.c too (CLX-411): a digest of `outlen` bytes, 1 to 32, under a key of up
+ * to 32 bytes, in a context of CX_DIGEST_CTX bytes. */
+CX_FN(void, cx_digest_blake2s_start, (cx_u8* ctx, cx_usize outlen, const cx_u8* key, cx_usize keylen));
+CX_FN(void, cx_digest_blake2s_add, (cx_u8* ctx, const cx_u8* p, cx_usize n));
+CX_FN(cx_usize, cx_digest_blake2s_finish, (cx_u8* ctx, cx_u8* out));
 
 /* argon2d, argon2i and argon2id (type 0, 1 and 2), version 0x13, in calx_argon2.c (CLX-384).
  * Writes `outlen` bytes of tag, and returns false if the parameters are out of RFC 9106's range
@@ -972,6 +977,12 @@ CX_FN(void, cx_ed25519_public, (const cx_u8* seed, cx_u8* out));
 CX_FN(void, cx_ed25519_sign, (const cx_u8* seed, const cx_u8* pub, const cx_u8* msg, cx_usize len, cx_u8* out));
 CX_FN(cx_bool, cx_ed25519_check, (const cx_u8* pub));
 CX_FN(cx_bool, cx_ed25519_verify, (const cx_u8* pub, const cx_u8* msg, cx_usize len, const cx_u8* sig));
+
+/* X25519, RFC 7748, in calx_ed25519.c too (CLX-411). Keys and points are 32 bytes. `cx_x25519`
+ * writes the scalar times the point u, the shared secret, and says whether it isn't all zeros, as
+ * it is for a point of small order. `cx_x25519_public` writes the scalar times the base point 9. */
+CX_FN(cx_bool, cx_x25519, (const cx_u8* scalar, const cx_u8* u, cx_u8* out));
+CX_FN(void, cx_x25519_public, (const cx_u8* scalar, cx_u8* out));
 
 /* ECDSA over P-256 with SHA-256, ES256, in calx_p256.c (CLX-406). Numbers are 32 bytes,
  * big-endian. A private key is its scalar d, which `cx_p256_scalar_check` says is from 1 to

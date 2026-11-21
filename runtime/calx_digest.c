@@ -956,3 +956,105 @@ cx_usize cx_digest_blake2b_finish(cx_u8* ctx, cx_u8* out) {
     memcpy(out, s.h, s.outlen);
     return s.outlen;
 }
+
+/* --- BLAKE2s ------------------------------------------------------------------------------- */
+
+/* RFC 7693's BLAKE2s: BLAKE2b's design on 32-bit words, a digest of 1 to 32 bytes under a key of
+ * up to 32 bytes, its starting values SHA-256's, ten rounds of blocks of 64 bytes, with the first
+ * ten of BLAKE2b's orders of the message words. Noise's `BLAKE2s` hash and WireGuard use it
+ * (CLX-411). Its context is CX_DIGEST_CTX bytes too. */
+typedef struct {
+    cx_u32 h[8];
+    cx_u64 t;      // bytes compressed
+    cx_u8 buf[64];
+    cx_u32 used;   // bytes waiting in `buf`, all 64 of them kept until more come
+    cx_u32 outlen;
+} blake2s;
+
+_Static_assert(sizeof(blake2s) <= CX_DIGEST_CTX, "BLAKE2s's context fits what std.hash makes room for");
+
+static const cx_u32 blake2s_iv[8] = {0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
+                                     0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19};
+
+#define B2S_G(a, b, c, d, x, y)        \
+    do {                               \
+        a = a + b + (x);               \
+        d = rotr(d ^ a, 16);           \
+        c = c + d;                     \
+        b = rotr(b ^ c, 12);           \
+        a = a + b + (y);               \
+        d = rotr(d ^ a, 8);            \
+        c = c + d;                     \
+        b = rotr(b ^ c, 7);            \
+    } while (0)
+
+static void blake2s_compress(blake2s* s, const cx_u8* block, int last) {
+    cx_u32 m[16], v[16];
+    memcpy(m, block, 64);
+    for (int i = 0; i < 8; i++) {
+        v[i] = s->h[i];
+        v[i + 8] = blake2s_iv[i];
+    }
+    v[12] ^= (cx_u32)s->t;
+    v[13] ^= (cx_u32)(s->t >> 32);
+    if (last) v[14] = ~v[14];
+    for (int r = 0; r < 10; r++) {
+        const cx_u8* z = blake2b_sigma[r];
+        B2S_G(v[0], v[4], v[8], v[12], m[z[0]], m[z[1]]);
+        B2S_G(v[1], v[5], v[9], v[13], m[z[2]], m[z[3]]);
+        B2S_G(v[2], v[6], v[10], v[14], m[z[4]], m[z[5]]);
+        B2S_G(v[3], v[7], v[11], v[15], m[z[6]], m[z[7]]);
+        B2S_G(v[0], v[5], v[10], v[15], m[z[8]], m[z[9]]);
+        B2S_G(v[1], v[6], v[11], v[12], m[z[10]], m[z[11]]);
+        B2S_G(v[2], v[7], v[8], v[13], m[z[12]], m[z[13]]);
+        B2S_G(v[3], v[4], v[9], v[14], m[z[14]], m[z[15]]);
+    }
+    for (int i = 0; i < 8; i++) s->h[i] ^= v[i] ^ v[i + 8];
+}
+
+void cx_digest_blake2s_start(cx_u8* ctx, cx_usize outlen, const cx_u8* key, cx_usize keylen) {
+    blake2s s;
+    memset(&s, 0, sizeof s);
+    memcpy(s.h, blake2s_iv, sizeof s.h);
+    s.h[0] ^= 0x01010000u ^ ((cx_u32)keylen << 8) ^ (cx_u32)outlen;
+    s.outlen = (cx_u32)outlen;
+    if (keylen) {
+        memcpy(s.buf, key, keylen);
+        s.used = 64;
+    }
+    memcpy(ctx, &s, sizeof s);
+}
+
+void cx_digest_blake2s_add(cx_u8* ctx, const cx_u8* p, cx_usize n) {
+    if (!n) return;
+    blake2s s;
+    memcpy(&s, ctx, sizeof s);
+    cx_usize fill = 64 - s.used;
+    if (n > fill) {
+        memcpy(s.buf + s.used, p, fill);
+        s.t += 64;
+        blake2s_compress(&s, s.buf, 0);
+        s.used = 0;
+        p += fill;
+        n -= fill;
+        while (n > 64) {
+            s.t += 64;
+            blake2s_compress(&s, p, 0);
+            p += 64;
+            n -= 64;
+        }
+    }
+    memcpy(s.buf + s.used, p, n);
+    s.used += (cx_u32)n;
+    memcpy(ctx, &s, sizeof s);
+}
+
+cx_usize cx_digest_blake2s_finish(cx_u8* ctx, cx_u8* out) {
+    blake2s s;
+    memcpy(&s, ctx, sizeof s);
+    s.t += s.used;
+    memset(s.buf + s.used, 0, 64 - s.used);
+    blake2s_compress(&s, s.buf, 1);
+    memcpy(out, s.h, s.outlen);
+    return s.outlen;
+}

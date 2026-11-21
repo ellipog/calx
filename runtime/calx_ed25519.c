@@ -13,7 +13,10 @@
  * the memory touched depends on the scalar. Verifying works with what's public, so it picks
  * entries straight from tables of B's and -A's multiples, adding both as it doubles. It decides
  * as OpenSSL and Go do: the signature's S must be below L, A and R must be points in their one
- * encoding, and [S]B - [k]A must encode to R's bytes. */
+ * encoding, and [S]B - [k]A must encode to R's bytes.
+ *
+ * X25519, RFC 7748's Diffie-Hellman on the same curve in its Montgomery form, is at the end, on
+ * the same numbers mod p (CLX-411). */
 #include "calx_rt.h"
 
 #include <string.h>
@@ -532,4 +535,87 @@ cx_bool cx_ed25519_verify(const cx_u8* pub, const cx_u8* msg, cx_usize len, cons
     cx_u8 diff = 0;
     for (int i = 0; i < 32; i++) diff |= check[i] ^ sig[i];
     return diff == 0;
+}
+
+/* --- X25519 -------------------------------------------------------------------------------- */
+
+/* RFC 7748's X25519 (CLX-411), Diffie-Hellman on the Montgomery form of the same curve, in the
+ * same numbers mod p. The scalar is clamped: its low three bits and top bit cleared and the bit
+ * below the top set. The point is u alone, its top bit left out, and a u of p or more is taken
+ * mod p, as the RFC says. Montgomery's ladder runs over all 255 bits whatever they are, its two
+ * points swapped or not by masks, so neither the time nor the memory touched depends on the
+ * scalar, and 1/z is a power, by Ed25519's chain. */
+
+/* Swaps f and g where `flag` is 1, by masks. */
+static void fe_cswap(fe f, fe g, cx_u64 flag) {
+    cx_u64 m = (cx_u64)0 - flag;
+    for (int i = 0; i < 5; i++) {
+        cx_u64 t = m & (f[i] ^ g[i]);
+        f[i] ^= t;
+        g[i] ^= t;
+    }
+}
+
+/* (A + 2) / 4 for A = 486662, the curve's own number. */
+static const fe A24 = {121665, 0, 0, 0, 0};
+
+cx_bool cx_x25519(const cx_u8* scalar, const cx_u8* u, cx_u8* out) {
+    cx_u8 k[32];
+    fe x1, x2, z2, x3, z3, a, aa, b, bb, e, c, d, da, cb;
+    memcpy(k, scalar, 32);
+    k[0] &= 248;
+    k[31] &= 127;
+    k[31] |= 64;
+    fe_frombytes(x1, u);
+    fe_1(x2);
+    fe_0(z2);
+    fe_copy(x3, x1);
+    fe_1(z3);
+    cx_u64 swap = 0;
+    for (int t = 254; t >= 0; t--) {
+        cx_u64 bit = (cx_u64)(k[t >> 3] >> (t & 7)) & 1;
+        swap ^= bit;
+        fe_cswap(x2, x3, swap);
+        fe_cswap(z2, z3, swap);
+        swap = bit;
+        fe_add(a, x2, z2);
+        fe_sq(aa, a);
+        fe_sub(b, x2, z2);
+        fe_sq(bb, b);
+        fe_sub(e, aa, bb);
+        fe_add(c, x3, z3);
+        fe_sub(d, x3, z3);
+        fe_mul(da, d, a);
+        fe_mul(cb, c, b);
+        fe_add(x3, da, cb);
+        fe_sq(x3, x3);
+        fe_sub(z3, da, cb);
+        fe_sq(z3, z3);
+        fe_mul(z3, z3, x1);
+        fe_mul(x2, aa, bb);
+        fe_mul(z2, A24, e);
+        fe_add(z2, z2, aa);
+        fe_mul(z2, z2, e);
+    }
+    fe_cswap(x2, x3, swap);
+    fe_cswap(z2, z3, swap);
+    fe_invert(z2, z2);
+    fe_mul(x2, x2, z2);
+    fe_tobytes(out, x2);
+    cx_u8 any = 0;
+    for (int i = 0; i < 32; i++) any |= out[i];
+    wipe(k, sizeof k);
+    wipe(x2, sizeof x2);
+    wipe(z2, sizeof z2);
+    wipe(x3, sizeof x3);
+    wipe(z3, sizeof z3);
+    wipe(aa, sizeof aa);
+    wipe(bb, sizeof bb);
+    wipe(e, sizeof e);
+    return any != 0;
+}
+
+void cx_x25519_public(const cx_u8* scalar, cx_u8* out) {
+    static const cx_u8 nine[32] = {9};
+    cx_x25519(scalar, nine, out);
 }

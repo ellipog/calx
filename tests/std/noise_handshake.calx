@@ -1,0 +1,208 @@
+// Noise handshakes as a program uses them (CLX-411): IK with new keys, as loom's phone and
+// desktop run it, then what must fail and how: a changed byte, another prologue, the wrong
+// static key, a short or long message, a pre-shared key that differs, and keys of small order.
+// Then the transport: messages out of order, and rekeying, whose keys are worked out here a
+// second way, from the spec's HKDF on std.hash's HMAC-SHA256 and ChaCha20-Poly1305 itself.
+
+import std.bytes.{from_hex}
+import std.crypto.{ChaCha20Poly1305, NoiseHandshake, X25519Key, X25519PublicKey}
+import std.hash.{hmac_sha256, sha256}
+
+const IK: str = "Noise_IK_25519_ChaChaPoly_SHA256"
+
+// What reading the message gives: its payload as text, or the error.
+fn read(hs: mut NoiseHandshake, message: List<u8>) -> String {
+    return match hs.read_message(message) {
+        ok(payload) => String.from_utf8(payload) ?? "?",
+        err(e) => "{e}",
+    }
+}
+
+// An IK pair: the initiator knows the responder's key, as from a QR code.
+fn ik(desktop: X25519Key, phone: X25519Key) -> (NoiseHandshake, NoiseHandshake) {
+    var init = NoiseHandshake.initiator(IK)
+    init.set_static(phone)
+    init.set_remote_static(desktop.public_key())
+    var resp = NoiseHandshake.responder(IK)
+    resp.set_static(desktop)
+    return (init, resp)
+}
+
+// Noise's ChaChaPoly nonce: 4 zero bytes, then n, little-endian.
+fn nonce(n: u8) -> List<u8> {
+    var out: List<u8> = [0; 12]
+    out[4] = n
+    return out
+}
+
+// MixHash: the hash of h and the data.
+fn mix(h: List<u8>, data: List<u8>) -> List<u8> {
+    var all = h.copy()
+    all.extend(data)
+    return sha256(all)
+}
+
+fn main() {
+    let desktop = X25519Key.generate()
+    let phone = X25519Key.generate()
+
+    // The whole handshake, and a message each way after it.
+    var (init, resp) = ik(desktop.copy(), phone.copy())
+    println("{init.is_my_turn()} {resp.is_my_turn()} {init.is_finished()}")    // out: true false false
+    let first = init.write_message("hello".to_bytes())!
+    println("{first.len()} {read(mut resp, first)}")    // out: 101 hello
+    println("{resp.remote_static()!.bytes() == phone.public_key().bytes()}")    // out: true
+    let second = resp.write_message("welcome".to_bytes())!
+    println("{second.len()} {read(mut init, second)}")    // out: 55 welcome
+    println("{init.is_finished()} {resp.is_finished()} {init.handshake_hash() == resp.handshake_hash()}")    // out: true true true
+    var to_desktop = init.transport()
+    var to_phone = resp.transport()
+    let sealed = to_desktop.encrypt("frame 1".to_bytes())
+    println("{sealed.len()} {String.from_utf8(to_desktop.decrypt(to_phone.encrypt("ok".to_bytes()))!)!} {String.from_utf8(to_phone.decrypt(sealed)!)!}")    // out: 23 ok frame 1
+
+    // A byte changed anywhere in the first message: the key it carries, or the payload.
+    var reads = List<String>()
+    for at in [0usize, 31, 32, 79, 80, 100] {
+        var (i2, r2) = ik(desktop.copy(), phone.copy())
+        var changed = i2.write_message("hello".to_bytes())!
+        changed[at] ^= 1
+        reads.push(read(mut r2, changed))
+    }
+    println(reads.join(" "))    // out: Decrypt Decrypt Decrypt Decrypt Decrypt Decrypt
+
+    // Another prologue, or another key than the responder's.
+    var (i3, r3) = ik(desktop.copy(), phone.copy())
+    i3.set_prologue("loom 1".to_bytes())
+    r3.set_prologue("loom 2".to_bytes())
+    println(read(mut r3, i3.write_message([])!))    // out: Decrypt
+    var (i4, r4) = ik(X25519Key.generate(), phone.copy())
+    r4.set_static(desktop.copy())
+    println(read(mut r4, i4.write_message([])!))    // out: Decrypt
+
+    // Too short for the keys, too short for the tag, and too long.
+    var (i5, r5) = ik(desktop.copy(), phone.copy())
+    let whole = i5.write_message([])!
+    println(read(mut r5, whole[..40]))    // out: Truncated
+    var (_, r6) = ik(desktop.copy(), phone.copy())
+    println(read(mut r6, whole[..whole.len() - 1]))    // out: Truncated
+    var (_, r7) = ik(desktop.copy(), phone.copy())
+    var longer = whole.copy()
+    longer.push(0)
+    println(read(mut r7, longer))    // out: Decrypt
+    var (_, r8) = ik(desktop.copy(), phone.copy())
+    println(read(mut r8, [0; 65536]))    // out: TooLong
+
+    // A pre-shared key that differs, and one that doesn't.
+    let name = "Noise_NNpsk0_25519_ChaChaPoly_SHA256"
+    var a = NoiseHandshake.initiator(name)
+    a.set_psks([[7; 32]])
+    var b = NoiseHandshake.responder(name)
+    b.set_psks([[8; 32]])
+    println(read(mut b, a.write_message("x".to_bytes())!))    // out: Decrypt
+    var c = NoiseHandshake.initiator(name)
+    c.set_psks([[7; 32]])
+    var d = NoiseHandshake.responder(name)
+    d.set_psks([[7; 32]])
+    println(read(mut d, c.write_message("x".to_bytes())!))    // out: x
+
+    // An ephemeral key of small order, which XX's responder takes in and then can't use, and a
+    // static one an IK initiator was given.
+    var xi = NoiseHandshake.responder("Noise_XX_25519_ChaChaPoly_SHA256")
+    xi.set_static(desktop.copy())
+    println("[{read(mut xi, [0; 32])}]")    // out: []
+    match xi.write_message([]) {
+        ok(_) => println("written"),
+        err(e) => println("{e}: {e.message()}"),    // out: SmallOrder: a public key in the Noise handshake is of small order
+    }
+    var ii = NoiseHandshake.initiator(IK)
+    ii.set_static(phone.copy())
+    ii.set_remote_static(X25519PublicKey.from_bytes(from_hex("e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800")!)!)
+    match ii.write_message([]) {
+        ok(_) => println("written"),
+        err(e) => println("{e}"),    // out: SmallOrder
+    }
+
+    // A one-way pattern: the initiator writes, and the responder reads.
+    var n1 = NoiseHandshake.initiator("Noise_N_25519_ChaChaPoly_SHA256")
+    n1.set_remote_static(desktop.public_key())
+    var n2 = NoiseHandshake.responder("Noise_N_25519_ChaChaPoly_SHA256")
+    n2.set_static(desktop.copy())
+    println(read(mut n2, n1.write_message("token".to_bytes())!))    // out: token
+    var one = n1.transport()
+    var other = n2.transport()
+    println(String.from_utf8(other.decrypt(one.encrypt("sealed".to_bytes()))!)!)    // out: sealed
+
+    // A message that's not the next one doesn't decrypt, and leaves the nonce where it was.
+    let m0 = to_desktop.encrypt("m0".to_bytes())
+    let m1 = to_desktop.encrypt("m1".to_bytes())
+    println("{to_phone.decrypt(m1.copy()) == none} {String.from_utf8(to_phone.decrypt(m0.copy())!)!} {to_phone.decrypt(m0) == none} {String.from_utf8(to_phone.decrypt(m1)!)!}")    // out: true m0 true m1
+
+    // Rekeying one way: both sides at the same place, then only one.
+    to_phone.rekey_outbound()
+    to_desktop.rekey_inbound()
+    println(String.from_utf8(to_desktop.decrypt(to_phone.encrypt("after".to_bytes()))!)!)    // out: after
+    to_phone.rekey_outbound()
+    println("{to_desktop.decrypt(to_phone.encrypt("lost".to_bytes())) == none}")    // out: true
+
+    // NN with fixed ephemeral keys, and its transport keys worked out a second way.
+    let nn = "Noise_NN_25519_ChaChaPoly_SHA256"
+    let ei = X25519Key.from_bytes([1; 32])!
+    let er = X25519Key.from_bytes([2; 32])!
+    var p = NoiseHandshake.initiator(nn)
+    p.set_ephemeral(ei.copy())
+    var q = NoiseHandshake.responder(nn)
+    q.set_ephemeral(er.copy())
+    println("[{read(mut q, p.write_message([])!)}]")    // out: []
+    let reply = q.write_message([])!
+    println("[{read(mut p, reply.copy())}]")    // out: []
+    var tp = p.transport()
+    var tq = q.transport()
+
+    // The name is 32 bytes, so it's h and ck as it is. Then the prologue, which is empty, and
+    // the first message's key and empty payload are hashed in, then the second's key. ee is the
+    // only key mixed: HKDF gives ck and the key the second payload's tag is sealed with, and
+    // Split's two keys are HKDF of ck again.
+    var h = nn.to_bytes()
+    let ck = h.copy()
+    h = mix(h, [])
+    h = mix(h, ei.public_key().bytes())
+    h = mix(h, [])
+    h = mix(h, er.public_key().bytes())
+    let ee = hmac_sha256(ck, ei.exchange(er.public_key())!)
+    let ck2 = hmac_sha256(ee.copy(), [1])
+    var key_in = ck2.copy()
+    key_in.push(2)
+    let tag = ChaCha20Poly1305.new(hmac_sha256(ee, key_in)).encrypt(nonce(0), [], h.copy())
+    var want = er.public_key().bytes()
+    want.extend(tag.copy())
+    println("{reply == want}")    // out: true
+    h = mix(h, tag)
+    let temp = hmac_sha256(ck2, [])
+    let k1 = hmac_sha256(temp.copy(), [1])
+    var then = k1.copy()
+    then.push(2)
+    let k2 = hmac_sha256(temp, then)
+
+    let c1 = ChaCha20Poly1305.new(k1.copy())
+    let c2 = ChaCha20Poly1305.new(k2)
+    println("{tp.encrypt("a".to_bytes()) == c1.encrypt(nonce(0), "a".to_bytes())} {tq.encrypt("b".to_bytes()) == c2.encrypt(nonce(0), "b".to_bytes())}")    // out: true true
+    println("{tp.encrypt("c".to_bytes()) == c1.encrypt(nonce(1), "c".to_bytes())}")    // out: true
+
+    // REKEY: the key is the first 32 bytes of 32 zeros sealed under nonce 2^64 - 1, and the
+    // nonce goes on from 2.
+    var max: List<u8> = [0xFF; 12]
+    for i in 0usize..4 {
+        max[i] = 0
+    }
+    let rekeyed = ChaCha20Poly1305.new(c1.encrypt(max, [0; 32])[..32])
+    tp.rekey_outbound()
+    println("{tp.encrypt("d".to_bytes()) == rekeyed.encrypt(nonce(2), "d".to_bytes())}")    // out: true
+    println("{tp.handshake_hash() == h} {tq.handshake_hash() == h}")    // out: true true
+
+    // The names it knows, and some it doesn't.
+    var known = List<String>()
+    for n in ["Noise_XXpsk3_25519_ChaChaPoly_SHA256", "Noise_NNpsk0+psk2_25519_AESGCM_BLAKE2s", "Noise_I1X1_25519_ChaChaPoly_BLAKE2b", "Noise_XX_448_ChaChaPoly_SHA256", "Noise_XX_25519_ChaChaPoly_SHA384", "Noise_XXpsk4_25519_ChaChaPoly_SHA256", "Noise_NNpsk2+psk0_25519_ChaChaPoly_SHA256", "Noise_XXfallback_25519_ChaChaPoly_SHA256", "Noise_XX_25519_ChaChaPoly", "noise_XX_25519_ChaChaPoly_SHA256"] {
+        known.push("{NoiseHandshake.supports(String(n))}")
+    }
+    println(known.join(" "))    // out: true true true false false false false false false false
+}
