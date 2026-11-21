@@ -1,11 +1,11 @@
 ---
 title: std.env
-description: The program's command-line arguments and environment variables, as UTF-8 Strings on every platform, and the system it runs on.
+description: The program's command-line arguments and environment variables, as UTF-8 Strings on every platform, the system it runs on, and the user it runs as, elevated or not.
 ---
 
 # `std.env`
 
-The program's command line, its environment, and the system it runs on.
+The program's command line, its environment, the system it runs on, and the user it runs as.
 
 ```calx
 import std.env.{args}
@@ -35,6 +35,9 @@ fn main() {
 | `os() -> String` | The system the program runs on, `"windows"`, `"linux"` or `"macos"`, as Rust's `std::env::consts::OS` names them, for the few things a script does differently on each. A program is built for one system, so it's the same on every call |
 | `arch() -> String` | The processor the program was built for, `"x86_64"` or `"aarch64"`, as Rust's `std::env::consts::ARCH` names them. An x64 program that Windows or macOS runs on an Arm processor, translating it as it goes, says `"x86_64"` |
 | `native_arch() -> String` | The processor the system has: `arch()`, but `"aarch64"` for an x64 program that Windows on Arm or macOS's Rosetta translates. For choosing which build of a program to download, as `calx update` does. Python's `platform.machine()` says what the system says to the program, which is `AMD64` under Windows' translation |
+| `is_elevated() -> bool` | Whether the program runs with the system's full rights, which every program it starts gets too: as root on Linux and macOS, or on Windows with an elevated token ([the user](#the-user)) |
+| `user_name() -> String?` | The name of the user the program runs as: Windows' account name, without its domain, or the effective user id's name in Linux's and macOS's user database. `none` for a user id with no entry there, as a container can be started with |
+| `user_id() -> u32?` | The effective user id on Linux and macOS, 0 for root, as Python's `os.geteuid()` gives it. `none` on Windows, which names users by SID |
 
 Run a program with arguments by putting them after `--`: `calx run tool.calx -- --threads 24` ([the calx command](../reference/command.md)). [`std.cli`](cli.md) reads them into a struct, as options, flags and arguments by place, with `--help`.
 
@@ -84,5 +87,36 @@ fn main() {
     println("{shell == "cmd" or shell == "sh"}")    // out: true
 }
 ```
+
+## The user
+
+A program that starts others, such as a server that runs agents or a build that runs scripts, gives them its own rights. `is_elevated()` lets it refuse to run with the system's full rights unless it's told to:
+
+```calx
+import std.env
+
+// Whether to go on: not with full rights, unless --allow-root says to.
+fn may_run(allow_root: bool) -> bool {
+    if env.is_elevated() and not allow_root {
+        eprintln("refusing to run as {env.user_name() ?? String("root")}, as what this starts would get the same rights; pass --allow-root to run anyway")
+        return false
+    }
+    return true
+}
+
+fn main() {
+    println("{may_run(true)}")    // out: true
+    println("{env.user_name() != none}")    // out: true
+}
+```
+
+| System | `is_elevated()` is true | As Python says |
+| --- | --- | --- |
+| Linux, macOS | The effective user id is 0, root's, as it is under `sudo` | `os.geteuid() == 0` |
+| Windows | The process's token is elevated (`GetTokenInformation` with `TokenElevation`): an Administrator's once UAC has asked, as in a terminal opened with "Run as administrator", an Administrator's always where UAC is off, and SYSTEM's, as a service's can be | `ctypes.windll.shell32.IsUserAnAdmin()` |
+
+An Administrator's program that UAC hasn't asked for runs with a filtered token, without the Administrators group's rights, so it isn't elevated.
+
+`user_name()` is the name Python's `getpass.getuser()` gives where no environment variable sets another: `getpass` reads `LOGNAME`, `USER`, `LNAME` and `USERNAME` first, which a program's starter can set to anything, and `user_name()` asks the system. On Linux and macOS it's `getpwuid(geteuid())`'s name, so `root` under `sudo`, and on Windows `GetUserNameW`'s. `user_id()` is `geteuid()`, and is `none` on Windows.
 
 `std.env` is written in Calx: [std/env.calx](../../std/env.calx).

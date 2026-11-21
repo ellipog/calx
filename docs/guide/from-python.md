@@ -23,6 +23,8 @@ This page puts the Python you know next to the Calx that does the same. It assum
 | `sys.exit(2)` | `exit(2)` from [`std.process`](../std/process.md), which returns `never`, so it can end a function that returns a value |
 | `sys.exit("bad input")` | A function of your own that prints it and calls `exit`, declared `-> never` ([functions that never return](../reference/functions.md#functions-that-never-return)) |
 | `os.environ.get("HOME")` | `variable("HOME")` from [`std.env`](../std/env.md), a `String?` |
+| `os.geteuid() == 0`, `ctypes.windll.shell32.IsUserAnAdmin()` | `is_elevated()` from [`std.env`](../std/env.md#the-user), on every system |
+| `getpass.getuser()`, `os.geteuid()` | `user_name()` and `user_id()` from [`std.env`](../std/env.md#the-user), each optional |
 | `input()`, `for line in sys.stdin:` | `Lines()` from [`std.io`](../std/io.md), whose `next()` gives each line, then `none` |
 | `print(s)`, `print(s, end="")`, `print(s, file=sys.stderr)` | `println(s)`, `print(s)`, `eprintln(s)` ([printing](../reference/printing.md)) |
 | `black`, `ruff format` | `calx fmt`, one format with no settings ([formatting](../reference/command.md#formatting)) |
