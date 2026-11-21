@@ -1,9 +1,10 @@
-/// TCP connections, driven by events (D33, D92).
+/// TCP connections and UDP sockets, driven by events (D33, D92, CLX-412).
 ///
-/// A `Net` holds listening sockets and connections. `poll` waits until something happens and
-/// reports it as events: a connection accepted or opened, bytes received, a connection closed,
-/// or another thread waking it. The runtime keeps what arrived until `read` takes it, and what
-/// `write` queued until the socket takes it, so nothing here waits for the network except `poll`.
+/// A `Net` holds listening sockets, connections and UDP sockets. `poll` waits until something
+/// happens and reports it as events: a connection accepted or opened, bytes received, a
+/// connection closed, datagrams arrived, or another thread waking it. The runtime keeps what
+/// arrived until `read` or `receive_from` takes it, and what `write` queued until the socket takes
+/// it, so nothing here waits for the network except `poll`.
 module std.net
 
 import std.fs.{File}
@@ -32,6 +33,17 @@ extern "C" {
     fn cx_net_peer(net: u64, conn: u32, out: *u8) -> u32
     fn cx_net_error_kind() -> u32
     fn cx_net_error_code() -> i32
+    fn cx_net_udp_open(net: u64, host: *const u8, len: usize, port: u16, reuse: bool) -> u32
+    fn cx_net_udp_port(net: u64, id: u32) -> u16
+    fn cx_net_udp_send(net: u64, id: u32, from: *const u8, n: usize, to: *const u8, family: u32) -> i32
+    fn cx_net_udp_size(net: u64, id: u32) -> i64
+    fn cx_net_udp_take(net: u64, id: u32, to: *u8, from: *u8) -> u32
+    fn cx_net_udp_join(net: u64, id: u32, group: *const u8, family: u32, index: u32, leave: bool) -> bool
+    fn cx_net_udp_option(net: u64, id: u32, which: u32, value: u32) -> bool
+    fn cx_net_udp_close(net: u64, id: u32)
+    fn cx_net_interfaces() -> i64
+    fn cx_net_interfaces_copy(to: *u8)
+    fn cx_net_host_name(to: *u8, cap: usize) -> usize
 }
 
 /// Why opening a `Net`, listening or connecting failed.
@@ -112,6 +124,59 @@ pub enum Ip {
 }
 
 impl Ip {
+    /// The address that `text` writes, as Python's `ipaddress.ip_address` reads it: four decimal
+    /// numbers for IPv4, `192.168.1.20`, without leading zeros, and IPv6 in any form RFC 4291
+    /// allows, `::1`, `fe80::1`, `::ffff:192.0.2.1`, with a scope as a number after `%`,
+    /// `fe80::1%3`. `none` for anything else, a host name too: `connect` and `bind_udp` look those
+    /// up.
+    pub fn parse(text: String) -> Ip? {
+        if text.contains(":") {
+            return parse_v6(text)
+        }
+        let b = parse_v4(text) else return none
+        return some(Ip.V4(b))
+    }
+
+    /// Whether it's an IPv4 address.
+    pub fn is_v4(self) -> bool {
+        return match self {
+            Ip.V4(_) => true,
+            Ip.V6(_, _) => false,
+        }
+    }
+
+    /// Whether it's a loopback address, `127.0.0.0/8` or `::1`.
+    pub fn is_loopback(self) -> bool {
+        return match self {
+            Ip.V4(b) => b[0] == 127,
+            Ip.V6(b, _) => {
+                var rest = b[15] == 1
+                let count: usize = 15
+                for i in 0..count {
+                    rest = rest and b[i] == 0
+                }
+                rest
+            },
+        }
+    }
+
+    /// Whether it's link-local, `169.254.0.0/16` or `fe80::/10`, which reaches only the
+    /// machines on the same link, and as IPv6 needs its scope to say which link.
+    pub fn is_link_local(self) -> bool {
+        return match self {
+            Ip.V4(b) => b[0] == 169 and b[1] == 254,
+            Ip.V6(b, _) => b[0] == 0xFE and (b[1] & 0xC0) == 0x80,
+        }
+    }
+
+    /// Whether it's a multicast group's address, `224.0.0.0/4` or `ff00::/8`.
+    pub fn is_multicast(self) -> bool {
+        return match self {
+            Ip.V4(b) => (b[0] & 0xF0) == 0xE0,
+            Ip.V6(b, _) => b[0] == 0xFF,
+        }
+    }
+
     /// The address as RFC 5952 writes it: `127.0.0.1`, `::1`, `2001:db8::8:800:200c:417a`,
     /// `::ffff:192.0.2.1` for an IPv4-mapped address, and `fe80::1%3` with a scope.
     pub fn to_string(self) -> String {
@@ -206,6 +271,379 @@ fn v6_text(b: [u8; 16]) -> String {
     return out
 }
 
+// Four decimal numbers from 0 to 255 with dots between, without leading zeros, as Python's
+// `ipaddress` takes them since 3.9.5, since some systems read a leading zero as octal.
+fn parse_v4(text: String) -> [u8; 4]? {
+    let parts = text.split(".")
+    if parts.len() != 4 {
+        return none
+    }
+    var out: [u8; 4] = [0; 4]
+    let count: usize = 4
+    for i in 0..count {
+        let p = parts[i].copy()
+        if p.is_empty() or p.len() > 3 or (p.len() > 1 and p.byte_at(0) == 48) {
+            return none
+        }
+        var v: u32 = 0
+        for k in 0..p.len() {
+            let c = p.byte_at(k)
+            if c < 48 or c > 57 {
+                return none
+            }
+            v = v * 10 + u32(c - 48)
+        }
+        if v > 255 {
+            return none
+        }
+        out[i] = u8.wrap(v)
+    }
+    return some(out)
+}
+
+// A hex digit's value, or 16 for a byte that isn't one.
+fn hex_digit(c: u8) -> u32 {
+    if c >= 48 and c <= 57 {
+        return u32(c - 48)
+    }
+    if c >= 97 and c <= 102 {
+        return u32(c - 87)
+    }
+    if c >= 65 and c <= 70 {
+        return u32(c - 55)
+    }
+    return 16
+}
+
+// The 16-bit groups of one side of `::`, an IPv4 address as the last two if `last` lets it.
+fn v6_groups(text: String, last: bool, out: mut List<u32>) -> bool {
+    if text.is_empty() {
+        return true
+    }
+    let parts = text.split(":")
+    for i in 0..parts.len() {
+        let p = parts[i].copy()
+        if last and i == parts.len() - 1 and p.contains(".") {
+            let b = parse_v4(p) else return false
+            out.push((u32(b[0]) << 8) | u32(b[1]))
+            out.push((u32(b[2]) << 8) | u32(b[3]))
+            continue
+        }
+        if p.is_empty() or p.len() > 4 {
+            return false
+        }
+        var v: u32 = 0
+        for k in 0..p.len() {
+            let d = hex_digit(p.byte_at(k))
+            if d == 16 {
+                return false
+            }
+            v = (v << 4) | d
+        }
+        out.push(v)
+    }
+    return true
+}
+
+fn parse_v6(full: String) -> Ip? {
+    var scope: u32 = 0
+    var end = full.len()
+    if let at = full.find("%") {
+        let digits = full[at + 1..]
+        let s = u32.parse(digits) else return none
+        scope = s
+        if digits.byte_at(0) == 43 {
+            return none
+        }
+        end = at
+    }
+    let text = full[..end]
+    var head = List<u32>()
+    var tail = List<u32>()
+    if let at = text.find("::") {
+        let rest = text[at + 2..]
+        if rest.contains("::") {
+            return none
+        }
+        if not v6_groups(text[..at], false, mut head) or not v6_groups(rest, true, mut tail) {
+            return none
+        }
+        if head.len() + tail.len() > 7 {
+            return none
+        }
+    } else {
+        if not v6_groups(text, true, mut head) or head.len() != 8 {
+            return none
+        }
+    }
+    var b: [u8; 16] = [0; 16]
+    for i in 0..head.len() {
+        b[2 * i] = u8.wrap(head[i] >> 8)
+        b[2 * i + 1] = u8.wrap(head[i])
+    }
+    let start = 8 - tail.len()
+    for i in 0..tail.len() {
+        b[2 * (start + i)] = u8.wrap(tail[i] >> 8)
+        b[2 * (start + i) + 1] = u8.wrap(tail[i])
+    }
+    return some(Ip.V6(b, scope))
+}
+
+// An address as the runtime takes and gives it, 22 bytes: the address, the port and an IPv6
+// scope, both big-endian, with its family, 4 or 6.
+fn address_bytes(a: Address) -> (List<u8>, u32) {
+    var out: List<u8> = [0; 22]
+    var family: u32 = 4
+    match a.ip {
+        Ip.V4(b) => {
+            for i in 0usize..4 {
+                out[i] = b[i]
+            }
+        },
+        Ip.V6(b, scope) => {
+            family = 6
+            for i in 0usize..16 {
+                out[i] = b[i]
+            }
+            out[18] = u8.wrap(scope >> 24)
+            out[19] = u8.wrap(scope >> 16)
+            out[20] = u8.wrap(scope >> 8)
+            out[21] = u8.wrap(scope)
+        },
+    }
+    out[16] = u8.wrap(u32(a.port) >> 8)
+    out[17] = u8.wrap(a.port)
+    return (out, family)
+}
+
+fn address_from(out: List<u8>, at: usize, family: u32) -> Address? {
+    let port = u16.wrap((u32(out[at + 16]) << 8) | u32(out[at + 17]))
+    if family == 4 {
+        return some(Address { ip: Ip.V4([out[at], out[at + 1], out[at + 2], out[at + 3]]), port: port })
+    }
+    if family != 6 {
+        return none
+    }
+    var b: [u8; 16] = [0; 16]
+    let size: usize = 16
+    for i in 0..size {
+        b[i] = out[at + i]
+    }
+    let scope = (u32(out[at + 18]) << 24) | (u32(out[at + 19]) << 16) | (u32(out[at + 20]) << 8) | u32(out[at + 21])
+    return some(Address { ip: Ip.V6(b, scope), port: port })
+}
+
+/// A datagram that arrived on a UDP socket, as `receive_from` gives it.
+pub struct Datagram {
+    /// What it held.
+    pub bytes: List<u8>
+    /// Where it came from: the address and port of the socket that sent it.
+    pub from: Address
+}
+
+/// A UDP socket, which `net.bind_udp` opens: it sends datagrams to any address, and the poll of the
+/// `Net` it's in reports `Datagram` when some arrive. It's `Copy`, and copies are the same socket.
+pub struct Udp {
+    number: u32
+    net: u32
+    handle: u64
+}
+
+// Which option `cx_net_udp_option` sets.
+const OPT_MULTICAST_TTL: u32 = 1
+const OPT_MULTICAST_LOOP: u32 = 2
+const OPT_TTL: u32 = 3
+const OPT_BROADCAST: u32 = 4
+const OPT_MULTICAST_IF: u32 = 5
+
+impl Udp {
+    /// The socket's number, which no other socket or connection its `Net` has at once has.
+    pub fn id(self) -> u32 {
+        return self.number
+    }
+
+    /// The port it's bound to, which the system picked if `bind_udp` was given 0. 0 once it's
+    /// closed.
+    pub fn port(self) -> u16 {
+        return unsafe { cx_net_udp_port(self.handle, self.number) }
+    }
+
+    /// Sends `bytes` as one datagram to `to`, as Python's `sock.sendto(bytes, (host, port))`
+    /// does: at once, or, if the system has no room for it now, as soon as it has, before any
+    /// sent after it. A datagram can be lost on the way, as UDP's are, and nothing says so. An
+    /// IPv6 address is an error on an IPv4 socket, and so is one the system can't send to, such
+    /// as a network it has no route to.
+    pub fn send_to(self, bytes: List<u8>, to: Address) ! NetError {
+        let (raw, family) = address_bytes(to)
+        let r = unsafe { cx_net_udp_send(self.handle, self.number, bytes.as_ptr(), bytes.len(), raw.as_ptr(), family) }
+        if r < 0 {
+            fail last_error()
+        }
+    }
+
+    /// The next datagram that has arrived, with where it came from, as Python's
+    /// `sock.recvfrom(65535)` gives it, or `none` once every one has been taken. A `Datagram`
+    /// event says some have arrived, and each waits until it's taken: up to 1 MiB of them, past
+    /// which more are dropped, as a full socket buffer drops them.
+    pub fn receive_from(self) -> Datagram? {
+        let size = unsafe { cx_net_udp_size(self.handle, self.number) }
+        if size < 0 {
+            return none
+        }
+        let n = usize.wrap(size)
+        var bytes = List<u8>()
+        var from: List<u8> = [0; 22]
+        unsafe {
+            bytes.reserve(n)
+            let family = cx_net_udp_take(self.handle, self.number, bytes.as_mut_ptr(), from.as_mut_ptr())
+            bytes.set_len(n)
+            let a = address_from(from, 0, family) else return none
+            return some(Datagram { bytes: bytes, from: a })
+        }
+    }
+
+    /// Joins the multicast group `group` on the interface whose index is `index`, or the one
+    /// the system picks if it's 0, as Python's `IP_ADD_MEMBERSHIP` and `IPV6_JOIN_GROUP` do, so
+    /// datagrams sent to the group on that interface arrive here too. An IPv4 group needs an
+    /// IPv4 socket, or one bound to every address, and an IPv6 group an IPv6 one.
+    pub fn join_multicast(self, group: Ip, index: u32 = 0) ! NetError {
+        let (raw, family) = address_bytes(Address { ip: group, port: 0 })
+        if not unsafe { cx_net_udp_join(self.handle, self.number, raw.as_ptr(), family, index, false) } {
+            fail last_error()
+        }
+    }
+
+    /// Leaves a group `join_multicast` joined on that interface.
+    pub fn leave_multicast(self, group: Ip, index: u32 = 0) ! NetError {
+        let (raw, family) = address_bytes(Address { ip: group, port: 0 })
+        if not unsafe { cx_net_udp_join(self.handle, self.number, raw.as_ptr(), family, index, true) } {
+            fail last_error()
+        }
+    }
+
+    fn option(self, which: u32, value: u32) ! NetError {
+        if not unsafe { cx_net_udp_option(self.handle, self.number, which, value) } {
+            fail last_error()
+        }
+    }
+
+    /// How many routers the multicast datagrams it sends may cross, `IP_MULTICAST_TTL` and
+    /// `IPV6_MULTICAST_HOPS`: 1 to start with, which keeps them on the local network.
+    pub fn set_multicast_ttl(self, hops: u8) ! NetError {
+        try self.option(OPT_MULTICAST_TTL, u32(hops))
+    }
+
+    /// Whether the multicast datagrams it sends come back to sockets on this machine that joined
+    /// the group, this one too, `IP_MULTICAST_LOOP`: they do to start with.
+    pub fn set_multicast_loopback(self, on: bool) ! NetError {
+        try self.option(OPT_MULTICAST_LOOP, if on { 1 } else { 0 })
+    }
+
+    /// The interface its multicast datagrams go out on, by its index, or the one the system picks
+    /// for 0, `IP_MULTICAST_IF`. A datagram waiting for room goes out on the one it was sent on.
+    pub fn set_multicast_interface(self, index: u32) ! NetError {
+        try self.option(OPT_MULTICAST_IF, index)
+    }
+
+    /// How many routers the datagrams it sends to one address may cross, `IP_TTL` and
+    /// `IPV6_UNICAST_HOPS`.
+    pub fn set_ttl(self, hops: u8) ! NetError {
+        try self.option(OPT_TTL, u32(hops))
+    }
+
+    /// Whether it may send to a broadcast address, such as `255.255.255.255`, `SO_BROADCAST`.
+    pub fn set_broadcast(self, on: bool) ! NetError {
+        try self.option(OPT_BROADCAST, if on { 1 } else { 0 })
+    }
+
+    /// Closes the socket. What arrived and wasn't taken is dropped, and so is what waited for room
+    /// to be sent. A `Datagram` event for it after this names a socket with nothing to take.
+    pub fn close(self) {
+        unsafe {
+            cx_net_udp_close(self.handle, self.number)
+        }
+    }
+}
+
+/// A network interface of the machine, as `interfaces` gives it.
+pub struct Interface {
+    /// Its name: `eth0` or `en0`, or on Windows the name the network settings show, `Wi-Fi`.
+    pub name: String
+    /// Its index, which `join_multicast` and `set_multicast_interface` take, and which an IPv6
+    /// link-local address's scope is.
+    pub index: u32
+    /// Its addresses, IPv4 and IPv6, each with its scope.
+    pub addresses: List<Ip>
+    /// The length of each address's network prefix, in the same order: 24 for a `/24`.
+    pub prefixes: List<u8>
+    /// Whether it's up and connected.
+    pub up: bool
+    /// Whether it's the loopback interface, which reaches only this machine.
+    pub loopback: bool
+    /// Whether it can send and receive multicast.
+    pub multicast: bool
+}
+
+/// The machine's network interfaces and their addresses, in the system's order, as Python's
+/// `psutil.net_if_addrs()` and `net_if_stats()` give them, or `ifaddr.get_adapters()`. They
+/// change as networks come and go, so a program that keeps them asks again.
+pub fn interfaces() -> List<Interface> ! NetError {
+    let size = unsafe { cx_net_interfaces() }
+    if size < 0 {
+        fail last_error()
+    }
+    let n = usize.wrap(size)
+    var raw = List<u8>()
+    unsafe {
+        raw.reserve(n)
+        cx_net_interfaces_copy(raw.as_mut_ptr())
+        raw.set_len(n)
+    }
+    var out = List<Interface>()
+    var at: usize = 0
+    while at + 7 <= n {
+        let index = (u32(raw[at]) << 24) | (u32(raw[at + 1]) << 16) | (u32(raw[at + 2]) << 8) | u32(raw[at + 3])
+        let flags = raw[at + 4]
+        let name_len = (usize(raw[at + 5]) << 8) | usize(raw[at + 6])
+        at += 7
+        let name = String.from_utf8(raw[at..at + name_len]) ?? String("?")
+        at += name_len
+        let count = (usize(raw[at]) << 8) | usize(raw[at + 1])
+        at += 2
+        var addresses = List<Ip>()
+        var prefixes = List<u8>()
+        for _ in 0..count {
+            if let a = address_from(raw, at + 1, u32(raw[at])) {
+                addresses.push(a.ip)
+                prefixes.push(raw[at + 23])
+            }
+            at += 24
+        }
+        out.push(Interface {
+            name: name,
+            index: index,
+            addresses: addresses,
+            prefixes: prefixes,
+            up: (flags & 1) != 0,
+            loopback: (flags & 2) != 0,
+            multicast: (flags & 4) != 0,
+        })
+    }
+    return out
+}
+
+/// The machine's name, as Python's `socket.gethostname()` gives it: `Elliots-PC`, or on some
+/// systems a whole domain name, `build-7.example.com`. `""` if the system won't say.
+pub fn host_name() -> String {
+    var raw = List<u8>()
+    unsafe {
+        raw.reserve(256)
+        let n = cx_net_host_name(raw.as_mut_ptr(), 256)
+        raw.set_len(n)
+    }
+    return String.from_utf8(raw) ?? String()
+}
+
 /// What a poll reports.
 pub enum Event {
     /// A listening socket accepted this new connection.
@@ -221,6 +659,8 @@ pub enum Event {
     /// A `Waker` woke the poll, or a signal did, after `wake_on_signal`. Wakes before the poll
     /// that reports them come as one.
     Woken
+    /// Datagrams arrived on the UDP socket: `receive_from` takes them, one at a time.
+    Datagram(Udp)
 }
 
 /// Wakes a `Net`'s poll from another thread, so a thread that queued something for the one
@@ -289,6 +729,23 @@ impl Net {
         return Conn { number: id, net: self.number }
     }
 
+    /// Opens a UDP socket bound to `host` and `port`, as Python's `socket(AF_INET, SOCK_DGRAM)`
+    /// and `bind((host, port))` do: the system picks the port when it's 0, which `port()` then
+    /// says. An empty host binds every address, IPv4 and IPv6, with one socket that takes both,
+    /// or every IPv4 address where the machine has no IPv6. `0.0.0.0` binds every IPv4 address,
+    /// and `::` every IPv6 address alone. With `reuse`, other sockets that ask for it too can
+    /// bind the same port, as each program with a multicast service such as mDNS does, and each
+    /// gets the multicast datagrams sent there: `SO_REUSEADDR`, and on macOS `SO_REUSEPORT`
+    /// too. Without it, a second socket on the port fails with `AddressInUse`. Its poll reports
+    /// `Datagram` when datagrams arrive.
+    pub fn bind_udp(self, host: String, port: u16, reuse: bool = false) -> Udp ! NetError {
+        let id = unsafe { cx_net_udp_open(self.handle, host.as_ptr(), host.len(), port, reuse) }
+        if id == 0xFFFFFFFF {
+            fail last_error()
+        }
+        return Udp { number: id, net: self.number, handle: self.handle }
+    }
+
     /// Waits up to `timeout_ms` milliseconds for something to happen, or forever if it's
     /// negative, and puts what happened in `events`, replacing what was there. It returns as soon
     /// as there's an event, so `events` is empty only once the time is up. A connection gets at
@@ -298,12 +755,14 @@ impl Net {
         unsafe {
             let n = cx_net_poll(self.handle, timeout_ms)
             for i in 0usize..n {
-                let conn = Conn { number: cx_net_event_conn(self.handle, i), net: self.number }
+                let id = cx_net_event_conn(self.handle, i)
+                let conn = Conn { number: id, net: self.number }
                 events.push(match cx_net_event_kind(self.handle, i) {
                     1 => Event.Accepted(conn),
                     2 => Event.Connected(conn),
                     3 => Event.Received(conn),
                     4 => Event.Closed(conn),
+                    6 => Event.Datagram(Udp { number: id, net: self.number, handle: self.handle }),
                     _ => Event.Woken,
                 })
             }
@@ -430,20 +889,7 @@ impl Net {
         unsafe {
             out.set_len(22)
         }
-        let port = u16.wrap((u32(out[16]) << 8) | u32(out[17]))
-        if family == 4 {
-            return some(Address { ip: Ip.V4([out[0], out[1], out[2], out[3]]), port: port })
-        }
-        if family != 6 {
-            return none
-        }
-        var b: [u8; 16] = [0; 16]
-        let size: usize = 16
-        for i in 0..size {
-            b[i] = out[i]
-        }
-        let scope = (u32(out[18]) << 24) | (u32(out[19]) << 16) | (u32(out[20]) << 8) | u32(out[21])
-        return some(Address { ip: Ip.V6(b, scope), port: port })
+        return address_from(out, 0, family)
     }
 }
 

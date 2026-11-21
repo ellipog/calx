@@ -130,6 +130,7 @@ fn check() {
                     }
                 }
                 Woken => {}
+                Datagram(_) => {}
             }
         }
     }

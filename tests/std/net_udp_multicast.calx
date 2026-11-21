@@ -1,0 +1,61 @@
+// std.net's UDP multicast (CLX-412): two sockets that share a port join a group, and a datagram
+// sent to the group reaches both, this program's own looped back, as `IP_MULTICAST_LOOP` sends
+// it. The group and port are new each run, so this test's other build, running at once, isn't
+// heard. And the machine's interfaces, which a program joins groups on by index.
+// firewall: listens for multicast on every address
+import std.net.{Address, Event, Ip, Net, interfaces, host_name}
+import std.random.{Random}
+
+fn main() {
+    var r = Random.system()
+    let net = Net.new()!
+    let group = Ip.V4([239, 255, u8.wrap(r.below(256)), u8.wrap(r.below(256))])
+    // On the loopback interface where it carries multicast, as on macOS, where a program needs
+    // permission for the local network (TN3179), which CI's runner hasn't; the system's choice of
+    // interface elsewhere.
+    var index: u32 = 0
+    for i in interfaces()! {
+        if i.loopback and i.multicast and i.up {
+            index = i.index
+        }
+    }
+    let a = net.bind_udp("0.0.0.0", 0, reuse: true)!
+    let b = net.bind_udp("0.0.0.0", a.port(), reuse: true)!
+    a.join_multicast(group, index)!
+    b.join_multicast(group, index)!
+    a.set_multicast_ttl(1)!
+    a.set_multicast_loopback(true)!
+    let sender = net.bind_udp("0.0.0.0", 0)!
+    sender.set_multicast_loopback(true)!
+    sender.set_multicast_interface(index)!
+    sender.send_to("to the group".to_bytes(), Address { ip: group, port: a.port() })!
+    var heard = [false, false]
+    var events = List<Event>()
+    while not heard[0] or not heard[1] {
+        net.poll(5000, mut events)
+        assert(not events.is_empty(), "the group's datagram came to both")
+        for e in events {
+            if let Event.Datagram(u) = e {
+                while let d = u.receive_from() {
+                    if d.from.port == sender.port() and d.bytes == "to the group".to_bytes() {
+                        heard[if u == a { 0usize } else { 1usize }] = true
+                    }
+                }
+            }
+        }
+    }
+    println("both heard it")    // out: both heard it
+    a.leave_multicast(group, index)!
+
+    // Every interface has a name and an index, and the loopback one has a loopback address.
+    let list = interfaces()!
+    var loopback = false
+    for i in list {
+        assert(not i.name.is_empty() and i.index != 0, "{i.name} has a name and an index")
+        assert(i.addresses.len() == i.prefixes.len(), "a prefix for each address")
+        if i.loopback {
+            loopback = loopback or i.addresses.any(|x| x.is_loopback())
+        }
+    }
+    println("{loopback} {not host_name().is_empty()}")    // out: true true
+}
