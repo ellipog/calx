@@ -259,6 +259,7 @@ fn main() ! Error {
 | `wave.open(p)`, `w.getnchannels()`, `w.readframes(w.getnframes())`, then `struct.unpack(f"<{n}h", raw)` | `Wave.open(p)` from [`std.wave`](../std/wave.md), then `w.channels`, `w.frames`, and `w.samples()` for the numbers, or `w.samples_f32()` from -1 to 1 |
 | `wave.open(p, "wb")`, `setnchannels`, `setsampwidth`, `setframerate`, `writeframes` | `Wave.from_i16(channels, rate, samples).save(p)` or `Wave.new(channels, rate, width, frames).save(p)` from [`std.wave`](../std/wave.md), the same bytes |
 | `datetime.now()`, `strftime`, `strptime` | `unsafe { Timestamp.now() }`, `format` and `parse` from [`std.time`](../std/time.md), with Python's codes |
+| `z = ZoneInfo("Europe/Oslo")`, `datetime.fromtimestamp(s, z)`, `datetime(2026, 3, 29, 8, tzinfo=z).timestamp()` | `TimeZone.named("Europe/Oslo")!`, `z.date_time(t)` and `z.timestamp(d)` from [`std.time`](../std/time.md#time-zones), with the tz database built in, so on Windows too, and Python's moments in gaps and overlaps |
 | `time.perf_counter()` | `unsafe { Instant.now() }` from [`std.time`](../std/time.md) |
 | `time.sleep(0.5)` | `unsafe { sleep(500_000_000) }`, in nanoseconds, from [`std.thread`](../std/thread.md) |
 | `random.seed(1)`, `random.choice(xs)` | `var r = Random.new(1)`, `r.pick(xs)` from [`std.random`](../std/random.md), the same numbers from a seed on every system. `Random.system()` differs each run |

@@ -1,8 +1,11 @@
-/// A monotonic clock, for measuring how long something takes.
+/// Clocks, dates and time zones: a monotonic clock, for measuring how long something takes, the
+/// wall clock, dates with their arithmetic and formats, and the IANA tz database's zones.
 ///
 /// Reading the clock needs `unsafe`. Safe Calx can't see time, so what a program computes can't
 /// depend on how fast it ran. Calcite reads the clock once per tick and records it (D44, D54).
 module std.time
+
+import std.time.zones
 
 extern "C" fn cx_clock_ns() -> u64
 
@@ -776,4 +779,518 @@ fn iso_date_time(p: mut Scan) -> DateTime? {
         }
     }
     return some(d)
+}
+
+// --- time zones -----------------------------------------------------------------------------------
+
+/// The version of the IANA tz database that `TimeZone` carries, such as `2026f`.
+pub const TZDATA_VERSION: str = zones.VERSION
+
+/// A time zone of the IANA tz database, such as `Europe/Oslo`, with its rules: its offset from
+/// UTC, summer time and every change to them the database knows of. The database is in the
+/// program, so a zone is the same on every system, Windows too, and needs no `unsafe`: its rules
+/// are data, not what the machine says. It's `Copy`.
+pub struct TimeZone {
+    // Which name it is, in zones.DATA's order.
+    entry: usize
+    // Where its TZif file's transitions, their types, the types and the abbreviations start in
+    // zones.DATA, and how many transitions there are.
+    times: usize
+    count: usize
+    kinds: usize
+    types: usize
+    chars: usize
+    // What it does after the last transition.
+    rule: ZoneRule
+}
+
+// A rule's day, from a POSIX TZ string: `Jn`, day n from 1 to 365, never counting the 29th of
+// February; `n`, day n from 0 to 365, counting it; or `Mm.w.d`, day d, 0 for Sunday, of week w of
+// month m, where week 5 is the last. Then the time on the clock it happens at, in seconds, which
+// can be negative or past a day, as RFC 9636 has it.
+struct RuleDay {
+    form: u8
+    day: i32
+    month: i32
+    week: i32
+    time: i32
+}
+
+const JULIAN: u8 = 0
+const ZERO_BASED: u8 = 1
+const MONTH_WEEK: u8 = 2
+
+// A zone's rule after its last transition: the POSIX TZ string at the end of its TZif file, such
+// as `CET-1CEST,M3.5.0,M10.5.0/3`. `present` is false where the file has none, and then the last
+// transition's type goes on.
+struct ZoneRule {
+    present: bool
+    std_off: i32
+    std_name: usize
+    std_len: usize
+    dst: bool
+    dst_off: i32
+    dst_name: usize
+    dst_len: usize
+    start: RuleDay
+    end: RuleDay
+}
+
+// What a zone's clock shows at a moment: its offset, whether it's summer time, and where its
+// abbreviation is in zones.DATA.
+struct ZoneType {
+    off: i32
+    dst: bool
+    name: usize
+    len: usize
+}
+
+// A transition near a moment, in seconds, with the offsets before and after it.
+struct Change {
+    at: i64
+    before: i32
+    after: i32
+}
+
+fn data_le32(at: usize) -> usize {
+    return usize(u32(zones.DATA[at]) | u32(zones.DATA[at + 1]) << 8 | u32(zones.DATA[at + 2]) << 16 | u32(zones.DATA[at + 3]) << 24)
+}
+
+fn data_be32(at: usize) -> u32 {
+    return u32(zones.DATA[at]) << 24 | u32(zones.DATA[at + 1]) << 16 | u32(zones.DATA[at + 2]) << 8 | u32(zones.DATA[at + 3])
+}
+
+fn data_be64(at: usize) -> i64 {
+    return i64(data_be32(at)) << 32 | i64(data_be32(at + 4))
+}
+
+// Where name `k`'s entry is in zones.DATA's index.
+fn entry_at(k: usize) -> usize {
+    return 4 + k * 16
+}
+
+fn entry_name(k: usize) -> String {
+    return data_text(data_le32(entry_at(k)), data_le32(entry_at(k) + 4))
+}
+
+fn data_text(at: usize, len: usize) -> String {
+    var out = String()
+    for i in at..(at + len) {
+        out.push(rune(zones.DATA[i]))
+    }
+    return out
+}
+
+// How name `k` compares with `name`, by their bytes.
+fn entry_cmp(k: usize, name: String) -> i32 {
+    let at = data_le32(entry_at(k))
+    let len = data_le32(entry_at(k) + 4)
+    for i in 0..len.min(name.len()) {
+        let a = zones.DATA[at + i]
+        let b = name.byte_at(i)
+        if a != b {
+            return if a < b { -1 } else { 1 }
+        }
+    }
+    return if len < name.len() { -1 } else if len > name.len() { 1 } else { 0 }
+}
+
+impl TimeZone {
+    /// The zone the IANA tz database names `name`, such as `Europe/Oslo`, `America/New_York` or
+    /// `UTC`, as Python's `ZoneInfo(name)` and Java's `ZoneId.of(name)` find it, or `none` for a
+    /// name it hasn't got. Names are matched exactly, in their case. The old names the database
+    /// keeps, such as `US/Eastern` and `Asia/Calcutta`, are there too.
+    pub fn named(name: String) -> TimeZone? {
+        var lo: usize = 0
+        var hi = zones.COUNT
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            let c = entry_cmp(mid, name)
+            if c == 0 {
+                return some(zone_at(mid))
+            }
+            if c < 0 {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        return none
+    }
+
+    /// UTC, whose offset is always 0, named `UTC`.
+    pub fn utc() -> TimeZone {
+        return TimeZone.named("UTC")!
+    }
+
+    /// Every name `named` finds, in order of their bytes: each zone's name and the old names that
+    /// lead to one, as Python's `zoneinfo.available_timezones()` gives them.
+    pub fn names() -> List<String> {
+        var out: List<String> = []
+        out.reserve(zones.COUNT)
+        for k in 0..zones.COUNT {
+            out.push(entry_name(k))
+        }
+        return out
+    }
+
+    /// The name the zone was found by, such as `Europe/Oslo`.
+    pub fn name(self) -> String {
+        return entry_name(self.entry)
+    }
+
+    /// The seconds the zone's clock is ahead of UTC at `t`, by its rules, so summer time counts:
+    /// 3600 in Oslo in winter and 7200 in summer, -18000 in New York in winter, 19800 in Kolkata.
+    pub fn offset(self, t: Timestamp) -> i32 {
+        return self.type_at(floor_div(t.unix_ms, 1000)).off
+    }
+
+    /// Whether the zone is on summer time at `t`, as its rules say.
+    pub fn is_dst(self, t: Timestamp) -> bool {
+        return self.type_at(floor_div(t.unix_ms, 1000)).dst
+    }
+
+    /// The zone's abbreviation at `t`, as the tz database has it: `CET` or `CEST` in Oslo, `EST`
+    /// or `EDT` in New York, and the offset in digits where the zone has none in letters, as
+    /// `+03` in Istanbul.
+    pub fn abbreviation(self, t: Timestamp) -> String {
+        let z = self.type_at(floor_div(t.unix_ms, 1000))
+        return data_text(z.name, z.len)
+    }
+
+    /// The date and time the zone's clock shows at `t`.
+    pub fn date_time(self, t: Timestamp) -> DateTime {
+        return t.date_time(self.offset(t))
+    }
+
+    /// The moment the zone's clock shows `d`. Where the clocks go forward and `d` never shows, in
+    /// the gap, it's moved forward by the gap's length, as java.time does: 02:30 on the night Oslo
+    /// goes to summer time is 03:30 CEST. Where the clocks go back and `d` shows twice, it's the
+    /// earlier of the two, still on summer time. Both are what Python gives with `fold=0`.
+    pub fn timestamp(self, d: DateTime) -> Timestamp {
+        let local = d.timestamp(0).unix_ms
+        let s = floor_div(local, 1000)
+        let lo = s - 172800
+        var changes: List<Change> = []
+        self.changes(lo, s + 172800, mut changes)
+        // In a gap or an overlap, by the offset before it.
+        for c in changes {
+            let a = (c.at + i64(c.before.min(c.after))) * 1000
+            let b = (c.at + i64(c.before.max(c.after))) * 1000
+            if local >= a and local < b {
+                return Timestamp { unix_ms: local - i64(c.before) * 1000 }
+            }
+        }
+        // Otherwise the clock shows it once, in the span between changes whose offset puts it there.
+        var off = self.type_at(lo).off
+        var from = lo * 1000
+        for c in changes {
+            let t = local - i64(off) * 1000
+            if t >= from and t < c.at * 1000 {
+                return Timestamp { unix_ms: t }
+            }
+            off = c.after
+            from = c.at * 1000
+        }
+        return Timestamp { unix_ms: local - i64(off) * 1000 }
+    }
+
+    // The type in effect at second `s`.
+    fn type_at(self, s: i64) -> ZoneType {
+        let n = self.count
+        if n == 0 or s >= data_be64(self.times + (n - 1) * 8) {
+            if self.rule.present {
+                return self.rule_type(s)
+            }
+            return self.type_of(if n == 0 { 0 } else { usize(zones.DATA[self.kinds + n - 1]) })
+        }
+        if s < data_be64(self.times) {
+            return self.type_of(0)
+        }
+        // The last transition at or before `s`.
+        var lo: usize = 0
+        var hi = n - 1
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2
+            if data_be64(self.times + mid * 8) <= s {
+                lo = mid
+            } else {
+                hi = mid - 1
+            }
+        }
+        return self.type_of(usize(zones.DATA[self.kinds + lo]))
+    }
+
+    fn type_of(self, k: usize) -> ZoneType {
+        let at = self.types + k * 6
+        let name = self.chars + usize(zones.DATA[at + 5])
+        var len: usize = 0
+        while zones.DATA[name + len] != 0 {
+            len += 1
+        }
+        return ZoneType { off: i32.wrap(data_be32(at)), dst: zones.DATA[at + 4] != 0, name, len }
+    }
+
+    // The type the rule gives at second `s`.
+    fn rule_type(self, s: i64) -> ZoneType {
+        let r = self.rule
+        var dst = false
+        if r.dst {
+            let (start, end) = r.transitions(year_of(s + i64(r.std_off)))
+            dst = if start < end { s >= start and s < end } else { not (s >= end and s < start) }
+        }
+        if dst {
+            return ZoneType { off: r.dst_off, dst: true, name: r.dst_name, len: r.dst_len }
+        }
+        return ZoneType { off: r.std_off, dst: false, name: r.std_name, len: r.std_len }
+    }
+
+    // The transitions after second `lo` up to `hi`, in order, with the offsets on each side.
+    fn changes(self, lo: i64, hi: i64, out: mut List<Change>) {
+        let n = self.count
+        // The first transition after `lo`.
+        var k: usize = 0
+        var top = n
+        while k < top {
+            let mid = (k + top) / 2
+            if data_be64(self.times + mid * 8) <= lo {
+                k = mid + 1
+            } else {
+                top = mid
+            }
+        }
+        while k < n {
+            let at = data_be64(self.times + k * 8)
+            if at > hi {
+                return
+            }
+            let before = self.type_of(if k == 0 { 0 } else { usize(zones.DATA[self.kinds + k - 1]) }).off
+            let after = self.type_of(usize(zones.DATA[self.kinds + k])).off
+            if before != after {
+                out.push(Change { at, before, after })
+            }
+            k += 1
+        }
+        let r = self.rule
+        if not r.present or not r.dst {
+            return
+        }
+        // The rule's, after the last transition.
+        let from = if n == 0 { lo } else { lo.max(data_be64(self.times + (n - 1) * 8)) }
+        var found: List<Change> = []
+        for y in (year_of(from) - 1)..(year_of(hi) + 2) {
+            let (start, end) = r.transitions(y)
+            found.push(Change { at: start, before: r.std_off, after: r.dst_off })
+            found.push(Change { at: end, before: r.dst_off, after: r.std_off })
+        }
+        found.sort_by(|a, b| a.at.cmp(b.at))
+        // Transitions at one moment, as where summer time lasts all year, count as one.
+        var merged: List<Change> = []
+        for c in found {
+            if c.at <= from or c.at > hi {
+                continue
+            }
+            let m = merged.len()
+            if m > 0 and merged[m - 1].at == c.at {
+                merged[m - 1].after = c.after
+            } else {
+                merged.push(c)
+            }
+        }
+        for c in merged {
+            if c.before != c.after {
+                out.push(c)
+            }
+        }
+    }
+}
+
+// The year second `s` is in, in UTC.
+fn year_of(s: i64) -> i32 {
+    return Timestamp { unix_ms: s * 1000 }.date_time(0).year
+}
+
+impl ZoneRule {
+    // When summer time starts and ends in `year`, in seconds since 1970 in UTC. The start is on
+    // standard time's clock, and the end on summer time's.
+    fn transitions(self, year: i32) -> (i64, i64) {
+        return (self.start.local(year) - i64(self.std_off), self.end.local(year) - i64(self.dst_off))
+    }
+}
+
+impl RuleDay {
+    // The moment on the zone's clock in `year`, as seconds since 1970 if the clock were UTC's.
+    fn local(self, year: i32) -> i64 {
+        let first = days_from_civil(i64(year), 1, 1)
+        var days: i64 = 0
+        if self.form == JULIAN {
+            days = first + i64(self.day) - 1 + (if is_leap(year) and self.day >= 60 { 1 } else { 0 })
+        } else if self.form == ZERO_BASED {
+            days = first + i64(self.day)
+        } else {
+            let month_first = days_from_civil(i64(year), i64(self.month), 1)
+            // 1970-01-01 was a Thursday, day 4 counted from Sunday.
+            let weekday = floor_mod(month_first + 4, 7)
+            var day = floor_mod(i64(self.day) - weekday, 7) + i64(self.week - 1) * 7
+            let last = i64(days_in_month(year, self.month))
+            while day >= last {
+                day -= 7
+            }
+            days = month_first + day
+        }
+        return days * 86400 + i64(self.time)
+    }
+}
+
+// The zone at name `k`, its TZif file read as far as where its parts start.
+fn zone_at(k: usize) -> TimeZone {
+    let b = data_le32(entry_at(k) + 8)
+    let end = b + data_le32(entry_at(k) + 12)
+    // The version 1 block, which only older readers need.
+    let v1 = usize(data_be32(b + 20)) + usize(data_be32(b + 24)) + usize(data_be32(b + 28)) * 8 +
+        usize(data_be32(b + 32)) * 5 + usize(data_be32(b + 36)) * 6 + usize(data_be32(b + 40))
+    let h = b + 44 + v1
+    let isut = usize(data_be32(h + 20))
+    let isstd = usize(data_be32(h + 24))
+    let leap = usize(data_be32(h + 28))
+    let count = usize(data_be32(h + 32))
+    let typecnt = usize(data_be32(h + 36))
+    let charcnt = usize(data_be32(h + 40))
+    let times = h + 44
+    let kinds = times + count * 8
+    let types = kinds + count
+    let chars = types + typecnt * 6
+    let foot = chars + charcnt + leap * 12 + isstd + isut
+    return TimeZone { entry: k, times, count, kinds, types, chars, rule: parse_rule(foot + 1, end - 1) }
+}
+
+// A POSIX TZ string, in zones.DATA from `at` up to `end`, as RFC 9636 extends it: standard time's
+// name and offset, then summer time's name, its offset, and when it starts and ends.
+fn parse_rule(at: usize, end: usize) -> ZoneRule {
+    let day = RuleDay { form: JULIAN, day: 1, month: 1, week: 1, time: 0 }
+    var r = ZoneRule {
+        present: false,
+        std_off: 0,
+        std_name: at,
+        std_len: 0,
+        dst: false,
+        dst_off: 0,
+        dst_name: at,
+        dst_len: 0,
+        start: day,
+        end: day,
+    }
+    if at >= end {
+        return r
+    }
+    var p = RuleScan { at, end }
+    p.name(mut r.std_name, mut r.std_len)
+    // POSIX counts hours west of UTC, so `CET-1` is an hour ahead of it.
+    r.std_off = 0 - p.time()
+    r.present = true
+    if p.at >= end {
+        return r
+    }
+    r.dst = true
+    p.name(mut r.dst_name, mut r.dst_len)
+    r.dst_off = r.std_off + 3600
+    if p.at < end and zones.DATA[p.at] != b',' {
+        r.dst_off = 0 - p.time()
+    }
+    // Summer time with no rule takes the United States', as POSIX suggests; zic always writes one.
+    r.start = RuleDay { form: MONTH_WEEK, day: 0, month: 3, week: 2, time: 7200 }
+    r.end = RuleDay { form: MONTH_WEEK, day: 0, month: 11, week: 1, time: 7200 }
+    if p.take(b',') {
+        r.start = p.day()
+        if p.take(b',') {
+            r.end = p.day()
+        }
+    }
+    return r
+}
+
+struct RuleScan {
+    at: usize
+    end: usize
+}
+
+impl RuleScan {
+    fn take(mut self, c: u8) -> bool {
+        if self.at < self.end and zones.DATA[self.at] == c {
+            self.at += 1
+            return true
+        }
+        return false
+    }
+
+    // A name, `CET` or `<+0530>`: where it starts and how long it is, without the brackets.
+    fn name(mut self, start: mut usize, len: mut usize) {
+        if self.take(b'<') {
+            start = self.at
+            while self.at < self.end and zones.DATA[self.at] != b'>' {
+                self.at += 1
+            }
+            len = self.at - start
+            self.at += 1
+            return
+        }
+        start = self.at
+        while self.at < self.end and is_letter(zones.DATA[self.at]) {
+            self.at += 1
+        }
+        len = self.at - start
+    }
+
+    // `[+-]hh[:mm[:ss]]`, in seconds.
+    fn time(mut self) -> i32 {
+        var sign: i32 = 1
+        if self.take(b'-') {
+            sign = -1
+        } else {
+            _ = self.take(b'+')
+        }
+        var secs = self.digits() * 3600
+        if self.take(b':') {
+            secs += self.digits() * 60
+            if self.take(b':') {
+                secs += self.digits()
+            }
+        }
+        return sign * secs
+    }
+
+    fn digits(mut self) -> i32 {
+        var v: i32 = 0
+        while self.at < self.end and zones.DATA[self.at] >= b'0' and zones.DATA[self.at] <= b'9' {
+            v = v * 10 + i32(zones.DATA[self.at] - b'0')
+            self.at += 1
+        }
+        return v
+    }
+
+    // `Jn`, `n` or `Mm.w.d`, then `/time`, or 02:00 without one.
+    fn day(mut self) -> RuleDay {
+        var d = RuleDay { form: ZERO_BASED, day: 0, month: 1, week: 1, time: 7200 }
+        if self.take(b'J') {
+            d.form = JULIAN
+            d.day = self.digits()
+        } else if self.take(b'M') {
+            d.form = MONTH_WEEK
+            d.month = self.digits()
+            _ = self.take(b'.')
+            d.week = self.digits()
+            _ = self.take(b'.')
+            d.day = self.digits()
+        } else {
+            d.day = self.digits()
+        }
+        if self.take(b'/') {
+            d.time = self.time()
+        }
+        return d
+    }
+}
+
+fn is_letter(c: u8) -> bool {
+    return (c >= b'A' and c <= b'Z') or (c >= b'a' and c <= b'z')
 }

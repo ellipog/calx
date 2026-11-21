@@ -1,0 +1,304 @@
+// Writes std/time/zones.calx and the table it embeds, std/time/zones.bin: every time zone of the
+// IANA tz database, for std.time's `TimeZone`, so a program finds a zone's rules on every system,
+// Windows too, which has no /usr/share/zoneinfo, and gets the same answers on each.
+//
+//     calx run tools/tz/gen_zones.calx
+//     calx run tools/tz/gen_zones.calx -- --zic /usr/local/sbin/zic
+//
+// It downloads tzdata<VERSION>.tar.gz from data.iana.org into build/tz/<VERSION> the first time,
+// checks its SHA-256 against the one below, and compiles the zones with zic, the tz database's own
+// compiler, into build/tz/<VERSION>/zoneinfo. Linux and macOS have zic in /usr/sbin; on Windows
+// it runs WSL's. `--zic` names another. To move to a new release, check its signature
+// (tzdata<VERSION>.tar.gz.asc, by Paul Eggert's key, 7E3792A9D8ACF7D633BC1588ED97E90E62AA7E34),
+// put its version and SHA-256 below, and run this.
+//
+// The zones are those of the data files every build of the database has, `backward`'s old names
+// among them, as Python's tzdata package and most systems have them: Europe/Oslo is a link to
+// Europe/Berlin there, so their history before 1970 is Berlin's. zic writes each as a TZif file
+// (RFC 9636): every transition up to 2037, then the rule that goes on from there, a POSIX TZ
+// string such as `CET-1CEST,M3.5.0,M10.5.0/3`. It writes them with `-b fat`, since zic from
+// tzcode 2023d to 2026a, which systems still ship (glibc 2.43's is one), writes slim files for
+// Canada's zones of 2026 that drop a change of abbreviation (tzdata 2026b's NEWS says so). The
+// version 1 block, the same transitions in 32 bits for old readers, is cut down to the empty one
+// `-b slim` writes, as std.time reads only the 64-bit block. Each file goes in once, however many
+// names it has.
+//
+// The table, its numbers little-endian:
+//
+//     u32                 how many names, N
+//     N x (u32, u32, u32, u32)
+//                         each name's start and length, then its zone's TZif file's start and
+//                         length, all from the table's start, in order of the names' bytes
+//     the names, one after the other
+//     the TZif files
+import std.bytes
+import std.env
+import std.fs
+import std.hash
+import std.http
+import std.path
+import std.process
+import std.process.{Command}
+import std.tar.{Tar}
+
+const VERSION: str = "2026f"
+const SHA256: str = "01b4a91cec5167ed48c11e8ab78f2048cead78ce94b0cafcad0ae8c5a3044d3d"
+const FILES: [str; 9] = ["africa", "antarctica", "asia", "australasia", "europe", "northamerica", "southamerica", "etcetera",
+    "backward"]
+
+fn stop(why: String) -> never {
+    eprintln("gen_zones: {why}")
+    process.exit(1)
+}
+
+// The release's tarball, downloaded once into `cache` and checked.
+fn tarball(cache: String) -> List<u8> {
+    let local = "{cache}/tzdata{VERSION}.tar.gz"
+    if not fs.is_file(local.copy()) {
+        let url = "https://data.iana.org/time-zones/releases/tzdata{VERSION}.tar.gz"
+        println("downloading {url}")
+        var r = http.get(url.copy(), [], 60000, 16777216)
+        match r.wait() {
+            ok(resp) => {
+                if resp.status != 200 {
+                    stop("{url} gave status {resp.status}")
+                }
+                fs.make_dir_all(cache)!
+                fs.write(local.copy(), resp.body)!
+            },
+            err(e) => stop("can't download {url}: {e}"),
+        }
+    }
+    let data = fs.read(local.copy())!
+    let sum = bytes.hex(hash.sha256(data))
+    if sum != SHA256 {
+        stop("{local} has SHA-256 {sum}, not {SHA256}")
+    }
+    return data
+}
+
+// The path as WSL sees a Windows path: `C:\a\b` is `/mnt/c/a/b`.
+fn wsl_path(p: String) -> String {
+    let s = p.replace("\\", "/")
+    if s.len() >= 2 and s.byte_at(1) == b':' {
+        return "/mnt/{s[0..1].to_lower_root()}{s[2..s.len()]}"
+    }
+    return s
+}
+
+fn be32(b: List<u8>, at: usize) -> u32 {
+    return u32(b[at]) << 24 | u32(b[at + 1]) << 16 | u32(b[at + 2]) << 8 | u32(b[at + 3])
+}
+
+fn be64(b: List<u8>, at: usize) -> i64 {
+    var v: u64 = 0
+    for k in 0usize..8 {
+        v = v << 8 | u64(b[at + k])
+    }
+    return i64.wrap(v)
+}
+
+// The TZif file `b` with its version 1 block cut down to the one `-b slim` writes: no transitions,
+// one type, and an empty abbreviation. It stops unless `b` is a file std.time reads: version 2 or
+// later, no leap seconds, transitions in order and in range, each to a type there is, and a footer.
+fn trim_tzif(name: String, b: List<u8>) -> List<u8> {
+    if b.len() < 44 or b[0] != b'T' or b[1] != b'Z' or b[2] != b'i' or b[3] != b'f' or b[4] < b'2' {
+        stop("{name} isn't a TZif file of version 2 or later")
+    }
+    // The version 1 block, which std.time skips.
+    let v1 = usize(be32(b, 20)) + usize(be32(b, 24)) + usize(be32(b, 28)) * 8 + usize(be32(b, 32)) * 5 +
+        usize(be32(b, 36)) * 6 + usize(be32(b, 40))
+    let h = 44 + v1
+    if b.len() < h + 44 or b[h] != b'T' or b[h + 4] != b[4] {
+        stop("{name} has no second header")
+    }
+    let isut = usize(be32(b, h + 20))
+    let isstd = usize(be32(b, h + 24))
+    let leap = usize(be32(b, h + 28))
+    let timecnt = usize(be32(b, h + 32))
+    let typecnt = usize(be32(b, h + 36))
+    let charcnt = usize(be32(b, h + 40))
+    if leap != 0 {
+        stop("{name} has leap seconds")
+    }
+    if typecnt == 0 or typecnt > 255 or (isut != 0 and isut != typecnt) or (isstd != 0 and isstd != typecnt) {
+        stop("{name} has {typecnt} types, {isut} UT flags and {isstd} standard flags")
+    }
+    let times = h + 44
+    let idx = times + timecnt * 8
+    let types = idx + timecnt
+    let chars = types + typecnt * 6
+    let foot = chars + charcnt + isstd + isut
+    if b.len() < foot + 2 or b[foot] != b'\n' or b[b.len() - 1] != b'\n' {
+        stop("{name} has no footer")
+    }
+    for k in (foot + 1)..(b.len() - 1) {
+        if b[k] == b'\n' {
+            stop("{name}'s footer has a line break in it")
+        }
+    }
+    for k in 0..timecnt {
+        let t = be64(b, times + k * 8)
+        if t < -(1i64 << 40) or t > (1i64 << 40) {
+            stop("{name} has a transition at {t}")
+        }
+        if k > 0 and t <= be64(b, times + (k - 1) * 8) {
+            stop("{name}'s transitions aren't in order")
+        }
+        if usize(b[idx + k]) >= typecnt {
+            stop("{name} has a transition to a type it hasn't got")
+        }
+    }
+    for k in 0..typecnt {
+        let at = types + k * 6
+        if b[at + 4] > 1 or usize(b[at + 5]) >= charcnt {
+            stop("{name}'s type {k} is out of range")
+        }
+    }
+    var out: List<u8> = []
+    out.extend(b[0..5])
+    for _ in 0..15 {
+        out.push(0)
+    }
+    for count in [0u32, 0, 0, 0, 1, 1] {
+        out.push(u8.wrap(count >> 24))
+        out.push(u8.wrap(count >> 16))
+        out.push(u8.wrap(count >> 8))
+        out.push(u8.wrap(count))
+    }
+    for _ in 0..7 {
+        out.push(0)
+    }
+    out.extend(b[h..b.len()])
+    return out
+}
+
+fn put32(out: mut List<u8>, v: usize) {
+    let x = u32.wrap(v)
+    out.push(u8.wrap(x))
+    out.push(u8.wrap(x >> 8))
+    out.push(u8.wrap(x >> 16))
+    out.push(u8.wrap(x >> 24))
+}
+
+fn main() {
+    var zic = String()
+    let a = env.args()
+    var i: usize = 0
+    while i < a.len() {
+        if a[i] == "--zic" and i + 1 < a.len() {
+            zic = a[i + 1].copy()
+            i += 2
+        } else {
+            stop("usage: calx run tools/tz/gen_zones.calx [-- --zic PATH]")
+        }
+    }
+    let here = path.parent_dir(env.script() ?? panic("run this with `calx run`")) ?? String()
+    let root = fs.absolute(path.parent_dir(path.parent_dir(here) ?? String()) ?? String())!
+    let cache = "{root}/build/tz/{VERSION}"
+    let out_dir = "{cache}/zoneinfo"
+
+    // The data files, from the tarball.
+    let t = match Tar.open(tarball(cache.copy())) {
+        ok(t) => t,
+        err(e) => stop("can't read the tarball: {e}"),
+    }
+    let src = "{cache}/data"
+    fs.make_dir_all(src.copy())!
+    let version = String.from_utf8(t.read_named("version")!) ?? String()
+    if version.trim() != VERSION {
+        stop("the tarball is version {version.trim()}, not {VERSION}")
+    }
+    for f in FILES {
+        fs.write("{src}/{f}", t.read_named(f)!)!
+    }
+
+    // zic, into zoneinfo. The folder is this version's, so it holds no zone another wrote.
+    let windows = env.os() == "windows"
+    if zic.is_empty() {
+        zic = if windows or fs.exists("/usr/sbin/zic") { String("/usr/sbin/zic") } else { String("zic") }
+    }
+    var c = if windows { Command.new("wsl.exe").arg("-e").arg(zic) } else { Command.new(zic) }
+    c = c.arg("-b").arg("fat").arg("-d").arg(if windows { wsl_path(out_dir.copy()) } else { out_dir.copy() })
+    for f in FILES {
+        let p = "{src}/{f}"
+        c = c.arg(if windows { wsl_path(p) } else { p })
+    }
+    if let err(e) = c.run() {
+        stop("zic failed: {e}")
+    }
+
+    // Each name, and each zone's file once.
+    var names: List<String> = []
+    for e in fs.walk(out_dir.copy())! {
+        if e.kind == fs.Kind.File {
+            names.push(e.path[out_dir.len() + 1..e.path.len()].replace("\\", "/"))
+        }
+    }
+    names.sort()
+    var files: List<List<u8>> = []
+    var file_of = Map<String, usize>()
+    var which: List<usize> = []
+    for n in names {
+        let b = trim_tzif(n.copy(), fs.read("{out_dir}/{n}")!)
+        let key = bytes.hex(hash.sha256(b))
+        if let k = file_of.get(key.copy()) {
+            which.push(k)
+        } else {
+            file_of.insert(key, files.len())
+            which.push(files.len())
+            files.push(b)
+        }
+    }
+
+    // The table.
+    var name_bytes: usize = 0
+    for n in names {
+        name_bytes += n.len()
+    }
+    let names_at = 4 + names.len() * 16
+    var file_at: List<usize> = []
+    var at = names_at + name_bytes
+    for f in files {
+        file_at.push(at)
+        at += f.len()
+    }
+    var table: List<u8> = []
+    put32(mut table, names.len())
+    var name_at = names_at
+    for k in 0..names.len() {
+        put32(mut table, name_at)
+        put32(mut table, names[k].len())
+        put32(mut table, file_at[which[k]])
+        put32(mut table, files[which[k]].len())
+        name_at += names[k].len()
+    }
+    for n in names {
+        table.extend(n.to_bytes())
+    }
+    for f in files {
+        table.extend(f)
+    }
+    fs.write("{root}/std/time/zones.bin", table)!
+
+    let text = #"
+        /// Every time zone of the IANA tz database, version #{VERSION}, for std.time's `TimeZone`.
+        /// Written by tools/tz/gen_zones.calx; don't edit by hand.
+        module std.time.zones
+
+        // The tz database is in the public domain: https://www.iana.org/time-zones
+
+        /// The tz database's version.
+        pub const VERSION: str = "#{VERSION}"
+
+        /// How many names there are: #{files.len()} zones, under #{names.len()} names with the links.
+        pub const COUNT: usize = #{names.len()}
+
+        /// zones.bin: how many names there are, a u32; then each name's start and length and its
+        /// zone's TZif file's start and length, four u32s, in order of the names' bytes; then the
+        /// names, and the TZif files. Numbers are little-endian, and starts are from the table's start.
+        pub const DATA: [u8; #{table.len()}] = embed("zones.bin")
+        "#
+    fs.write_text("{root}/std/time/zones.calx", "{text}\n")!
+    println("tzdata {VERSION}: {names.len()} names, {files.len()} zones, {table.len()} bytes")
+}
