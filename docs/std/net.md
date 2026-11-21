@@ -267,14 +267,23 @@ A socket that joins a multicast group gets the datagrams sent to it, as Python's
 
 ```calx
 // firewall: joins a multicast group on every address
-import std.net.{Address, Event, Ip, Net}
+import std.net.{Address, Event, Ip, Net, interfaces}
 
 fn main() {
+    // This machine's own loopback interface where it carries multicast, as macOS's does, and the
+    // system's choice, 0, where it doesn't.
+    var index: u32 = 0
+    for i in interfaces()! {
+        if i.loopback and i.multicast and i.up {
+            index = i.index
+        }
+    }
     let net = Net.new()!
     let group = Ip.parse("239.255.0.1")!
     let listener = net.bind_udp("0.0.0.0", 0, reuse: true)!
-    listener.join_multicast(group)!
+    listener.join_multicast(group, index)!
     let sender = net.bind_udp("0.0.0.0", 0)!
+    sender.set_multicast_interface(index)!
     sender.set_multicast_ttl(1)!    // the local network only, which is where it starts
     sender.send_to("hello, group".to_bytes(), Address { ip: group, port: listener.port() })!
     var events = List<Event>()
@@ -303,6 +312,8 @@ fn main() {
 | `set_broadcast(on)` | `SO_BROADCAST` | Whether it may send to a broadcast address, such as `255.255.255.255` |
 
 An interface is named by its index, which [`interfaces`](#interfaces) gives, as the systems name it in multicast: Windows takes an IPv4 interface's index where an address would go, and Linux and macOS take it as it is.
+
+On macOS a program needs the person's permission to reach the local network, as Apple's TN3179 says, multicast included: without it, a send to the network fails with `system error 65`, "no route to host". A program run from Terminal or over SSH has it, as does one run as root or by launchd as a daemon, and an app asks for it with `NSLocalNetworkUsageDescription` in its `Info.plist`. The loopback interface needs no permission, which is why the example above uses it there, and so do CI's tests, since a runner's programs are none of those.
 
 ### Interfaces
 

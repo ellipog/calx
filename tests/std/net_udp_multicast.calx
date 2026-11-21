@@ -10,14 +10,24 @@ fn main() {
     var r = Random.system()
     let net = Net.new()!
     let group = Ip.V4([239, 255, u8.wrap(r.below(256)), u8.wrap(r.below(256))])
+    // On the loopback interface where it carries multicast, as on macOS, where a program needs
+    // permission for the local network (TN3179), which CI's runner hasn't; the system's choice of
+    // interface elsewhere.
+    var index: u32 = 0
+    for i in interfaces()! {
+        if i.loopback and i.multicast and i.up {
+            index = i.index
+        }
+    }
     let a = net.bind_udp("0.0.0.0", 0, reuse: true)!
     let b = net.bind_udp("0.0.0.0", a.port(), reuse: true)!
-    a.join_multicast(group)!
-    b.join_multicast(group)!
+    a.join_multicast(group, index)!
+    b.join_multicast(group, index)!
     a.set_multicast_ttl(1)!
     a.set_multicast_loopback(true)!
     let sender = net.bind_udp("0.0.0.0", 0)!
     sender.set_multicast_loopback(true)!
+    sender.set_multicast_interface(index)!
     sender.send_to("to the group".to_bytes(), Address { ip: group, port: a.port() })!
     var heard = [false, false]
     var events = List<Event>()
@@ -35,7 +45,7 @@ fn main() {
         }
     }
     println("both heard it")    // out: both heard it
-    a.leave_multicast(group)!
+    a.leave_multicast(group, index)!
 
     // Every interface has a name and an index, and the loopback one has a loopback address.
     let list = interfaces()!

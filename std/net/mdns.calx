@@ -1802,7 +1802,20 @@ impl Mdns {
         var have4 = List<u32>()
         var have6 = List<u32>()
         for i in list {
-            if not i.up or not i.multicast or i.loopback {
+            if not i.up or not i.multicast {
+                continue
+            }
+            if i.loopback {
+                // The loopback interface, where it carries multicast, as macOS's does: programs on
+                // this machine find each other over it with no network, and on macOS without the
+                // local network permission a program may not have (TN3179). Its addresses aren't
+                // announced, since they're no use to another host.
+                if i.addresses.any(|a| a.is_v4()) {
+                    have4.push(i.index)
+                }
+                if i.addresses.any(|a| not a.is_v4()) {
+                    have6.push(i.index)
+                }
                 continue
             }
             links.push(i.index)
