@@ -140,6 +140,100 @@ cx_u64 cx_zstd_xxh64(const cx_u8* p, cx_usize n, cx_u64 seed) {
     return h;
 }
 
+/* XXH64 of bytes given a piece at a time. */
+typedef struct {
+    cx_u64 v1, v2, v3, v4, total;
+    cx_u8 mem[32];
+    cx_u32 mem_n;
+} xxh_t;
+
+static void xxh_start(xxh_t* s) {
+    s->v1 = P1 + P2;
+    s->v2 = P2;
+    s->v3 = 0;
+    s->v4 = (cx_u64)0 - P1;
+    s->total = 0;
+    s->mem_n = 0;
+}
+
+static void xxh_add(xxh_t* s, const cx_u8* p, cx_usize n) {
+    s->total += n;
+    if (s->mem_n + n < 32) {
+        memcpy(s->mem + s->mem_n, p, n);
+        s->mem_n += (cx_u32)n;
+        return;
+    }
+    if (s->mem_n) {
+        const cx_usize fill = 32 - s->mem_n;
+        memcpy(s->mem + s->mem_n, p, fill);
+        s->v1 = xx_round(s->v1, ld64(s->mem));
+        s->v2 = xx_round(s->v2, ld64(s->mem + 8));
+        s->v3 = xx_round(s->v3, ld64(s->mem + 16));
+        s->v4 = xx_round(s->v4, ld64(s->mem + 24));
+        p += fill;
+        n -= fill;
+        s->mem_n = 0;
+    }
+    cx_u64 v1 = s->v1, v2 = s->v2, v3 = s->v3, v4 = s->v4;
+    while (n >= 32) {
+        v1 = xx_round(v1, ld64(p));
+        v2 = xx_round(v2, ld64(p + 8));
+        v3 = xx_round(v3, ld64(p + 16));
+        v4 = xx_round(v4, ld64(p + 24));
+        p += 32;
+        n -= 32;
+    }
+    s->v1 = v1, s->v2 = v2, s->v3 = v3, s->v4 = v4;
+    memcpy(s->mem, p, n);
+    s->mem_n = (cx_u32)n;
+}
+
+static cx_u64 xxh_end(const xxh_t* s) {
+    cx_u64 h;
+    if (s->total >= 32) {
+        h = rotl(s->v1, 1) + rotl(s->v2, 7) + rotl(s->v3, 12) + rotl(s->v4, 18);
+        h = xx_merge(h, s->v1);
+        h = xx_merge(h, s->v2);
+        h = xx_merge(h, s->v3);
+        h = xx_merge(h, s->v4);
+    } else {
+        h = s->v3 + P5;
+    }
+    h += s->total;
+    const cx_u8* p = s->mem;
+    const cx_u8* end = p + s->mem_n;
+    while (end - p >= 8) {
+        h ^= xx_round(0, ld64(p));
+        h = rotl(h, 27) * P1 + P4;
+        p += 8;
+    }
+    if (end - p >= 4) {
+        h ^= (cx_u64)ld32(p) * P1;
+        h = rotl(h, 23) * P2 + P3;
+        p += 4;
+    }
+    while (p < end) {
+        h ^= (cx_u64)*p++ * P5;
+        h = rotl(h, 11) * P1;
+    }
+    h ^= h >> 33;
+    h *= P2;
+    h ^= h >> 29;
+    h *= P3;
+    h ^= h >> 32;
+    return h;
+}
+
+/* The same for std.zstd's Compressor, which checks the text it's given a piece at a time, in a
+ * state of cx_zstd_xxh_size() bytes it keeps. */
+cx_usize cx_zstd_xxh_size(void) { return sizeof(xxh_t); }
+
+void cx_zstd_xxh_start(cx_u8* state) { xxh_start((xxh_t*)state); }
+
+void cx_zstd_xxh_add(cx_u8* state, const cx_u8* p, cx_usize n) { xxh_add((xxh_t*)state, p, n); }
+
+cx_u64 cx_zstd_xxh_end(const cx_u8* state) { return xxh_end((const xxh_t*)state); }
+
 /* --- reading bits backwards ------------------------------------------------------------------ */
 
 /* Huffman and FSE streams are read from their last byte back, whose highest set bit marks where
@@ -386,6 +480,10 @@ typedef struct {
     void* par;      /* the parallel decoder's state, a par_t, or 0 */
     int par_mode;   /* whether this frame is decoded on all the processors */
     int par_begun;  /* whether blocks_par has started on it */
+    /* For a frame decoded a block at a time (cx_zstd_block): what it has made, and its checksum
+     * so far. */
+    cx_u64 made;
+    xxh_t xh;
     cx_u8 lits[BLOCK_MAX + SLACK];
 } ctx_t;
 
@@ -1362,6 +1460,8 @@ cx_i32 cx_zstd_frame(cx_u8* ctx, const cx_u8* in, cx_usize n, cx_usize at, const
     c->at = at + q;
     c->par_mode = cx_workers() > 1 && (size == ~(cx_u64)0 || size >= PAR_MIN);
     c->par_begun = 0;
+    c->made = 0;
+    if (check) xxh_start(&c->xh);
     info[0] = size;
     info[1] = window;
     info[2] = at + q;
@@ -1377,90 +1477,6 @@ cx_i32 cx_zstd_frame(cx_u8* ctx, const cx_u8* in, cx_usize n, cx_usize at, const
  * headers and builds their tables, every thread decodes the run's blocks, and one thread carries
  * them out in order while the next run is decoded, and another works the checksum out over what
  * the run before made. */
-
-/* XXH64 of bytes given a piece at a time. */
-typedef struct {
-    cx_u64 v1, v2, v3, v4, total;
-    cx_u8 mem[32];
-    cx_u32 mem_n;
-} xxh_t;
-
-static void xxh_start(xxh_t* s) {
-    s->v1 = P1 + P2;
-    s->v2 = P2;
-    s->v3 = 0;
-    s->v4 = (cx_u64)0 - P1;
-    s->total = 0;
-    s->mem_n = 0;
-}
-
-static void xxh_add(xxh_t* s, const cx_u8* p, cx_usize n) {
-    s->total += n;
-    if (s->mem_n + n < 32) {
-        memcpy(s->mem + s->mem_n, p, n);
-        s->mem_n += (cx_u32)n;
-        return;
-    }
-    if (s->mem_n) {
-        const cx_usize fill = 32 - s->mem_n;
-        memcpy(s->mem + s->mem_n, p, fill);
-        s->v1 = xx_round(s->v1, ld64(s->mem));
-        s->v2 = xx_round(s->v2, ld64(s->mem + 8));
-        s->v3 = xx_round(s->v3, ld64(s->mem + 16));
-        s->v4 = xx_round(s->v4, ld64(s->mem + 24));
-        p += fill;
-        n -= fill;
-        s->mem_n = 0;
-    }
-    cx_u64 v1 = s->v1, v2 = s->v2, v3 = s->v3, v4 = s->v4;
-    while (n >= 32) {
-        v1 = xx_round(v1, ld64(p));
-        v2 = xx_round(v2, ld64(p + 8));
-        v3 = xx_round(v3, ld64(p + 16));
-        v4 = xx_round(v4, ld64(p + 24));
-        p += 32;
-        n -= 32;
-    }
-    s->v1 = v1, s->v2 = v2, s->v3 = v3, s->v4 = v4;
-    memcpy(s->mem, p, n);
-    s->mem_n = (cx_u32)n;
-}
-
-static cx_u64 xxh_end(const xxh_t* s) {
-    cx_u64 h;
-    if (s->total >= 32) {
-        h = rotl(s->v1, 1) + rotl(s->v2, 7) + rotl(s->v3, 12) + rotl(s->v4, 18);
-        h = xx_merge(h, s->v1);
-        h = xx_merge(h, s->v2);
-        h = xx_merge(h, s->v3);
-        h = xx_merge(h, s->v4);
-    } else {
-        h = s->v3 + P5;
-    }
-    h += s->total;
-    const cx_u8* p = s->mem;
-    const cx_u8* end = p + s->mem_n;
-    while (end - p >= 8) {
-        h ^= xx_round(0, ld64(p));
-        h = rotl(h, 27) * P1 + P4;
-        p += 8;
-    }
-    if (end - p >= 4) {
-        h ^= (cx_u64)ld32(p) * P1;
-        h = rotl(h, 23) * P2 + P3;
-        p += 4;
-    }
-    while (p < end) {
-        h ^= (cx_u64)*p++ * P5;
-        h = rotl(h, 11) * P1;
-    }
-    h ^= h >> 33;
-    h *= P2;
-    h ^= h >> 29;
-    h *= P3;
-    h ^= h >> 32;
-    return h;
-}
 
 /* Room taken in pieces of at least a MiB, and given back all at once. */
 typedef struct piece {
@@ -1966,6 +1982,88 @@ cx_i32 cx_zstd_blocks(cx_u8* ctx, const cx_u8* in, cx_usize n, cx_u8* out, cx_us
     *len = pos;
     c->at = at;
     info[0] = at;
+    return ZS_DONE;
+}
+
+/* --- a block at a time ----------------------------------------------------------------------- */
+
+/* Decodes the frame's next block, whose header is at in[at..n), onto out[*pos..), for a frame that
+ * std.zstd's Decompressor decodes as it comes, into a window that moves on: out[start..*pos) is the
+ * end of what the frame has made, at least as much of it as its window holds, or all of it from
+ * the frame's start, and matches reach back through it, as libzstd's streaming decoder lets them
+ * reach through its buffer. Gives ZS_DONE with
+ * info[0] 1 if that was the frame's last block, and info[2] where the next thing starts in the
+ * input; ZS_TRUNCATED if the block isn't all in in[..n) yet; ZS_ROOM if out needs info[1] bytes of
+ * room past *pos; or an error. A frame's size and checksum are checked by cx_zstd_block_end. */
+cx_i32 cx_zstd_block(cx_u8* ctx, const cx_u8* in, cx_usize n, cx_usize at, cx_u8* out, cx_usize start, cx_usize* pos_io, cx_usize cap, cx_u64* info) {
+    ctx_t* c = (ctx_t*)ctx;
+    if (n - at < 3) return ZS_TRUNCATED;
+    const cx_u32 h = ld24(in + at);
+    const cx_u32 last = h & 1, type = (h >> 1) & 3, size = h >> 3;
+    if (type == 3) return ZS_CORRUPT;
+    const cx_usize on_wire = type == 1 ? 1 : size;
+    if (on_wire > c->block_max) return ZS_CORRUPT;
+    if (size > c->block_max) return ZS_CORRUPT;
+    if (n - at - 3 < on_wire) return ZS_TRUNCATED;
+    cx_usize most = c->block_max;
+    if (c->size != ~(cx_u64)0) {
+        const cx_u64 left = c->size > c->made ? c->size - c->made : 0;
+        if (left < most) most = (cx_usize)left;
+    }
+    const cx_usize pos = *pos_io;
+    if (cap - pos < most + SLACK) {
+        info[1] = most + SLACK;
+        return ZS_ROOM;
+    }
+    const cx_u8* src = in + at + 3;
+    cx_usize end = pos;
+    if (type == 0) {
+        if (size > most) return ZS_CORRUPT;
+        memcpy(out + pos, src, size);
+        end += size;
+    } else if (type == 1) {
+        if (size > most) return ZS_CORRUPT;
+        memset(out + pos, src[0], size);
+        end += size;
+    } else {
+        lit_t L;
+        if (!lit_head(&c->e, c->block_max, src, size, &L)) return ZS_CORRUPT;
+        const cx_u8* lits;
+        if (!lit_decode(c->e.huf, c->e.huf_log, &L, in + n, c->lits, &lits)) return ZS_CORRUPT;
+        const cx_usize took = L.took;
+        out_t o;
+        o.base = out + start;
+        o.bound = out + pos + most;
+        o.fast = o.bound + SLACK - 32;
+        o.dict = 0;
+        o.dict_n = 0;
+        cx_u8* op = out + pos;
+        cx_u32 count, modes;
+        const cx_usize head = seq_head(&c->e, src + took, size - took, &count, &modes);
+        if (head == 0) return ZS_CORRUPT;
+        if (!seq_run(&c->e, src + took + head, size - took - head, count, lits, L.n, &o, &op)) return ZS_CORRUPT;
+        end = (cx_usize)(op - out);
+    }
+    if (c->check) xxh_add(&c->xh, out + pos, end - pos);
+    c->made += end - pos;
+    *pos_io = end;
+    info[0] = last;
+    info[2] = at + 3 + on_wire;
+    return ZS_DONE;
+}
+
+/* After a frame's last block from cx_zstd_block, at in[at..n): checks the frame's size, and its
+ * checksum if it has one. Gives ZS_DONE with info[2] where the frame ends, ZS_TRUNCATED if its
+ * checksum isn't all there yet, or an error. */
+cx_i32 cx_zstd_block_end(cx_u8* ctx, const cx_u8* in, cx_usize n, cx_usize at, cx_u64* info) {
+    ctx_t* c = (ctx_t*)ctx;
+    if (c->size != ~(cx_u64)0 && c->made != c->size) return ZS_CORRUPT;
+    if (c->check) {
+        if (n - at < 4) return ZS_TRUNCATED;
+        if (ld32(in + at) != (cx_u32)xxh_end(&c->xh)) return ZS_CHECKSUM;
+        at += 4;
+    }
+    info[2] = at;
     return ZS_DONE;
 }
 

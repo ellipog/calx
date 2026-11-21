@@ -1,5 +1,7 @@
 /// Standard input and output as bytes, for programs that speak a binary protocol, and standard
-/// input as lines of text.
+/// input as lines of text. And `Reader` and `Writer`, what streams of bytes read from and write to,
+/// which files, connections, the compressors and standard input and output implement, so a tar
+/// archive can be written into a zstd stream into a file, or read the same way.
 ///
 /// What `write` writes and what `print` prints share one buffer, so they come out in the order
 /// they were written. The buffer is written out when it fills, at `flush()`, before `read` waits
@@ -149,4 +151,87 @@ pub fn flush() {
 /// that on, which this does, and one that can't counts as no terminal.
 pub fn is_terminal() -> bool {
     return unsafe { cx_out_is_terminal() } == 1
+}
+
+/// Something bytes are read from in order, a piece at a time, as Python reads a file object
+/// opened `"rb"`: a file, a connection, a decompressor reading another `Reader`, or standard
+/// input. Code that reads, such as `std.tar`'s `StreamReader`, takes any type with it.
+pub interface Reader {
+    /// Reads up to `n` bytes onto the end of `buf`, and returns how many it read, waiting until
+    /// there's at least one. That's 0 only at the end, or when `n` is 0. Fails with what went
+    /// wrong, in words.
+    fn read(mut self, buf: mut List<u8>, n: usize) -> usize ! String
+}
+
+/// Something bytes are written to in order, as Python writes to a file object opened `"wb"`: a
+/// file, a connection, a compressor writing to another `Writer`, a `List<u8>`, or standard output.
+/// Code that writes, such as `std.tar`'s `StreamWriter`, takes any type with it.
+pub interface Writer {
+    /// Writes all the bytes, or fails with what went wrong, in words.
+    fn write(mut self, bytes: List<u8>) ! String
+
+    /// Writes out what it holds back, so a reader at the other end gets everything written so
+    /// far, as a compressor's flush or a connection's does. Does nothing by default.
+    fn flush(mut self) ! String {
+    }
+}
+
+/// A list of bytes grows by what's written to it, as Python's `io.BytesIO` does.
+impl Writer for List<u8> {
+    fn write(mut self, bytes: List<u8>) ! String {
+        self.extend(bytes)
+    }
+}
+
+/// Bytes in memory, read from the start, as Python's `io.BytesIO(data)` is: an archive held in
+/// memory read by code that takes a `Reader`.
+pub struct ByteReader {
+    bytes: List<u8>
+    at: usize = 0
+}
+
+impl ByteReader {
+    /// A reader of the bytes, from the first.
+    pub fn new(bytes: own List<u8>) -> ByteReader {
+        return ByteReader { bytes: bytes }
+    }
+
+    /// How many bytes are left to read.
+    pub fn left(self) -> usize {
+        return self.bytes.len() - self.at
+    }
+}
+
+impl Reader for ByteReader {
+    fn read(mut self, buf: mut List<u8>, n: usize) -> usize ! String {
+        let k = if n < self.bytes.len() - self.at { n } else { self.bytes.len() - self.at }
+        buf.extend(self.bytes[self.at..self.at + k])
+        self.at += k
+        return k
+    }
+}
+
+/// Standard input as a `Reader`, which reads as `read` does, as Python's `sys.stdin.buffer`.
+pub struct Stdin {
+}
+
+impl Reader for Stdin {
+    fn read(mut self, buf: mut List<u8>, n: usize) -> usize ! String {
+        return read(mut buf, n)
+    }
+}
+
+/// Standard output as a `Writer`, which writes as `write` does, into the buffer `print` shares,
+/// and flushes as `flush` does, as Python's `sys.stdout.buffer`.
+pub struct Stdout {
+}
+
+impl Writer for Stdout {
+    fn write(mut self, bytes: List<u8>) ! String {
+        write(bytes)
+    }
+
+    fn flush(mut self) ! String {
+        flush()
+    }
 }

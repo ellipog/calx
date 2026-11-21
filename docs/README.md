@@ -72,7 +72,7 @@ What's built, one page per feature:
 
 The `std` modules, one page each ([modules](reference/modules.md#the-standard-library)):
 
-1. [std.io](std/io.md): standard input and output as bytes, and standard input a line at a time
+1. [std.io](std/io.md): standard input and output as bytes, standard input a line at a time, and `Reader` and `Writer`, what files, connections, compressors and archives stream through
 2. [std.math](std/math.md): fast math functions, accurate to about half an ULP and the same on every platform
 3. [std.java.math](std/java-math.md): math functions with `StrictMath`'s results bit for bit
 4. [std.time](std/time.md): a monotonic clock and the wall clock, which only `unsafe` code can read, the local time zone, dates: their arithmetic, strftime and strptime codes and ISO 8601, and the IANA time zones, built in
@@ -96,7 +96,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 22. [std.text.utf8](std/text-utf8.md): bytes that may not be UTF-8 as text, with U+FFFD in their place, as Java reads them or as Python, Rust and browsers do
 23. [std.palette](std/palette.md): Minecraft's paletted containers, a chunk section's block states and biomes, grown, sent, saved and loaded as Java Edition 26.3 does them
 24. [std.zip](std/zip.md): zip archives read and written in memory, with Zip64, file modes, and extracting that no path can climb out of
-25. [std.tar](std/tar.md): tar archives, plain, gzipped, bzip2'd, xz'd or zstd'd, read and written in memory: ustar, GNU long names and pax headers, links and modes
+25. [std.tar](std/tar.md): tar archives, plain, gzipped, bzip2'd, xz'd or zstd'd, read and written in memory, or an entry at a time to and from files, sockets and zstd streams: ustar, GNU long names and pax headers, links and modes
 26. [std.memory](std/memory.md): giving the system back the memory freed values held, for a program that's gone quiet after a busy while
 27. [std.path](std/path.md): paths as text, joined, taken apart, normalized and matched against globs such as `src/**/*.calx`, with Windows drives and shares
 28. [std.json](std/json.md): JSON parsed into a tree with the line and column of any mistake, read by JSON Pointers, written compact or indented with keys in order or sorted, exact 64-bit integers, and `@json`, which reads and writes a struct from its fields' types
@@ -126,7 +126,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 52. [std.yaml](std/yaml.md): YAML read into a tree as PyYAML's `safe_load` reads it, YAML 1.1 and PyYAML's quirks included, with the line and column of any mistake, and written back byte for byte as `safe_dump` writes it, and `@yaml`, which reads a config straight into a struct
 53. [std.log](std/log.md): logging as Python's `logging` module does it, messages at a level written in Python's formats with the time, the level and the logger's name, to standard error or a file, set up once with `config`
 54. [std.xz](std/xz.md): .xz, .lzma and .lz files decompressed as Python's `lzma.decompress` reads them, every filter and check, and .xz and .lzma files compressed at `xz`'s presets, both on all the processors, whole or a piece at a time
-55. [std.zstd](std/zstd.md): Zstandard files decompressed as Python's `compression.zstd` reads them, with checksums, skippable frames and dictionaries, compressed at `zstd`'s levels, with or without a dictionary, big ones on all the processors, and dictionaries trained from samples
+55. [std.zstd](std/zstd.md): Zstandard files decompressed as Python's `compression.zstd` reads them, with checksums, skippable frames and dictionaries, compressed at `zstd`'s levels, with or without a dictionary, big ones on all the processors, dictionaries trained from samples, and both a piece at a time
 56. [std.font](std/font.md): TrueType and OpenType fonts and collections read as FreeType reads them, glyphs drawn antialiased by the exact area they cover, and text measured and drawn on images, as Pillow's `ImageFont` and `ImageDraw.text` do
 57. [std.wave](std/wave.md): WAV files read as Python's `wave` module reads them and written byte for byte as it writes them, floats too, with their samples as numbers instead of `struct.unpack`
 58. [std.text.python](std/text-python.md): Python's `repr` of strings and floats, `str.isprintable`, `str.isspace` and `str.lower`, as CPython 3.14 gives them, for messages that quote values as Python does

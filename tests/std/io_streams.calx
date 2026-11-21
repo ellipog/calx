@@ -1,0 +1,65 @@
+// std.io's Reader and Writer (CLX-413): a file made with `create` written and read in order, bytes
+// in memory through ByteReader and into a list, standard input and output, and a function that
+// copies from any Reader to any Writer.
+// stdin: line one
+// stdin: line two
+import std.fs.{create, open, open_read, read, remove_dir_all, temp_dir, write_text}
+import std.io.{ByteReader, Reader, Stdin, Stdout, Writer}
+
+// Copies everything `from` gives to `to`, `piece` bytes at a time, and says how many there were.
+fn copy_all<R: Reader, W: Writer>(from: mut R, to: mut W, piece: usize) -> usize ! String {
+    var buf = List<u8>()
+    var total: usize = 0
+    loop {
+        buf.clear()
+        let got = try from.read(mut buf, piece)
+        if got == 0 {
+            break
+        }
+        total += got
+        try to.write(buf)
+    }
+    try to.flush()
+    return total
+}
+
+fn main() {
+    let dir = temp_dir()!
+    let path = "{dir}/f.bin"
+    write_text(path, "old contents, longer than the new")!
+    // `create` empties what's there; writes go on from where the last stopped.
+    var f = create(path)!
+    f.write("hello, ".to_bytes())!
+    f.write("world".to_bytes())!
+    f.close()!
+    println(String.from_utf8(read(path)!)!)    // out: hello, world
+    // Reads go on from where the last stopped too, and give 0 at the end.
+    var r = open_read(path)!
+    var got = List<u8>()
+    println("{r.read(mut got, 5)!} {r.read(mut got, 100)!} {r.read(mut got, 100)!} {String.from_utf8(got)!}")    // out: 5 7 0 hello, world
+    r.close()!
+    // A file `open` keeps writes from its start, over what's there.
+    var o = open(path)!
+    o.write("HELLO".to_bytes())!
+    o.close()!
+    println(String.from_utf8(read(path)!)!)    // out: HELLO, world
+
+    // Bytes in memory, copied into a list three at a time.
+    var b = ByteReader.new("abcdefgh".to_bytes())
+    var out = List<u8>()
+    println("{copy_all(mut b, mut out, 3)!} {String.from_utf8(out)!} {b.left()}")    // out: 8 abcdefgh 0
+
+    // A file copied to another, and standard input to standard output.
+    var src = open_read(path)!
+    var dst = create("{dir}/g.bin")!
+    println("{copy_all(mut src, mut dst, 4)!}")    // out: 12
+    src.close()!
+    dst.close()!
+    println(String.from_utf8(read("{dir}/g.bin")!)!)    // out: HELLO, world
+    var input = Stdin {}
+    var output = Stdout {}
+    _ = copy_all(mut input, mut output, 5)!
+    // out: line one
+    // out: line two
+    remove_dir_all(dir)!
+}

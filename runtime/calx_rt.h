@@ -1243,6 +1243,16 @@ CX_FN(cx_u64, cx_zstd_xxh64, (const cx_u8* p, cx_usize n, cx_u64 seed));
  * bytes (CLX-186). */
 CX_FN(cx_usize, cx_zstd_dict_params_size, (void));
 CX_FN(cx_i32, cx_zstd_dict_params, (const cx_u8* d, cx_usize n, cx_u8* out));
+/* A frame a block at a time, for std.zstd's Decompressor (CLX-413): `cx_zstd_block` decodes the
+ * block at in[at..n) onto out[*pos..), matching back through out[start..*pos), and
+ * `cx_zstd_block_end` checks the frame's size and checksum after its last. XXH64 a piece at a time,
+ * in a state of `cx_zstd_xxh_size()` bytes, for its Compressor's checksum. */
+CX_FN(cx_i32, cx_zstd_block, (cx_u8* ctx, const cx_u8* in, cx_usize n, cx_usize at, cx_u8* out, cx_usize start, cx_usize* pos, cx_usize cap, cx_u64* info));
+CX_FN(cx_i32, cx_zstd_block_end, (cx_u8* ctx, const cx_u8* in, cx_usize n, cx_usize at, cx_u64* info));
+CX_FN(cx_usize, cx_zstd_xxh_size, (void));
+CX_FN(void, cx_zstd_xxh_start, (cx_u8* state));
+CX_FN(void, cx_zstd_xxh_add, (cx_u8* state, const cx_u8* p, cx_usize n));
+CX_FN(cx_u64, cx_zstd_xxh_end, (const cx_u8* state));
 /* Zstandard compression, in calx_zstdenc.c, behind std.zstd's `compress` (CLX-183).
  * `cx_zse_compress` writes the frame for in[0..n) at `level` into out, which has
  * `cx_zse_bound(n)` bytes, and gives its size; flags 1 asks for a checksum, which std.zstd
@@ -1255,6 +1265,12 @@ CX_FN(cx_u64, cx_zse_compress, (const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 le
 CX_FN(cx_u64, cx_zse_compress_dict, (const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags, const cx_u8* content, cx_u64 content_n,
                                      cx_u64 dict_n, cx_u32 dict_id, const cx_u8* params, cx_u32 has_params, cx_u64 key));
 CX_FN(cx_u64, cx_zse_dict_key, (void));
+/* A frame of unknown size a job at a time, for std.zstd's Compressor (CLX-413):
+ * `cx_zse_stream_params` gives a level's job size, reach and window log, and `cx_zse_stream_job`
+ * compresses text[pre..pre + n) after text[0..pre) as the frame's next blocks into out, which has
+ * `cx_zse_bound(n)` bytes, and gives their size. */
+CX_FN(void, cx_zse_stream_params, (cx_i32 level, cx_u64* info));
+CX_FN(cx_u64, cx_zse_stream_job, (cx_i32 level, const cx_u8* text, cx_u64 pre, cx_u64 n, cx_u32 first, cx_u32 last, cx_u8* out));
 /* Trains a dictionary of at most cap bytes from count samples laid one after another, sizes[i]
  * bytes each, as libzstd's ZDICT_trainFromBuffer does (CLX-191): writes it into out and gives its
  * size, or 0 for too few samples or bytes, or a cap under 256. */
