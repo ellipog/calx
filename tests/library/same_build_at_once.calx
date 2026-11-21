@@ -1,0 +1,190 @@
+// Builds of one static library, and of one program, at the same time, from an empty cache, as a
+// test run's debug and release jobs of tests/library/staticlib_net_threads.calx build the same
+// library (CLX-419). Each makes the objects it doesn't find in the cache, and the archive or
+// program, and puts them there while another may be archiving or copying them. They start 25 ms
+// apart, so one puts its files in the cache as another reads them. Each runs in a folder whose
+// name has a length of its own, which an object's debug information names, so no two make the
+// same bytes. A file in the cache is never replaced: the first build to put one there wins, so
+// every build's output is that one, the same bytes, and the library links into a C host. Before,
+// a later build's file replaced it, so the builds' outputs differed, and GNU ar, which reads an
+// object's size by its name, archived one that was replaced as it read it with the wrong size.
+// file: main.calx
+import std.env.{arch, os, script, variable}
+import std.fs.{make_dir_all, read, remove_dir_all, separator, temp_dir}
+import std.path.{join, parent_dir}
+import std.process.{Child, Command, Stdio}
+import std.thread.{sleep}
+
+/// Builds of `source` with `flags`, started 25 ms apart, each from a folder of its own under
+/// `tmp` and to `out/K/name` there, with the cache `cache`: what each output holds.
+fn build_all(calx: String, cache: String, tmp: String, flags: List<String>, source: String, name: String) -> List<List<u8>> ! Error {
+    let s = separator()
+    var children: List<Child> = []
+    var outs: List<String> = []
+    var folder = String()
+    for k in 0usize..12 {
+        folder.push('a')
+        let cwd = "{tmp}{s}{folder}"
+        let out = "{tmp}{s}out{s}{k}{s}{name}"
+        try make_dir_all(cwd.copy()).context("making {cwd}")
+        var words: List<String> = ["build"]
+        words.extend(flags.copy())
+        words.push(source.copy())
+        words.push("-o")
+        words.push(out.copy())
+        let cmd = Command.new(calx.copy()).args(words).dir(cwd).env("CALX_CACHE", cache.copy())
+        children.push(try cmd.stdout(Stdio.Pipe).stderr(Stdio.Pipe).spawn().context("running {calx}"))
+        outs.push(out)
+        unsafe { sleep(25000000) }
+    }
+    var failed = String()
+    var i: usize = 0
+    for child in mut children {
+        let done = child.wait()
+        if not done.status.success() and failed.is_empty() {
+            failed = "build {i} failed: {"{done.text()}{done.error_text()}".trim_end()} [{done.status}]"
+        }
+        i += 1
+    }
+    if not failed.is_empty() {
+        fail failed
+    }
+    var bytes: List<List<u8>> = []
+    for out in outs {
+        bytes.push(try read(out.copy()).context("reading {out}"))
+    }
+    return bytes
+}
+
+/// How many outputs there are, and whether they're all the same file.
+fn same(outputs: List<List<u8>>) -> String {
+    for o in outputs {
+        if o != outputs[0] {
+            return "{outputs.len()} built, not all the same"
+        }
+    }
+    return "{outputs.len()} built, all the same"
+}
+
+fn run(exe: String, args: List<String>, dir: String) -> String {
+    match Command.new(exe).args(args).dir(dir).output() {
+        ok(o) => {
+            let text = "{o.text()}{o.error_text()}".trim_end()
+            return if o.status.success() { text } else { "{text} [{o.status}]" }
+        },
+        err(e) => return "can't run {exe}: {e}",
+    }
+}
+
+fn main() {
+    let calx = variable("CALX") ?? String("calx")
+    let clang = variable("CALX_CC") ?? String("clang")
+    let here = parent_dir(script()!)!
+    let windows = os() == "windows"
+    let s = separator()
+    let tmp = temp_dir()!
+
+    let lib_name = if windows { "core.lib" } else { "libcore.a" }
+    match build_all(calx.copy(), "{tmp}{s}cache-lib", "{tmp}{s}lib", ["--staticlib"], join(here.copy(), "core.calx"), String(lib_name)) {
+        ok(outputs) => println("libraries: {same(outputs)}"),
+        err(e) => println("libraries: {e}"),
+    }
+    // The first build's library, linked into a host.
+    let lib_dir = "{tmp}{s}lib{s}out{s}0"
+    let host = "{lib_dir}{s}host{if windows { ".exe" } else { "" }}"
+    var cc: List<String> = ["host.c", "-I", lib_dir.copy(), "{lib_dir}{s}{lib_name}", "-o", host.copy()]
+    if windows {
+        cc.push("--target={if arch() == "aarch64" { "aarch64" } else { "x86_64" }}-pc-windows-msvc")
+        cc.push("-fms-runtime-lib=dll")
+        cc.push("-fuse-ld=link")
+        cc.push("-Wl,-nodefaultlib:libcmt")
+    } else if os() == "linux" {
+        for lib in ["-lm", "-lpthread", "-ldl"] {
+            cc.push(String(lib))
+        }
+    }
+    let compiled = run(clang.copy(), cc, here.copy())
+    if compiled.is_empty() {
+        println(run(host, [], here.copy()))
+    } else {
+        println("linking the host: {compiled}")
+    }
+
+    let exe_name = if windows { "app.exe" } else { "app" }
+    match build_all(calx.copy(), "{tmp}{s}cache-app", "{tmp}{s}app", [], join(here.copy(), "app.calx"), String(exe_name)) {
+        ok(outputs) => println("programs: {same(outputs)}"),
+        err(e) => println("programs: {e}"),
+    }
+    println(run("{tmp}{s}app{s}out{s}0{s}{exe_name}", [], here.copy()))
+    remove_dir_all(tmp)!
+    // out: libraries: 12 built, all the same
+    // out: core_sum gave 4950, {"n":3}
+    // out: programs: 12 built, all the same
+    // out: [3, 2, 1] {"words":["one","two"]}
+}
+
+// file: core.calx
+import std.json.{json}
+import std.thread.{Task}
+
+struct Summing {
+    upto: i64
+    back: Sender<i64>
+}
+
+impl Task for Summing {
+    fn run(own self) {
+        var back = self.back
+        var sum: i64 = 0
+        for i in 0..self.upto {
+            sum += i
+        }
+        back.send(sum)
+    }
+}
+
+/// The sum of the numbers below `upto`, worked out on a thread of the library's own.
+@export_c
+fn core_sum(upto: i64) -> i64 {
+    var got = Receiver<i64>()
+    let t = unsafe { Thread.spawn(Summing { upto: upto, back: got.sender() }) }
+    t.join()
+    return got.next() ?? -1
+}
+
+@json
+struct Count {
+    n: i64
+}
+
+/// How many bytes `{"n":3}` takes as JSON, written out by std.json.
+@export_c
+fn core_json_len() -> i64 {
+    return i64.wrap(Count { n: 3 }.to_json_text().len())
+}
+
+// file: host.c
+#include <stdio.h>
+#include "core.h"
+
+int main(void) {
+    calx_init();
+    printf("core_sum gave %lld, %s\n", (long long)core_sum(100), core_json_len() == 7 ? "{\"n\":3}" : "wrong JSON");
+    calx_shutdown();
+    return 0;
+}
+
+// file: app.calx
+import std.json.{json}
+
+@json
+struct Words {
+    words: List<String>
+}
+
+fn main() {
+    var list: List<i64> = [1, 2, 3]
+    list.reverse()
+    let w = Words { words: ["one", "two"] }
+    println("{list} {w.to_json_text()}")
+}

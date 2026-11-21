@@ -1096,6 +1096,51 @@ bool file_exists(const std::string& path) { return plain_file(long_path(path)); 
 
 namespace {
 
+// How putting a finished file into the cache went.
+enum class Placed { placed, already_there, failed };
+
+// Puts the finished file at `temp` in the cache as `to`, in the same folder, unless a file is
+// there already, and either way leaves nothing at `temp` (CLX-419). The cache's names are hashes
+// of what their files hold, so a file that's there already is as good as this one, but it isn't
+// the same bytes: an object's debug information names its C file, whose name is the build's own,
+// and the folder clang ran in. And another build may be reading it by name: GNU ar takes each
+// object's size from its name and then copies that many bytes from the file it opened, so a
+// rename over it had ar copy too few bytes, "file truncated", or too many, into an archive the
+// host's linker couldn't read. So a file in the cache is never replaced: the first build to put
+// one there wins, and the rest throw theirs away. A rename onto a file can't do that; a hard
+// link can, which fails if the name is taken, and Windows' MoveFileEx does without being asked
+// to replace. On Windows, a file a scanner has open just after it's written can't be moved for
+// a moment, so that's tried again.
+Placed place_new(const std::string& temp, const std::string& to) {
+#ifdef _WIN32
+    std::error_code ec;
+    fs::path from_path = long_path(temp), to_path = long_path(to);
+    for (int attempt = 0;; attempt++) {
+        if (MoveFileExW(from_path.c_str(), to_path.c_str(), 0)) return Placed::placed;
+        DWORD e = GetLastError();
+        if (e == ERROR_ALREADY_EXISTS || e == ERROR_FILE_EXISTS) break;
+        // Held open by a scanner, or the name is a file another build's trim is deleting.
+        if ((e == ERROR_SHARING_VIOLATION || e == ERROR_ACCESS_DENIED || e == ERROR_LOCK_VIOLATION) && attempt < 100) {
+            Sleep(10);
+            continue;
+        }
+        break;
+    }
+    fs::remove(from_path, ec);
+    return plain_file(to_path) ? Placed::already_there : Placed::failed;
+#else
+    if (::link(temp.c_str(), to.c_str()) == 0) {
+        ::unlink(temp.c_str());
+        return Placed::placed;
+    }
+    // A file system without hard links, such as FAT, gets a rename after a look, which replaces a
+    // file that another build put there in between.
+    if (errno != EEXIST && !plain_file(to) && ::rename(temp.c_str(), to.c_str()) == 0) return Placed::placed;
+    ::unlink(temp.c_str());
+    return plain_file(to) ? Placed::already_there : Placed::failed;
+#endif
+}
+
 // Reads the command lines `clang -###` prints, which quote every argument and escape `"`, `\`
 // and `$` with a backslash.
 std::vector<std::vector<std::string>> parse_commands(const std::string& text) {
@@ -2181,9 +2226,9 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
                              status);
                 return false;
             }
+            // Another build may have made the same object meanwhile, and be reading it: its stays.
             for (auto& [temp, obj] : renames) {
-                fs::rename(temp, obj, ec);
-                if (ec && !file_exists(obj)) {
+                if (place_new(temp, obj) == Placed::failed) {
                     std::fprintf(stderr, "calx: can't write %s\n", obj.c_str());
                     return false;
                 }
@@ -2220,7 +2265,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         if (!staticlib) std::fprintf(stderr, "calx: linking failed; `calx doctor` checks the linker and the system's libraries\n");
         return r;
     }
-    std::error_code ec;
+    [[maybe_unused]] std::error_code ec;
 #ifdef __APPLE__
     // The DWARF the objects hold, in one file beside the program, `<program>.dwarf`, which the
     // runtime's traces read and the cache trims with it: macOS's linker leaves it in the objects.
@@ -2230,18 +2275,24 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     if (!staticlib && !tc.dsymutil.empty()) {
         std::vector<std::string> gather = {tc.dsymutil, "--flat", "-o", temp_exe + ".dwarf", temp_exe};
         if (verbose) print_command(gather);
-        if (run_to_file(gather, temp_exe + ".log") == 0) fs::rename(temp_exe + ".dwarf", r.exe + ".dwarf", ec);
-        fs::remove(temp_exe + ".dwarf", ec);
+        if (run_to_file(gather, temp_exe + ".log") == 0) place_new(temp_exe + ".dwarf", r.exe + ".dwarf");
+        else fs::remove(temp_exe + ".dwarf", ec);
         fs::remove(temp_exe + ".log", ec);
     }
     // ThinLTO's objects, which only dsymutil read: the folder link_program named for this link.
     fs::remove_all(temp_exe + ".lto", ec);
 #endif
-    fs::rename(temp_exe, r.exe, ec);
-    if (ec && !file_exists(r.exe)) {
+    // A program or library another build of the same one put there first stays, as it may be
+    // being copied out or archived into a host's link right now.
+    Placed placed = place_new(temp_exe, r.exe);
+    if (placed == Placed::failed) {
         std::fprintf(stderr, "calx: can't write %s\n", r.exe.c_str());
         return r;
     }
+#ifdef _WIN32
+    // The PDB of a program that lost names nothing that's kept.
+    if (placed == Placed::already_there) fs::remove(long_path(fs::path(temp_exe).replace_extension(".pdb").string()), ec);
+#endif
     r.link_ms = ms_since(t1);
     r.ok = true;
     // `CALX_CACHE_MB` keeps that many megabytes of each, however many files: a CI job that builds
