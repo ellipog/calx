@@ -78,6 +78,7 @@ fn main() {
 | `conn.id() -> u32`, `Conn.from_id(id: u32) -> Conn` | The connection's number, its slot and how many connections had the slot before, which no two of a `Net`'s connections share at once, and the connection with a number, in whichever `Net` it's given to, for a log of connections that's replayed. A number no connection has names none: reading it gives nothing, and writing to it or closing it does nothing |
 | `Event` | `Accepted(Conn)`, `Connected(Conn)`, `Received(Conn)`, `Closed(Conn)` or `Woken` |
 | `NetError` | `AddressInUse`, `BadAddress`, `Refused`, or `Os(i32)` with the system's error code |
+| `Stream.new(net: Net, conn: Conn) -> Stream` | The connection as a [`std.io`](io.md#reader-and-writer) `Reader` and `Writer` that wait, as a blocking socket does ([a connection as a stream](#a-connection-as-a-stream)) |
 | `Ip` | `V4([u8; 4])`, or `V6([u8; 16], u32)` with its scope, the interface a link-local address is on, or 0 |
 | `ip.to_string() -> String` | The address as RFC 5952 writes it: `127.0.0.1`, `::1`, `2001:db8::8:800:200c:417a`, `fe80::1%3` |
 | `Address` | `ip: Ip` and `port: u16` |
@@ -155,6 +156,53 @@ fn main() {
 - **Its own handle.** The runtime opens the file again for itself, so the program can close the `File` as soon as `send_file` returns, and can send one `File` to many connections at once.
 - **A short file.** The length is the program's to know. If the file ends before `at + n`, the connection closes where it ends, since the other side would wait for the rest forever.
 - **Never stuck behind a slow client.** Windows for desktops sends only two files at once in the whole system. While both are slow, the runtime reads the others 256 KiB at a time and sends that, so it holds a part per connection but no one waits. See [How it works](#how-it-works).
+
+## A connection as a stream
+
+A `Stream` is a connection read and written in order, waiting as a blocking socket does, so code that takes a [`std.io`](io.md#reader-and-writer) `Reader` or `Writer` takes a connection, as Python's `socket.makefile("rwb")` makes a file of one: [`std.tar`](tar.md#a-piece-at-a-time)'s `StreamWriter` sending folders to another server through a [`std.zstd`](zstd.md#a-piece-at-a-time) `Writer`, and its `StreamReader` taking them at the other end, a piece at a time.
+
+```calx
+import std.net.{Event, Net, Stream}
+
+fn main() {
+    let net = Net.new()!
+    let port = net.listen("127.0.0.1", 0)!
+    let conn = net.connect("127.0.0.1", port)!
+    // The other end, once it's accepted, before a stream polls this Net.
+    var events = List<Event>()
+    var accepted = List<Stream>()
+    while accepted.is_empty() {
+        net.poll(1000, mut events)
+        for e in events {
+            match e {
+                Accepted(c) => accepted.push(Stream.new(net, c)),
+                _ => {},
+            }
+        }
+    }
+    var sent = Stream.new(net, conn)
+    sent.write("over the wire".to_bytes())!
+    sent.flush()!
+    var got = List<u8>()
+    while got.len() < 13 {
+        _ = accepted[0].read(mut got, 100)!
+    }
+    println(String.from_utf8(got)!)    // out: over the wire
+    println("{sent.close(1000)}")    // out: true
+}
+```
+
+| Item | Does |
+| --- | --- |
+| `Stream.new(net: Net, conn: Conn) -> Stream` | The connection, accepted or from `connect`, as a stream. One from `connect` that isn't open yet is waited for |
+| `s.read(buf: mut List<u8>, n: usize) -> usize ! String` | Up to `n` bytes onto the end of `buf`, waiting until some arrive; 0 once the connection has closed and they've all been read |
+| `s.write(bytes: List<u8>) ! String` | Queues the bytes; once more than 4 MiB is queued, waits until it has gone to the system. Fails once the connection has closed |
+| `s.flush() ! String` | Waits until what's queued has gone to the system |
+| `s.close(timeout_ms: i64 = -1) -> bool` | Sends what's queued and closes the connection, then waits up to `timeout_ms` for it to go, as `drain` does |
+| `s.conn() -> Conn` | The connection |
+
+- **Its `Net` is its own while it's used.** A stream polls its `Net` while it waits, and passes over what those polls say of other connections, so a thread makes a `Net` for the transfer, as a blocking socket is one thread's. Its polls, a flush's too, take every event, an `Accepted` among them, so two streams share a `Net` in one thread only once the connections are open, and while neither waits for the other, as above.
+- **Memory stays bounded both ways.** A write waits once 4 MiB is queued, and the runtime reads a connection only while its `Net` is polled, which a stream does only when it has nothing left to give: a slow reader holds the sender back through TCP, rather than the bytes piling up in either.
 
 ## Addresses
 

@@ -1,0 +1,102 @@
+// std.net's Stream (CLX-413): a thread sends an archive as a zstd tar stream over a connection,
+// more than the 4 MiB a write lets wait, and the other end reads it as it comes and checks it;
+// a read gives 0 once the connection has closed, and a write to one fails.
+import std.io
+import std.net.{Conn, Event, Net, Stream}
+import std.tar.{StreamReader, StreamWriter}
+import std.thread.{Task}
+import std.zstd
+
+const BIG: u64 = 24000000
+
+// Bytes from a seed, half of them text, so they compress to about half.
+struct Gen {
+    left: u64
+    state: u64
+}
+
+impl io.Reader for Gen {
+    fn read(mut self, buf: mut List<u8>, n: usize) -> usize ! String {
+        let k = if u64(n) < self.left { n } else { usize.wrap(self.left) }
+        for _ in 0..k {
+            self.state ^= self.state << 13
+            self.state ^= self.state >> 7
+            self.state ^= self.state << 17
+            buf.push(if self.state >> 63 == 0 { 97u8 } else { u8.wrap(self.state >> 20) })
+        }
+        self.left -= u64(k)
+        return k
+    }
+}
+
+// Connects to `port` on its own Net and sends the archive.
+struct Upload {
+    port: u16
+    done: Sender<bool>
+}
+
+impl Task for Upload {
+    fn run(own self) {
+        let net = Net.new()!
+        let conn = net.connect("127.0.0.1", self.port)!
+        var t = StreamWriter.new(zstd.Writer.new(Stream.new(net, conn), 3, true))
+        t.add("hello.txt", "hello over the wire".to_bytes())!
+        var gen = Gen { left: BIG, state: 7 }
+        t.add_from("big.bin", BIG, mut gen)!
+        let stream = t.finish()!.finish()!
+        var done = self.done
+        done.send(stream.close(10000))
+    }
+}
+
+fn main() {
+    let net = Net.new()!
+    let port = net.listen("127.0.0.1", 0)!
+    var done = Receiver<bool>()
+    let sender = unsafe { Thread.spawn(Upload { port: port, done: done.sender() }) }
+    var events = List<Event>()
+    var accepted = List<Conn>()
+    while accepted.is_empty() {
+        net.poll(10000, mut events)
+        for e in events {
+            match e {
+                Accepted(c) => accepted.push(c),
+                _ => {},
+            }
+        }
+    }
+    var r = StreamReader.new(zstd.Reader.new(Stream.new(net, accepted[0])))
+    var want = Gen { left: BIG, state: 7 }
+    var a = List<u8>()
+    var b = List<u8>()
+    while let e = r.next()! {
+        if e.name == "hello.txt" {
+            println(String.from_utf8(r.read_all()!)!)    // out: hello over the wire
+            continue
+        }
+        var same = true
+        var total: u64 = 0
+        loop {
+            a.clear()
+            let got = r.read(mut a, 65536)!
+            if got == 0 {
+                break
+            }
+            b.clear()
+            _ = want.read(mut b, got)!
+            same = same and a == b
+            total += u64(got)
+        }
+        println("{e.name} {e.size} {total} {same}")    // out: big.bin 24000000 24000000 true
+    }
+    // The rest of the stream, its frame's checksum checked; then the connection ends.
+    var stream = r.finish()!.into_inner()
+    sender.join()
+    println("sent: {done.next() ?? false}")    // out: sent: true
+    var tail = List<u8>()
+    println("{stream.read(mut tail, 10)!}")    // out: 0
+    match stream.write([1u8]) {
+        ok => println("written"),
+        err(x) => println(x),    // out: the connection has closed
+    }
+}

@@ -126,6 +126,39 @@ fn main() {
 
 A `File` is open until `close`, or until the program ends, as a `FileLock` is held: nothing closes it when it's let go, so a program keeps the files it uses most and closes the others, as Minecraft keeps 256 region files. It's a [handle](../reference/ownership.md#handles), so there's never a copy of one to close it twice.
 
+A `File` is also a [`std.io`](io.md#reader-and-writer) `Reader` and `Writer`, read and written in order from its start, as Python's file objects are: each `read` and `write` goes on where the last one stopped, and `read_part` and `write_parts` move that place too. `create` opens a file empty to write, as `open(path, "wb")` does, for a file written a piece at a time, such as a [`std.tar`](tar.md#a-piece-at-a-time) archive as it's made:
+
+```calx
+import std.fs.{create, open_read, remove_dir_all, temp_dir}
+
+fn main() {
+    let dir = temp_dir()!
+    var out = create("{dir}/log.txt")!
+    for i in 0..3 {
+        out.write("line {i}\n".to_bytes())!
+    }
+    out.close()!
+    var input = open_read("{dir}/log.txt")!
+    var got = List<u8>()
+    while input.read(mut got, 4)! > 0 {
+    }
+    input.close()!
+    print(String.from_utf8(got)!)
+    // out: line 0
+    // out: line 1
+    // out: line 2
+    remove_dir_all(dir)!
+}
+```
+
+| Item | Gives |
+| --- | --- |
+| `open(path: String) -> File ! FsError` | The file open to read and write, made if nothing's there, keeping what it holds |
+| `open_read(path: String) -> File ! FsError` | The file open only to read, as `open(path, "rb")`: `NotFound` if nothing's there |
+| `create(path: String) -> File ! FsError` | The file open only to write, empty, as `open(path, "wb")`: made if nothing's there, and emptied if it is |
+| `file.read(buf: mut List<u8>, n: usize) -> usize ! String` | Up to `n` bytes from where the last read stopped, onto the end of `buf`; 0 at the end |
+| `file.write(bytes: List<u8>) ! String` | Writes the bytes where the last write stopped |
+
 ## Locking
 
 A program marks a folder as in use by locking a file in it, as a Minecraft server locks its world's `session.lock`, so a second server on the same world stops instead of both writing it. `try_lock` does just what Minecraft's `DirectoryLock` does with Java's `FileChannel`: it writes `☃` at the start, syncs it, and takes the lock. So Minecraft and a Calx program refuse each other's lock, on Windows and Linux.

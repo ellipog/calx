@@ -7,6 +7,7 @@
 module std.net
 
 import std.fs.{File}
+import std.io
 
 extern "C" {
     fn cx_net_open() -> u64
@@ -443,5 +444,126 @@ impl Net {
         }
         let scope = (u32(out[18]) << 24) | (u32(out[19]) << 16) | (u32(out[20]) << 8) | u32(out[21])
         return some(Address { ip: Ip.V6(b, scope), port: port })
+    }
+}
+
+// How much a Stream lets wait unsent before a write waits for it to go.
+const STREAM_QUEUED: usize = 4194304
+
+/// A connection read and written in order, waiting as a blocking socket does, for code that takes
+/// a `std.io` `Reader` or `Writer`, as Python's `socket.makefile("rwb")` makes a file of a socket:
+/// `std.tar`'s `StreamWriter` sending folders to another server in a `std.zstd` `Writer`, and its
+/// `StreamReader` taking them at the other end. A read waits until bytes arrive, and gives 0 once
+/// the connection has closed and they've all been read. A write that leaves more than 4 MiB
+/// queued waits until it has gone to the system, so not much more than that waits in memory, and
+/// fails once the connection has closed.
+///
+/// It polls its `Net` while it waits, and passes over what those polls say of other connections,
+/// so the `Net` is the stream's alone while it's used: one a thread makes for the transfer, as a
+/// blocking socket is a thread's.
+pub struct Stream {
+    net: Net
+    connection: Conn
+    // What it has read and not given out, from `at`.
+    buf: List<u8>
+    at: usize = 0
+    closed: bool = false
+    events: List<Event>
+}
+
+impl Stream {
+    /// The connection `conn` of `net`, accepted or from `connect`, as a stream. A connection from
+    /// `connect` that isn't open yet is waited for: what's written waits until it is, and a read
+    /// waits for its bytes.
+    pub fn new(net: Net, conn: Conn) -> Stream {
+        return Stream { net: net, connection: conn, buf: [], events: [] }
+    }
+
+    /// The connection.
+    pub fn conn(self) -> Conn {
+        return self.connection
+    }
+
+    /// Sends what's queued and closes the connection, as `Net.close` does, then waits up to
+    /// `timeout_ms` milliseconds, or forever if it's negative, until it has gone, as `Net.drain`
+    /// does: `false` if the time ran out first.
+    pub fn close(own self, timeout_ms: i64 = -1) -> bool {
+        let s = self
+        s.net.close(s.connection)
+        return s.net.drain(timeout_ms)
+    }
+
+    // Waits up to `timeout_ms` for the next events, or forever if it's negative, noting whether the
+    // connection has closed.
+    fn wait(mut self, timeout_ms: i64) {
+        self.net.poll(timeout_ms, mut self.events)
+        var ended = false
+        for e in self.events {
+            match e {
+                Closed(c) => {
+                    if c == self.connection {
+                        ended = true
+                    }
+                },
+                _ => {},
+            }
+        }
+        if ended {
+            self.closed = true
+        }
+    }
+
+    // Waits until what's queued has gone to the system, as `Net.drain` does, which a poll can't
+    // wait for, since nothing's reported when it goes; then fails if the connection has closed.
+    fn sent(mut self) ! String {
+        _ = self.net.drain(-1)
+        self.wait(0)
+        if self.closed {
+            fail "the connection closed before what was written went"
+        }
+    }
+}
+
+impl io.Reader for Stream {
+    fn read(mut self, buf: mut List<u8>, n: usize) -> usize ! String {
+        if n == 0 {
+            return 0
+        }
+        loop {
+            let here = self.buf.len() - self.at
+            if here > 0 {
+                let k = if here < n { here } else { n }
+                buf.extend(self.buf[self.at..self.at + k])
+                self.at += k
+                return k
+            }
+            self.buf.clear()
+            self.at = 0
+            // What arrived before the connection closed can still be read until the next poll.
+            if self.net.read(self.connection, mut self.buf) > 0 {
+                continue
+            }
+            if self.closed {
+                return 0
+            }
+            self.wait(-1)
+        }
+    }
+}
+
+impl io.Writer for Stream {
+    fn write(mut self, bytes: List<u8>) ! String {
+        if self.closed {
+            fail "the connection has closed"
+        }
+        self.net.write(self.connection, bytes)
+        if self.net.queued(self.connection) > STREAM_QUEUED {
+            try self.sent()
+        }
+    }
+
+    /// Waits until everything written has gone to the system, which sends it on.
+    fn flush(mut self) ! String {
+        try self.sent()
     }
 }

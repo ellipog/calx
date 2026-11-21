@@ -4857,6 +4857,57 @@ cx_u64 cx_zse_compress_dict(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level,
     return frame_write(in, n, out, level, flags, content, content_n, dict_n, dict_id, has_params ? params : 0, key, 0);
 }
 
+/* --- a frame compressed as its text comes (CLX-413) ------------------------------------------- */
+
+/* The settings for a level when the text's size isn't known, as libzstd's streaming compressor
+ * picks them: those for an input over 256 KiB, with the whole window. */
+static cp_t stream_params(cx_i32 level) {
+    if (!__atomic_load_n(&tables_ready, __ATOMIC_ACQUIRE)) tables_init();
+    return params_for(level, ~(cx_u64)0, ~(cx_u64)0);
+}
+
+/* What std.zstd's Compressor needs to know of a level: info[0] how much text each job takes, info[1]
+ * how far back before it its matches reach, and info[2] the window's log, which the frame's header
+ * gives. */
+void cx_zse_stream_params(cx_i32 level, cx_u64* info) {
+    const cp_t p = stream_params(level);
+    info[0] = job_size(&p);
+    info[1] = job_reach(&p);
+    info[2] = p.wlog;
+}
+
+/* Compresses text[pre..pre + n) as the next blocks of a frame of unknown size, matching into the
+ * text[0..pre) before it, which is at most what info[1] said: a job, as frame_write's, but one at a
+ * time, as the text comes. `first` says it's the frame's first job, which starts with the frame's
+ * repeated offsets, and `last` that its last block ends the frame. Writes into out, which has room
+ * for cx_zse_bound(n) bytes, and gives how many it wrote. */
+cx_u64 cx_zse_stream_job(cx_i32 level, const cx_u8* text, cx_u64 pre, cx_u64 n, cx_u32 first, cx_u32 last, cx_u8* out) {
+    const cp_t p = stream_params(level);
+    job_t* J = job_take(n);
+    J->p = p;
+    J->start = START_OF(p);
+    J->wsize = (cx_u32)1 << p.wlog;
+    J->base = text - J->start;
+    J->from = J->start + (cx_u32)pre;
+    J->to = J->from + (cx_u32)n;
+    J->last = (int)last;
+    J->first = (int)first;
+    J->dparams = 0;
+    J->dkey = 0;
+    J->dg = 0;
+    J->dw = 0;
+    J->dict = 0;
+    J->sink = 0;
+    J->lim = J->to;
+    J->cut = 0;
+    J->out = out;
+    J->out_cap = (cx_usize)cx_zse_bound(n);
+    job_run(J);
+    const cx_u64 made = J->out_n;
+    job_give(J);
+    return made;
+}
+
 /* A key for a new dictionary, which no other has had. */
 cx_u64 cx_zse_dict_key(void) {
     static cx_u64 keys;

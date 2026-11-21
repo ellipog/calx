@@ -162,6 +162,8 @@ fn main() ! Error {
 | `open(p).read()` | `read_text(p)`, or `read(p)` for bytes |
 | `open(p, "w").write(t)` | `write_text(p, t)`, or `write(p, bytes)` |
 | `for line in open(p):` | `for line in (try read_text(p) ?? String()).lines()` |
+| `f = open(p, "wb")`, `f.write(b)`; `open(p, "rb").read(n)` | `var f = create(p)!`, `f.write(b)!`; `open_read(p)!.read(mut buf, n)!`, a [`std.io`](../std/io.md#reader-and-writer) `Writer` and `Reader`, so `std.tar` and `std.zstd` stream into and out of them |
+| A function taking any file object, `shutil.copyfileobj(src, dst)` | `fn copy<R: Reader, W: Writer>(src: mut R, dst: mut W)` over [`std.io`](../std/io.md#reader-and-writer)'s interfaces, which files, `List<u8>`, `ByteReader` (`io.BytesIO`), standard input and output, connections and the zstd and tar streams have |
 | `os.listdir(d)`, `glob.glob("**/*.py", recursive=True)` | `list(d)`, `glob("**/*.py")`, sorted |
 | `os.walk(d)` | `walk(d)` |
 | `os.makedirs(d, exist_ok=True)` | `make_dir_all(d)` |
@@ -253,6 +255,11 @@ fn main() ! Error {
 | `bz2.compress(b, 9)` | `compress(b, 9)` from [`std.bz2`](../std/bz2.md#compressing), the same bytes, several blocks at once |
 | `compression.zstd.decompress(b)`, `ZstdDict(d)` | `decompress(b)` and `Dictionary.new(d)` from [`std.zstd`](../std/zstd.md), with the same errors, big frames on all the processors |
 | `compression.zstd.compress(b, 19)`, `compress(b, 19, zstd_dict=d)` | `compress(b, 19)` and `d.compress(b, 19)` from [`std.zstd`](../std/zstd.md#compressing), big inputs on all the processors, the same bytes on any machine |
+| `ZstdCompressor()`, `c.compress(piece)`, `c.flush()`; `ZstdDecompressor()`, `d.decompress(piece)` | `Compressor.new()`, `c.add(piece)`, `c.finish()`, and `c.flush()` for `FLUSH_BLOCK`; `Decompressor.new()`, `d.add(piece)!`, `d.finish()!`, from [`std.zstd`](../std/zstd.md#a-piece-at-a-time), every frame to the end |
+| zstandard's `ZstdCompressor().stream_writer(f)`, `ZstdDecompressor().stream_reader(f)` | `zstd.Writer.new(f)` and `zstd.Reader.new(f)` from [`std.zstd`](../std/zstd.md#a-piece-at-a-time), over any `std.io` `Writer` or `Reader`, in as much memory as the level's window takes |
+| `tarfile.open(fileobj=f, mode="w\|")`, `t.add(path, arcname=n)`, `t.addfile(info, fileobj)` | `StreamWriter.new(f)`, `t.add_tree(n, path)!` or `t.add_file(n, path)!`, `t.add_from(n, size, mut r)!`, then `t.finish()!`, from [`std.tar`](../std/tar.md#a-piece-at-a-time), each entry written as it's added |
+| `tarfile.open(fileobj=f, mode="r\|")`, `for m in t:`, `t.extractfile(m).read()`, `t.extractall(d, filter="data")` | `StreamReader.new(f)`, `while let e = r.next()! {`, `r.read_all()!` or `r.read(mut buf, n)!`, `r.extract(d)!`, from [`std.tar`](../std/tar.md#a-piece-at-a-time), refusing paths out of `d` |
+| `sock.makefile("rwb")` | `Stream.new(net, conn)` from [`std.net`](../std/net.md#a-connection-as-a-stream), which waits as a blocking socket does |
 | `train_dict(samples, 16384)`, `finalize_dict(d, samples, 16384, 3)`, `d.dict_content` | `train_dict(samples, 16384)`, `finalize_dict(d, samples, 16384, 3)` and `d.to_bytes()` from [`std.zstd`](../std/zstd.md#training-one), 3 to 5 times as fast |
 | Pillow's `Image.open(p)`, `im.resize((w, h))`, `im.save(p)` | `Image.open(p)`, `im.resize(w, h)` and `im.save(p)` from [`std.image`](../std/image.md), with Pillow's pixels |
 | `draw = ImageDraw.Draw(im)`, `draw.rectangle([x0, y0, x1, y1], fill=a, outline=b, width=2)`, `draw.line(pts, fill=c, width=3)`, `draw.point((x, y), fill=c)` | `im.rectangle(x0, y0, x1, y1, Paint.both(a, b, 2))`, `im.line(pts, c, 3)` and `im.point(x, y, c)` from [`std.image`](../std/image.md#shapes), with Pillow's pixels; `ellipse`, `polygon`, `rounded_rectangle`, `arc` and `pieslice` too |
