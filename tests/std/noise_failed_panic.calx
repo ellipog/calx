@@ -1,0 +1,11 @@
+// A Noise handshake whose message didn't read can't go on: the next call panics (CLX-411).
+
+import std.crypto.{NoiseHandshake}
+
+fn main() {
+    var hs = NoiseHandshake.responder("Noise_NN_25519_ChaChaPoly_SHA256")
+    if let err(e) = hs.read_message([1, 2, 3]) {
+        println("{e}")    // out: Truncated
+    }
+    _ = hs.write_message([])!    // panic: the Noise handshake failed, and can't go on
+}

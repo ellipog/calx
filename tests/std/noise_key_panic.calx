@@ -1,0 +1,10 @@
+// IK's initiator must know the responder's static key before its first message, and says how to
+// give it (CLX-411).
+
+import std.crypto.{NoiseHandshake, X25519Key}
+
+fn main() {
+    var hs = NoiseHandshake.initiator("Noise_IK_25519_ChaChaPoly_SHA256")
+    hs.set_static(X25519Key.generate())
+    _ = hs.write_message([])!    // panic: Noise_IK_25519_ChaChaPoly_SHA256's initiator needs the other side's static key: give it with `set_remote_static`
+}

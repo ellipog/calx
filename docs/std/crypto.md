@@ -1,6 +1,6 @@
 ---
 title: std.crypto
-description: Random bytes from the system, AES-128 in CFB8 mode, RSA with PKCS#1 v1.5 padding and signatures - what Minecraft's online-mode login and signed chat use - and argon2id password hashing in PHC strings, Ed25519 signatures, ES256 signatures on P-256 for JWTs and Apple's push service, and authenticated encryption with ChaCha20-Poly1305, XChaCha20-Poly1305 and AES-GCM, as Python's argon2-cffi and cryptography give them.
+description: Random bytes from the system, AES-128 in CFB8 mode, RSA with PKCS#1 v1.5 padding and signatures - what Minecraft's online-mode login and signed chat use - and argon2id password hashing in PHC strings, Ed25519 signatures, ES256 signatures on P-256 for JWTs and Apple's push service, X25519 key exchange and Noise handshakes, and authenticated encryption with ChaCha20-Poly1305, XChaCha20-Poly1305 and AES-GCM, as Python's argon2-cffi, cryptography and noiseprotocol give them.
 ---
 
 # `std.crypto`
@@ -15,7 +15,7 @@ Each gives what Java's `Cipher`, `KeyPairGenerator` and `SecureRandom` give for 
 
 Signed chat uses RSA signatures. Mojang's key signs each player's key, and the player's key signs each of their messages. The server checks both as Java's `Signature` checks `SHA1withRSA` and `SHA256withRSA`.
 
-For everything else there are [passwords](#passwords), hashed with argon2id into the PHC strings Python's argon2-cffi writes, [Ed25519](#ed25519) signatures, which minisign and SSH keys are, as Python's `cryptography` makes and checks them, [ES256](#es256) signatures, ECDSA on P-256, which JWTs for Apple's push service and App Store Connect are signed with, and [authenticated encryption](#authenticated-encryption), ChaCha20-Poly1305, XChaCha20-Poly1305 and AES-GCM, for keeping secrets that only a key opens and that can't be changed unnoticed, as `cryptography` seals them.
+For everything else there are [passwords](#passwords), hashed with argon2id into the PHC strings Python's argon2-cffi writes, [Ed25519](#ed25519) signatures, which minisign and SSH keys are, as Python's `cryptography` makes and checks them, [ES256](#es256) signatures, ECDSA on P-256, which JWTs for Apple's push service and App Store Connect are signed with, [X25519](#x25519) key exchange, [Noise](#noise) handshakes, which give two sides that know each other's keys, or learn them, a connection only they can read, as Python's `noiseprotocol` runs them, and [authenticated encryption](#authenticated-encryption), ChaCha20-Poly1305, XChaCha20-Poly1305 and AES-GCM, for keeping secrets that only a key opens and that can't be changed unnoticed, as `cryptography` seals them.
 
 ```calx
 import std.crypto.{Cfb8, RsaKey, random_bytes}
@@ -177,7 +177,7 @@ fn main() {
 
 - `verify` decides as OpenSSL, which `cryptography` is, and Go decide: S must be below the group's order L, so no second form of a signature passes, the key must be a point in its one encoding, and [S]B − [k]A must encode to the signature's R, byte for byte.
 - A minisign signature is Ed25519 of the file's BLAKE2b-512, `blake2b(bytes)` from [`std.hash`](hash.md#blake2b), for its prehashed `ED` form, or of the file itself for the legacy `Ed`.
-- There's no X25519 key exchange yet.
+- Key exchange on the same curve is [X25519](#x25519).
 - The [tests](../../tests/std/ed25519.calx) hold RFC 8032's five Ed25519 vectors, each signed and verified, and not verified with a bit flipped in R or S or a byte added to the message, then keys that aren't points or aren't in their one encoding, and an S of L more than a good one.
 
 ## ES256
@@ -259,6 +259,71 @@ fn main() {
 - The [tests](../../tests/std/p256.calx) hold RFC 6979's test of P-256 with SHA-256, its key's public key and its signatures of "sample" and "test", byte for byte, a key OpenSSL 3.5 made, in PKCS#8 and SEC1, with its signature, then keys, points and signatures that aren't. [Those of Wycheproof](../../tests/std/p256_wycheproof.calx) hold all of its ECDSA P-256 SHA-256 vectors, 484 signatures in DER and 262 as r then s under 225 keys, each valid one taken and each invalid one refused, as it says.
 - Checked wider than the tests: for 300 random keys and messages of up to 765 bytes, OpenSSL 3.5 verified every signature `sign_der` made, and its own RFC 6979 signatures, from `pkeyutl -pkeyopt nonce-type:1`, were the same bytes. 300 keys from `openssl genpkey` read in PKCS#8, in SEC1 from `openssl ec`, and in SEC1's DER, all to the same number; `der` wrote each back as the bytes `openssl pkcs8 -topk8` gave, and each of OpenSSL's signatures with them verified, and didn't with a byte added to its message.
 
+## X25519
+
+Diffie-Hellman on Curve25519, as RFC 7748 makes it and Python's `cryptography` gives it in `X25519PrivateKey` and `X25519PublicKey`: each side has a 32-byte private key and gives the other its 32-byte public key, and each makes the same 32-byte secret from its own private key and the other's public one, which no one watching the public keys can. It's the key exchange of TLS 1.3, SSH, WireGuard, Signal and [Noise](#noise).
+
+```calx
+import std.bytes.{from_hex, hex}
+import std.crypto.{X25519Key, X25519PublicKey}
+
+fn main() {
+    // RFC 7748's section 6.1: Alice's and Bob's private keys, and the secret both make.
+    let alice = X25519Key.from_bytes(from_hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")!)!
+    let bob = X25519Key.from_bytes(from_hex("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb")!)!
+    println(hex(alice.public_key().bytes()))    // out: 8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a
+    let shared = alice.exchange(bob.public_key())!
+    println("{hex(shared.copy())[..32]} {shared == bob.exchange(alice.public_key())!}")    // out: 4a5d9d5ba4ce2de1728e3bf480350f25 true
+
+    // A public key of small order shares the same zeros with every key, so nothing secret, and
+    // `exchange` refuses it.
+    println("{alice.exchange(X25519PublicKey.from_bytes([0; 32])!) == none}")    // out: true
+}
+```
+
+The shared secret isn't a key yet: hash it, with both public keys, into one. Here a push token is sealed for a relay whose public key the app holds, with a new key for each token, as libsodium's `crypto_box_seal` does:
+
+```calx
+import std.crypto.{X25519Key, X25519PublicKey, XChaCha20Poly1305, random_bytes}
+import std.hash.{hmac_sha256}
+
+// A key from the secret, with HMAC-SHA256 over both public keys, so it's this pair's alone.
+fn key(secret: List<u8>, sender: X25519PublicKey, relay: X25519PublicKey) -> XChaCha20Poly1305 {
+    var both = sender.bytes()
+    both.extend(relay.bytes())
+    return XChaCha20Poly1305.new(hmac_sha256(secret, both))
+}
+
+fn main() {
+    let relay = X25519Key.generate()
+    let relay_public = relay.public_key()
+
+    // The app's side: a new key, whose public half goes with the token, then forgotten.
+    let once = X25519Key.generate()
+    let nonce = random_bytes(24)
+    let sealed = key(once.exchange(relay_public.copy())!, once.public_key(), relay_public.copy()).encrypt(nonce.copy(), "apns-token-1234".to_bytes())
+
+    // The relay's side, from what it was sent.
+    let sender = X25519PublicKey.from_bytes(once.public_key().bytes())!
+    let token = key(relay.exchange(sender.copy())!, sender, relay_public).decrypt(nonce, sealed)!
+    println(String.from_utf8(token)!)    // out: apns-token-1234
+}
+```
+
+| Item | Gives |
+| --- | --- |
+| `X25519Key.generate() -> X25519Key` | A new key, 32 bytes from the system's random source, as `X25519PrivateKey.generate()` |
+| `X25519Key.from_bytes(bytes: List<u8>) -> X25519Key?` | The key in 32 bytes, as `X25519PrivateKey.from_private_bytes(bytes)`; `none` unless it's 32 bytes, all of which are keys |
+| `k.bytes() -> List<u8>` | The key's 32 bytes as they were given, as `private_bytes_raw()`. Anyone with them has every secret the key shares |
+| `k.public_key() -> X25519PublicKey` | The public key, which goes to the other side |
+| `k.exchange(peer: X25519PublicKey) -> List<u8>?` | The 32-byte secret `k` and `peer` share, as `k.exchange(peer)`; `none` where it's all zeros, for a `peer` of small order, where `cryptography` raises `ValueError` |
+| `X25519PublicKey.from_bytes(bytes: List<u8>) -> X25519PublicKey?` | The key in 32 bytes, as `X25519PublicKey.from_public_bytes(bytes)`; `none` unless it's 32 bytes. Every 32 bytes are taken |
+| `p.bytes() -> List<u8>` | The key's 32 bytes, as `public_bytes_raw()` |
+
+- A private key's 32 bytes are used as RFC 7748 says: the low three bits and the top one cleared, and the one below the top set, as they're multiplied. `bytes()` gives them back as they were given, as `cryptography` does.
+- A public key is taken as RFC 7748 says too: its top bit is left out, and a u of the field's prime or more is taken less the prime, so some numbers have two encodings. A key that's a point of small order, of which there are a few, is taken, and every key shares the same all-zero secret with it, which is why `exchange` gives `none` there rather than zeros. A protocol that hashes the public keys in with the secret, as Noise does, is safe either way.
+- The [tests](../../tests/std/x25519.calx) hold RFC 7748's vectors: both of section 5.2's, its iterated one after 1 and 1,000 rounds, and section 6.1's exchange, then points of small order and u's above the prime. [Those of Wycheproof](../../tests/std/x25519_wycheproof.calx) hold all 518 of its X25519 vectors, each shared secret as it says and the 31 of zeros refused. The iterated vector's million rounds came out as RFC 7748 says too, in a minute.
+
 ## Authenticated encryption
 
 Each of the three seals a message with a key and a nonce: the ciphertext, as long as the message, with a 16-byte tag after it. Opening it takes the same key and nonce, and gives the message back only if the tag matches, so a sealed value that someone changed, or moved, or made up, opens as `none` rather than as other bytes. Associated data, such as the id of the record a secret is stored in, isn't encrypted or put in the sealed bytes, but the tag covers it, so the secret opens only as that record's. They're RFC 8439's ChaCha20-Poly1305, its XChaCha20-Poly1305 variant from draft-irtf-cfrg-xchacha, and NIST's AES-GCM, and each seals the bytes Python's `cryptography` does, in `ChaCha20Poly1305` and `AESGCM`.
@@ -315,11 +380,113 @@ fn main() {
 | `g.encrypt(nonce, plaintext, aad)`, `g.decrypt(nonce, sealed, aad)` | As ChaCha20-Poly1305's, with a nonce of 12 bytes, as NIST advises, or 8 to 128, as `cryptography` takes. The plaintext goes up to 64 GiB less 32 bytes |
 
 - A nonce must never seal two messages under one key. Two messages with the same one give away the xor of their plaintexts, and with AES-GCM what forges any message under the key too. A counter is safe, as TLS, WireGuard and Noise use, one for each direction of a connection. Random nonces are safe with XChaCha20-Poly1305, whose 24 bytes make a repeat as unlikely as guessing the key. With 12 bytes, NIST counts random ones safe for 2^32 messages a key.
-- Which to use: XChaCha20-Poly1305 for secrets kept at rest, each with a random nonce stored beside it. ChaCha20-Poly1305 or AES-GCM where a protocol names them: Noise's `ChaChaPoly` is `ChaCha20Poly1305`, and its nonce is 4 zero bytes then the 64-bit counter, little-endian. AES-GCM is the fastest with AES instructions, which nearly every desktop and server processor of the last decade has, and much slower without them, on a Raspberry Pi 4, say, where ChaCha20 is as fast as anywhere.
+- Which to use: XChaCha20-Poly1305 for secrets kept at rest, each with a random nonce stored beside it. ChaCha20-Poly1305 or AES-GCM where a protocol names them: [Noise](#noise)'s `ChaChaPoly` is `ChaCha20Poly1305`, and its nonce is 4 zero bytes then the 64-bit counter, little-endian. AES-GCM is the fastest with AES instructions, which nearly every desktop and server processor of the last decade has, and much slower without them, on a Raspberry Pi 4, say, where ChaCha20 is as fast as anywhere.
 - The nonce isn't in what's sealed, as it isn't in `cryptography`'s. Store or send it with the sealed bytes.
 - `decrypt` compares the tag in a time that doesn't depend on where it differs, and decrypts nothing until it matches. `none` says nothing about why.
 - The [tests](../../tests/std/aead.calx) hold RFC 8439's AEAD vectors (2.8.2 and A.5), draft-irtf-cfrg-xchacha-03's (A.3.1), the GCM spec's test cases 1 to 6 and 13 to 16 and 18, and three from NIST's CAVP files, one of them a forgery, each opened and not opened with any bit of it flipped, its nonce, key or associated data changed, or a byte cut off or added. Then what Python's `cryptography` 46 seals for messages of 0 to 70,000 bytes, at the edges of every block size the code works in.
 - Checked wider than the tests: all 4,500 of NIST's CAVP cases for GCM with 128-bit tags and IVs of 8 to 128 bytes, for each key size, sealed and opened, the 1,162 marked as forgeries among them refused, and 3,600 random messages, keys and nonces sealed by `cryptography` 46, 1,200 for each cipher. `cryptography` has no XChaCha20-Poly1305, so those were sealed by `cryptography`'s `ChaCha20Poly1305` under HChaCha20's key, worked out from its raw ChaCha20. Without the AES instructions, the code gave the same bytes as with them for 3,000 more random cases of every key size.
+
+## Noise
+
+Noise handshakes, as revision 34 of the [Noise Protocol Framework](https://noiseprotocol.org/noise.html) makes them and Python's `noiseprotocol` package runs them. Two sides send each other two or three messages laid out by a pattern, and come out with a key for each direction that only the two of them have, and with each other's static key, the long-term identity, where the pattern sends one. WireGuard, WhatsApp and Lightning are built on Noise. A protocol's name says which handshake: `Noise_IK_25519_ChaChaPoly_SHA256` is the pattern IK, with [X25519](#x25519), ChaCha20-Poly1305 and SHA-256.
+
+In IK the initiator knows the responder's static key beforehand, as a phone does once it's scanned a desktop's QR code, so its first message already sends its own key and a payload, encrypted. The responder's reply finishes it:
+
+```calx
+import std.crypto.{NoiseHandshake, X25519Key}
+
+fn main() {
+    let name = "Noise_IK_25519_ChaChaPoly_SHA256"
+    let desktop = X25519Key.generate()
+    let phone = X25519Key.generate()
+
+    var initiator = NoiseHandshake.initiator(name)
+    initiator.set_static(phone.copy())
+    initiator.set_remote_static(desktop.public_key())    // from the QR code
+    var responder = NoiseHandshake.responder(name)
+    responder.set_static(desktop.copy())
+
+    let first = initiator.write_message("hello".to_bytes())!
+    println("{first.len()} {String.from_utf8(responder.read_message(first)!)!}")    // out: 101 hello
+    // The desktop knows which phone this is, and checks it against those it's paired with.
+    println("{responder.remote_static()!.bytes() == phone.public_key().bytes()}")    // out: true
+    let reply = responder.write_message([])!
+    _ = initiator.read_message(reply)!
+
+    // Every message after is encrypted, with a key for each direction.
+    var to_desktop = initiator.transport()
+    var to_phone = responder.transport()
+    let frame = to_desktop.encrypt(#"{"type":"hello"}"#.to_bytes())
+    println("{frame.len()} {String.from_utf8(to_phone.decrypt(frame)!)!}")    // out: 32 {"type":"hello"}
+}
+```
+
+Reading a message can fail, and then the handshake is over. In XX neither side knows the other's key beforehand: each sends its own, encrypted. Both sides here give a prologue, which neither sends but both must have the same of, such as the version of what they'll speak:
+
+```calx
+import std.crypto.{NoiseError, NoiseHandshake, X25519Key}
+
+fn handshake(mine: str, theirs: str) -> List<u8> ! NoiseError {
+    let name = "Noise_XX_25519_ChaChaPoly_SHA256"
+    var a = NoiseHandshake.initiator(name)
+    a.set_static(X25519Key.generate())
+    a.set_prologue(mine.to_bytes())
+    var b = NoiseHandshake.responder(name)
+    b.set_static(X25519Key.generate())
+    b.set_prologue(theirs.to_bytes())
+    while not a.is_finished() {
+        if a.is_my_turn() {
+            _ = try b.read_message(try a.write_message([]))
+        } else {
+            _ = try a.read_message(try b.write_message([]))
+        }
+    }
+    return a.handshake_hash()
+}
+
+fn main() {
+    match handshake("loom/1", "loom/1") {
+        ok(hash) => println("{hash.len()}"),    // out: 32
+        err(e) => println(e.message()),
+    }
+    match handshake("loom/1", "loom/2") {
+        ok(_) => println("agreed"),
+        err(e) => println("{e}: {e.message()}"),    // out: Decrypt: the Noise message didn't decrypt
+    }
+}
+```
+
+| Item | Gives |
+| --- | --- |
+| `NoiseHandshake.initiator(name: String) -> NoiseHandshake` | The initiator's side of the protocol the name gives, as `NoiseConnection.from_name(name)` and `set_as_initiator()`. Panics for one `supports` says no to |
+| `NoiseHandshake.responder(name: String) -> NoiseHandshake` | The responder's side, as `set_as_responder()` |
+| `NoiseHandshake.supports(name: String) -> bool` | Whether there's a handshake for the name: `Noise_`, any of the spec's 38 patterns, its 12 interactive and 3 one-way fundamental ones and 23 deferred ones, with any `psk` modifiers, then `25519`, `ChaChaPoly` or `AESGCM`, and `SHA256`, `SHA512`, `BLAKE2s` or `BLAKE2b` |
+| `h.set_static(key: X25519Key)` | Sets this side's static key, as `set_keypair_from_private_bytes(Keypair.STATIC, key)` |
+| `h.set_remote_static(key: X25519PublicKey)` | Sets the other side's static key, known beforehand, as `set_keypair_from_public_bytes(Keypair.REMOTE_STATIC, key)`: IK's, NK's and XK's initiator knows the responder's, and KK's responder knows the initiator's |
+| `h.set_prologue(prologue: List<u8>)` | Sets the prologue, as `set_prologue(prologue)`. Empty unless set |
+| `h.set_psks(psks: List<List<u8>>)` | Sets the pre-shared keys, 32 bytes each, one for each `psk` modifier, as `set_psks(psks=...)`. Panics for another length |
+| `h.set_ephemeral(key: X25519Key)` | Sets this side's ephemeral key, which is otherwise new from the system's random source each time, as it must be. For tests against fixed vectors |
+| `h.write_message(payload: List<u8> = []) -> List<u8> ! NoiseError` | The next message, its keys and the payload, which is encrypted once the sides have a key, as `write_message(payload)`. Fails with `SmallOrder` if a Diffie-Hellman gives all zeros. Panics if it isn't this side's turn, if a key the pattern needs wasn't set, or for a message over 65535 bytes |
+| `h.read_message(message: List<u8>) -> List<u8> ! NoiseError` | The payload of the other side's next message, its keys taken in and checked, as `read_message(message)`. Panics if it's this side's turn to write |
+| `h.is_my_turn() -> bool`, `h.is_finished() -> bool` | Whether this side writes the next message, and whether the handshake is done, as `handshake_finished` |
+| `h.remote_static() -> X25519PublicKey?` | The other side's static key, once it's set or read |
+| `h.handshake_hash() -> List<u8>` | The hash of everything so far, the same on both sides once it's finished, as `get_handshake_hash()`, for tying what's said after to this handshake, by signing it, say |
+| `h.transport() -> NoiseTransport` | The finished handshake's transport. It takes the handshake. Panics unless it's finished |
+| `t.encrypt(plaintext: List<u8>) -> List<u8>` | The plaintext encrypted for the other side, 16 bytes longer, as `encrypt(data)`. Panics over 65519 bytes, and on a one-way pattern's responder |
+| `t.decrypt(message: List<u8>) -> List<u8>?` | The plaintext of the other side's next message, as `decrypt(data)`, or `none` if it doesn't decrypt: changed, out of order, or not from this handshake. Panics on a one-way pattern's initiator |
+| `t.rekey_outbound()`, `t.rekey_inbound()` | A new key for one direction, worked out from the one before, as `rekey_outbound_cipher()` and `rekey_inbound_cipher()`. The other side rekeys the other end at the same place in the stream |
+| `t.handshake_hash() -> List<u8>`, `t.remote_static() -> X25519PublicKey?` | As the handshake gave them at its end |
+| `NoiseError` | `Truncated`, a message too short for the keys and tag it should hold, `TooLong`, over 65535 bytes, `Decrypt`, a key or payload that didn't decrypt, and `SmallOrder`, a Diffie-Hellman that gave all zeros. `e.message()` says which in words |
+
+- Which pattern: `IK` when the initiator knows the responder's key, as from a QR code, in one round trip. `XX` when neither knows the other's, and the responder's identity is checked after, against a list or by its hash. `NK` and `NN` when the initiator has no key of its own. A `psk` modifier mixes in a 32-byte secret both sides were given, so the handshake needs it too: `XXpsk3`, say. The [spec's](https://noiseprotocol.org/noise.html#payload-security-properties) tables say what each pattern's payloads are safe from.
+- The handshake proves the other side holds the private half of `remote_static()`. Whether that key is one it should talk to is the program's to decide, before it trusts the payloads: against its paired devices' keys, say.
+- In IK the first message's payload is encrypted to the responder's static key alone: someone who records it can send it again, and reads it if that key ever leaks. Put nothing secret in it, and act on nothing in it until the handshake is finished.
+- Noise doesn't say where one message ends. Over a WebSocket each binary message is one Noise message. Over TCP, put each message's length before it, in two bytes, as the spec suggests.
+- A transport's messages are decrypted in the order they were encrypted, since a message's nonce is its place in the stream. A message that doesn't decrypt leaves the nonce as it was, so a connection that goes on stays in step, though a program usually closes one that sent it.
+- Neither side rekeys by itself. Two programs that rekey agree on when, every so many messages, say, as each side's message count tells it.
+- `ChaChaPoly` is [`ChaCha20Poly1305`](#authenticated-encryption) with the nonce 4 zero bytes then the counter, little-endian, and `AESGCM` is `AesGcm` with it big-endian. HMAC with BLAKE2s or BLAKE2b is RFC 2104's, padded to the hash's block, as the spec says, not BLAKE2's own key. `BLAKE2s` is [`std.hash`](hash.md#blake2s)'s.
+- There's no Curve448, no `hfs`, no fallback patterns, and no setting a nonce, which messages that can come out of order, over UDP, would need.
+- The [tests](../../tests/std/noise.calx) hold 131 vectors from cacophony and snow, two implementations of the spec: every pattern, fundamental and deferred, with and without `psk` modifiers, with `ChaChaPoly` and `SHA256`, and IK, XX and XXpsk3 with each other suite. Both sides of each run from fixed keys, each message written as its bytes and read back, then the handshake hash and the transport messages, 712 messages in all. All 880 25519 vectors in the two files pass, 472 from cacophony and 408 from snow. [Those of the handshake](../../tests/std/noise_handshake.calx) check what fails and how: a changed byte, another prologue, the wrong key, a pre-shared key that differs, short and long messages and keys of small order. They also check the transport keys, the nonces and rekeying, worked out a second way from the spec with `hmac_sha256` and `ChaCha20Poly1305`.
 
 ## Checked against Java
 
@@ -379,6 +546,28 @@ On the same desktop, an i9-13900K, the best of several runs, against OpenSSL 3.5
 | An Ed25519 verify | 87 µs | 127 µs |
 
 OpenSSL's `kdf` command ran argon2's lanes one after another, as it had no thread pool to run them on. Working G out in vector registers, as the reference implementation's AVX2 code does, would make each lane faster still.
+
+X25519 is in [runtime/calx_ed25519.c](../../runtime/calx_ed25519.c) too, written from RFC 7748, on Ed25519's numbers mod 2^255 - 19. Noise is Calx, in [std/crypto.calx](../../std/crypto.calx), written from revision 34 of the spec, over X25519, the ciphers [below](#authenticated-encryption) and [`std.hash`](hash.md).
+
+| Part | How |
+| --- | --- |
+| X25519's ladder | Montgomery's ladder over all 255 bits of the clamped key, whatever they are, with the two points it carries swapped or not by masks, so neither the time nor the memory touched depends on the key. Each step is RFC 7748's: 5 multiplies, 4 squarings and a multiply by (A + 2) / 4. 1/z at the end is a power, by Ed25519's chain of squarings. What's secret is wiped from the stack before the call returns |
+| X25519's zero check | The shared secret's 32 bytes or'd together, every byte, to say whether it's all zeros |
+| Noise's states | The spec's three, as it writes them: a HandshakeState with the keys and the pattern's tokens, which runs each message's tokens in order, a SymmetricState with the chaining key and the hash, and a CipherState with a key and a nonce. A pattern is a line of a table, its messages' tokens as text, and `psk` modifiers put their token in place as the name is read |
+| Noise's hashes | HKDF on HMAC, which is RFC 2104's for all four hashes, written in Calx. An AESGCM key's round keys and GHASH table are worked out once, when the key is |
+| Ephemeral keys | New from the system's random source for each handshake, as `X25519Key.generate` makes them |
+
+On the same desktop, the best of 7 rounds, against OpenSSL 3.5's `speed ecdhx25519` in WSL:
+
+| | Calx | OpenSSL 3.5 |
+| --- | --- | --- |
+| An X25519 exchange | 28.8 µs | 20.2 µs |
+| A new X25519 key | 29.3 µs | |
+| An IK handshake, both sides' 10 X25519s and hashes | 303 µs | |
+| A 64-byte transport message, encrypted and decrypted | 0.79 µs | |
+| A 1 KiB one | 3.1 µs | |
+
+OpenSSL's X25519 is assembly with the processor's 64-bit multiply-and-add instructions, ADX and MULX, chained by hand. A handshake is once a connection, so its time hardly counts beside the network's.
 
 ES256 is [runtime/calx_p256.c](../../runtime/calx_p256.c), written from FIPS 186-5, SEC 1, RFC 6979 and Renes, Costello and Batina's paper on complete formulas. It's linked only into programs that call it, with [`std.hash`](hash.md)'s runtime for SHA-256 and HMAC-SHA256.
 

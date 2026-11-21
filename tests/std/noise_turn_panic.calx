@@ -1,0 +1,9 @@
+// A Noise handshake's sides take turns, and a side that writes out of turn panics (CLX-411).
+
+import std.crypto.{NoiseHandshake}
+
+fn main() {
+    var hs = NoiseHandshake.initiator("Noise_NN_25519_ChaChaPoly_SHA256")
+    println("{hs.write_message([])!.len()} {hs.is_my_turn()}")    // out: 32 false
+    _ = hs.write_message([])!    // panic: it's the other side's turn to write
+}
