@@ -51,7 +51,12 @@ const ENTITLEMENTS: str = #"
 
 // What a command printed, standard output and error together, or with how it ended if it failed.
 fn run(exe: String, args: List<String>, dir: String) -> String {
-    match Command.new(exe).args(args).dir(dir).output() {
+    return run_for(exe, args, dir, 0)
+}
+
+// The same, stopped once it has run `ms` milliseconds, if `ms` isn't 0.
+fn run_for(exe: String, args: List<String>, dir: String, ms: u64) -> String {
+    match Command.new(exe).args(args).dir(dir).timeout(ms).output() {
         ok(o) => {
             let text = "{o.text()}{o.error_text()}".trim_end()
             return if o.status.success() { text } else { "{text} [{o.status}]" }
@@ -115,13 +120,16 @@ fn main() {
             println("installing the {mode} app: {installed}")
             continue
         }
-        // What the app printed, without the line simctl adds with its process's id.
-        let said = run("xcrun", ["simctl", "launch", "--console-pty", sim.copy(), bundle.copy()], dir.copy())
+        // What the app printed, without the line simctl adds with its process's id. An app still
+        // running after 45 seconds has hung: what it printed by then shows where, and it's stopped,
+        // so it doesn't spin on through the rest of the tests.
+        let said = run_for("xcrun", ["simctl", "launch", "--console-pty", sim.copy(), bundle.copy()], dir.copy(), 45000)
         for line in said.lines() {
             if not line.starts_with("{bundle}: ") {
                 println(line)
             }
         }
+        _ = run("xcrun", ["simctl", "terminate", sim.copy(), bundle.copy()], dir.copy())
         _ = run("xcrun", ["simctl", "uninstall", sim.copy(), bundle], dir.copy())
     }
     if exists(join(dir.copy(), "out")) {
