@@ -1,0 +1,21 @@
+// A type alias that isn't `pub` stays in its module (CLX-436).
+// file: main.calx
+import geo.shape
+import geo.shape.{Inner}    // error: `Inner` isn't `pub` in `geo.shape`
+
+fn main() {
+    let p: shape.Inner = 1      // error: `Inner` isn't `pub` in `geo.shape`
+    let q: shape.Pt = shape.origin()
+    println("{p} {q.0}")
+}
+
+// file: geo/shape.calx
+module geo.shape
+
+pub type Pt = (f64, f64)
+type Inner = i32
+
+pub fn origin() -> Pt {
+    let i: Inner = 0
+    return (f64(i), 0.0)
+}

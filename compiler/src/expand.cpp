@@ -423,6 +423,7 @@ private:
         put_count(out, a->index);
         put_count(out, values.size());
         for (const std::string& v : values) put(out, v);
+        writing_in_ = u.module;
         switch (u.item->kind) {
             case ItemKind::struct_: write_struct(out, u.item); break;
             case ItemKind::enum_: write_enum(out, u.item); break;
@@ -501,7 +502,61 @@ private:
         return false;
     }
 
-    void write_type(std::string& out, const TypeExpr* t) {
+    // What a type alias's parameters stand for where it's written: the type written for each, and
+    // where (CLX-436).
+    struct AliasArg {
+        Name name;
+        const TypeExpr* type;
+        Module* module;
+        const std::vector<AliasArg>* outer;
+    };
+
+    // The type alias `t` names, as the checker will find it from module `m`, by its name or
+    // through its module's, and the module it's declared in; null when it doesn't name one.
+    Item* alias_named(const TypeExpr* t, Module* m, Module*& from) const {
+        if (t->kind != TypeExprKind::named || !m) return nullptr;
+        Item* it = nullptr;
+        if (t->path.parts.size() == 1) {
+            it = lookup(m, t->path.parts[0], from);
+        } else if (t->path.parts.size() == 2) {
+            for (Item* imp : m->items) {
+                if (imp->kind != ItemKind::import || !imp->imported || !imp->import_names.empty()) continue;
+                Name local = imp->import_alias ? imp->import_alias
+                                               : imp->import_path.parts[imp->import_path.parts.size() - 1];
+                if (local != t->path.parts[0]) continue;
+                for (Item* d : imp->imported->items) {
+                    if (d->kind == ItemKind::type_alias && d->is_pub && d->name == t->path.parts[1]) {
+                        from = imp->imported;
+                        it = d;
+                    }
+                }
+            }
+        }
+        if (!it || it->kind != ItemKind::type_alias || !it->self_type || it->generics.size() != t->args.size()) return nullptr;
+        return it;
+    }
+
+    // A type as an attribute reads it. A type alias is the type it names, so `@json` on a field of
+    // `type Pt = (f64, f64)` reads a tuple, though its text stays the alias, which names the same
+    // type where the declaration is (CLX-436).
+    void write_type(std::string& out, const TypeExpr* t) { write_type(out, t, writing_in_, nullptr, nullptr, 0); }
+
+    void write_type(std::string& out, const TypeExpr* t, Module* m, const std::vector<AliasArg>* params,
+                    const std::string* shown, int depth) {
+        if (t && t->kind == TypeExprKind::named && t->path.parts.size() == 1 && t->args.empty() && params) {
+            for (const AliasArg& p : *params) {
+                if (p.name == t->path.parts[0]) return write_type(out, p.type, p.module, p.outer, shown, depth);
+            }
+        }
+        Module* from = nullptr;
+        if (t && depth < 64) {
+            if (Item* a = alias_named(t, m, from)) {
+                std::vector<AliasArg> args;
+                for (std::size_t i = 0; i < a->generics.size(); i++) args.push_back({a->generics[i].name, t->args[i], m, params});
+                std::string text = shown ? *shown : span_text(t->span);
+                return write_type(out, a->self_type, from, &args, &text, depth + 1);
+            }
+        }
         if (!t) {
             put_count(out, 7);
             put(out, "Self");
@@ -524,7 +579,7 @@ private:
             case TypeExprKind::length: kind = 8; break;
         }
         put_count(out, static_cast<std::size_t>(kind));
-        put(out, span_text(t->span));
+        put(out, shown ? *shown : span_text(t->span));
         if (t->kind == TypeExprKind::named) {
             put(out, dotted(t->path.parts));
         } else if (t->kind == TypeExprKind::dyn && t->inner) {
@@ -545,7 +600,7 @@ private:
             for (const TypeExpr* x : t->args) args.push_back(x);
         }
         put_count(out, args.size());
-        for (const TypeExpr* x : args) write_type(out, x);
+        for (const TypeExpr* x : args) write_type(out, x, m, params, nullptr, depth);
     }
 
     void write_unit(std::string& out) {
@@ -994,6 +1049,7 @@ private:
     std::unordered_set<Module*> closure_;
     std::string key_;
     fs::path dir_;
+    Module* writing_in_ = nullptr;  // the module of the declaration whose types are being written
 };
 
 }  // namespace

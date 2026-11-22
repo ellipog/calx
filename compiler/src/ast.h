@@ -53,6 +53,11 @@ struct TypeExpr {
     bool callable = false;        // fn: `Fn(A) -> R`, a bound any closure or function it fits has (CLX-98)
     bool callable_mut = false;    // fn: `FnMut(A) -> R`, whose closures can change what they capture (CLX-161)
     bool c_abi = false;           // fn: `extern "C" fn(A) -> R`, a C function's address (CLX-333)
+    // Filled in by the checker: whether it names a type alias, or holds a part that does, and
+    // the type it was last resolved to, so an error about a value of that type can say it as
+    // written, `Pt`, beside what it is, `(f64, f64)` (CLX-436).
+    bool via_alias = false;
+    Type* written = nullptr;
 };
 
 // ---------------------------------------------------------------------------------------------

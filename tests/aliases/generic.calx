@@ -1,0 +1,36 @@
+// A generic type alias with its arguments where a value goes: building what it names, a struct
+// literal and a static function, in plain code and in a generic function's instances (CLX-436).
+struct Wrapper<T> {
+    v: T
+}
+
+impl<T> Wrapper<T> {
+    fn make(v: own T) -> Wrapper<T> {
+        return Wrapper { v: v }
+    }
+}
+
+type W<T> = Wrapper<T>
+type Tagged<T> = Map<String, T>
+type Many<T> = List<T>
+type Two<T> = Wrapper<Wrapper<T>>
+
+fn build<T: Copy>(x: T) -> Tagged<T> {
+    var m = Tagged<T>()
+    m.insert("x", x)
+    return m
+}
+
+fn main() {
+    var m = Tagged<i32>()
+    m.insert("a", 1)
+    var xs = Many<str>()
+    xs.push("q")
+    let w = W<i32> { v: 5 }
+    let w2 = W<str>.make("s")
+    let two: Two<u8> = Wrapper { v: Wrapper { v: 9 } }
+    println("{m["a"]} {xs[0]} {w.v} {w2.v} {two.v.v}")    // out: 1 q 5 s 9
+    let b = build(2.5)
+    let c = build("t")
+    println("{b["x"]} {c["x"]}")    // out: 2.5 t
+}

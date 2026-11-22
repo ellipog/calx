@@ -191,6 +191,7 @@ public:
         // can a bound's own arguments, as in `T: From<Wrapper<U>>`.
         defer_bounds_ = true;
         resolve_params();
+        for (Item* it : aliases_) resolve_alias(it);
         for (Item* it : interfaces_) resolve_assoc_decls(it);
         // Each impl's type and interface before any field or signature, which can name a type's
         // associated types, then its members once the interfaces' are known (CLX-72).
@@ -849,7 +850,7 @@ private:
         for (Item* it : a->second.module->items) {
             if (!it->is_pub || !it->name) continue;
             bool fits = w == "an interface" ? it->kind == ItemKind::interface
-                        : type_wanted       ? is_type_item(it)
+                        : type_wanted       ? is_type_item(it) || it->kind == ItemKind::type_alias
                                             : it->kind == ItemKind::fn || it->kind == ItemKind::const_;
             if (!fits) continue;
             example = "; write one of its items, as in " + q(std::string(text(n)) + "." + std::string(text(it->name)));
@@ -1202,7 +1203,26 @@ private:
                     interfaces_.push_back(it);
                     break;
                 }
-                case ItemKind::type_alias: not_yet(it->span, "type aliases"); break;
+                case ItemKind::type_alias:
+                    // `type Pt = (f64, f64)`: another name for a type, which is that type (CLX-436).
+                    declare_item(it);
+                    // A second one of the name has that error, which "never used" would only repeat.
+                    if (auto d = scope_->items.find(it->name); d == scope_->items.end() || d->second != it) it->used = true;
+                    it->type_params = make_params(it);
+                    if (!it->type_bounds.empty()) {
+                        std::string named = it->self_type ? span_source(it->self_type->span) : "(f64, f64)";
+                        error(it->type_bounds[0]->span, "a type alias has no bounds, which are for an interface's associated "
+                                                        "types; write " + q("type " + std::string(text(it->name)) + " = " + named));
+                        it->used = true;
+                    }
+                    if (!it->self_type) {
+                        error(it->name_span, "give the type alias " + q(text(it->name)) + " the type it names, as in " +
+                                                 q("type " + std::string(text(it->name)) + " = (f64, f64)"));
+                        it->declared = T.error;
+                        it->used = true;
+                    }
+                    aliases_.push_back(it);
+                    break;
                 case ItemKind::extern_block:
                     for (Item* member : it->members) {
                         if (member->kind != ItemKind::fn) {
@@ -1887,11 +1907,11 @@ private:
             // impl's instances (CLX-323, CLX-324). An interface's is left out: it would make
             // `dyn I<8>`, an instance of an interface over a length, for no use yet.
             bool refused = g.is_const && it->kind != ItemKind::fn && it->kind != ItemKind::struct_ &&
-                           it->kind != ItemKind::enum_ && it->kind != ItemKind::impl;
+                           it->kind != ItemKind::enum_ && it->kind != ItemKind::impl && it->kind != ItemKind::type_alias;
             if (refused) {
                 error(g.span, std::string(it->kind == ItemKind::interface ? "an interface" : "this") +
                                   " can't have a length parameter, `const " + std::string(text(g.name)) +
-                                  ": usize`; a function, a struct, an enum or an impl can");
+                                  ": usize`; a function, a struct, an enum, an impl or a type alias can");
             }
             Type* p = g.is_const ? T.make_length_param(text(g.name)) : T.make_param(text(g.name));
             if (refused) param_used_[p] = true;  // so it isn't "never used" on top of this
@@ -2597,6 +2617,14 @@ private:
     }
 
     Type* generic_type(Item* g, Slice<TypeExpr*> written, Span span) {
+        std::vector<Type*> args;
+        if (!generic_args(g, written, span, args)) return T.error;
+        return instance_type(g, args);
+    }
+
+    // The arguments written for a generic type or type alias `g`, checked against its parameters
+    // and their bounds, in `args`. False after an error.
+    bool generic_args(Item* g, Slice<TypeExpr*> written, Span span, std::vector<Type*>& args) {
         std::size_t n = g->type_params.size();
         if (written.size() != n) {
             // Its types, its lengths (CLX-324), or both, its generic arguments.
@@ -2612,9 +2640,8 @@ private:
                                 std::to_string(written.size()) + (written.size() == 1 ? " was given" : " were given"));
             }
             for (TypeExpr* a : written) if (a->kind != TypeExprKind::length) resolve_type(a);
-            return T.error;
+            return false;
         }
-        std::vector<Type*> args;
         bool bad = false;
         for (std::size_t i = 0; i < n; i++) {
             TypeExpr* a = written[i];
@@ -2626,8 +2653,7 @@ private:
             bad = bad || is_bad(x);
             args.push_back(x);
         }
-        if (bad || !check_bounds(g->type_params, args, span, q(text(g->name)))) return T.error;
-        return instance_type(g, args);
+        return !bad && check_bounds(g->type_params, args, span, q(text(g->name)));
     }
 
     // Whether each argument implements its parameter's bounds. While the impls are still being
@@ -3402,7 +3428,79 @@ private:
     // and a C function's parameters and result. Anything that holds one can't be written yet.
     // `scoped_ok` is for the places an `ArenaList` can be written: a variable, and a parameter
     // that's a view (D114).
+    // The type `t` writes. It notes on `t` whether an alias is in it, and what it came to, so an
+    // error can say a type the way it was written (CLX-436).
     Type* resolve_type(TypeExpr* t, bool pointer_ok = false, bool scoped_ok = false) {
+        Type* r = resolve_written(t, pointer_ok, scoped_ok);
+        bool via = t->via_alias;
+        for (const TypeExpr* a : t->args) via = via || a->via_alias;
+        if (t->inner) via = via || t->inner->via_alias;
+        if (t->error) via = via || t->error->via_alias;
+        t->via_alias = via;
+        t->written = r;
+        return r;
+    }
+
+    // `Pt` as written, where `Pt` is a type alias: the type it names, with what's written for its
+    // parameters in place of them, `Pair<i32>` for `type Pair<T> = (T, T)`. It's that type, not
+    // a new one, so values go between them freely (CLX-436).
+    Type* alias_type(Item* a, TypeExpr* t, bool pointer_ok) {
+        if (a != current_item_) a->used = true;
+        t->via_alias = true;
+        Type* body = resolve_alias(a);
+        if (a->type_params.empty()) {
+            if (!t->args.empty()) {
+                error(t->args[0]->span, q(text(a->name)) + " doesn't take generic arguments");
+                return T.error;
+            }
+        }
+        std::vector<Type*> args;
+        if (!a->type_params.empty() && !generic_args(a, t->args, t->span, args)) return T.error;
+        if (is_bad(body)) return T.error;
+        Type* r = args.empty() ? body : subst(body, binding(a->type_params, args));
+        if (r->has_pointer && !pointer_ok) {
+            error(t->span, q(text(a->name)) + " is " + name_of(r) + ", which holds a pointer, and a pointer can only be the "
+                           "type of a variable in `unsafe` code, a struct's field, or a parameter or result of a C function, "
+                           "an `unsafe fn` or an `@export_c` function");
+            return T.error;
+        }
+        return r;
+    }
+
+    // The type the alias `a` names, worked out once, among its own module's names and with its
+    // own parameters, as a generic type's fields are.
+    Type* resolve_alias(Item* a) {
+        if (a->declared) return a->declared;
+        if (a->resolving) {
+            error(a->self_type->span, "the type alias " + q(text(a->name)) + " names itself, so it never comes to a type; "
+                                      "a struct or an enum can hold itself through a `Box` or a `List`");
+            a->declared = T.error;
+            return T.error;
+        }
+        InModule in(*this, a);
+        a->resolving = true;
+        // Nothing of the code that asked for it means anything in it: not a function's generic
+        // parameters, nor an impl's `Self`.
+        std::vector<std::pair<Name, Type*>> outer;
+        outer.swap(env_);
+        Item* saved_item = current_item_;
+        Type* saved_impl = current_impl_type_;
+        current_item_ = a;
+        current_impl_type_ = nullptr;
+        push_env(a);
+        Type* t = resolve_type(a->self_type, true);
+        env_.swap(outer);
+        current_item_ = saved_item;
+        current_impl_type_ = saved_impl;
+        a->resolving = false;
+        if (a->declared) return a->declared;  // it named itself, which is said once
+        if (a->is_pub && !is_bad(t)) public_type(t, a->self_type->span, "a `pub` type alias can't name it");
+        report_unused_params(a, "isn't used by the type it names");
+        a->declared = t;
+        return t;
+    }
+
+    Type* resolve_written(TypeExpr* t, bool pointer_ok, bool scoped_ok) {
         switch (t->kind) {
             case TypeExprKind::named: {
                 if (t->path.parts.size() == 2 && t->args.empty()) {
@@ -3578,6 +3676,8 @@ private:
                         r = it->declared;
                         if (it != current_item_) it->used = true;
                         if (!it->type_params.empty()) return generic_type(it, t->args, t->span);
+                    } else if (it && it->kind == ItemKind::type_alias) {
+                        return alias_type(it, t, pointer_ok);
                     } else if (it && it->kind == ItemKind::interface) {
                         it->used = true;
                         error(t->span, q(text(n)) + " is an interface, not a type; take a generic parameter with it as a "
@@ -4212,6 +4312,7 @@ private:
                 error(c->value->span, "a constant's text must be known at compile time, so it can't interpolate `{...}`; "
                                       "write `\\{` for a brace");
             } else {
+                if (c->type) expect_written(c->value, c->type);
                 Type* vt = check(c->value, t);
                 if (!is_bad(vt) && !known(c->value)) {
                     error(c->value->span, "a constant's value must be known at compile time");
@@ -4344,6 +4445,7 @@ private:
             case ItemKind::enum_: return "enum";
             case ItemKind::const_: return "constant";
             case ItemKind::interface: return "interface";
+            case ItemKind::type_alias: return "type alias";
             default: return "declaration";
         }
     }
@@ -4476,6 +4578,7 @@ private:
         }
         Expr* saved_let = let_value_;
         let_value_ = s->value;
+        if (s->type) expect_written(s->value, s->type);
         Type* t = check(s->value, declared);
         let_value_ = saved_let;
         if (s->by_mut) {
@@ -4535,6 +4638,7 @@ private:
                 vt = T.error;
             }
         } else {
+            if (s->type) expect_written(s->value, s->type);
             vt = has_else ? handled(s->value, declared) : check(s->value, declared);
         }
         find_at_ = nullptr;
@@ -5067,6 +5171,7 @@ private:
             error(s->value->span, "function " + q(text(fn_->name)) + " doesn't return a value");
             return;
         }
+        if (fn_->result) expect_written(s->value, fn_->result);
         check(s->value, want);
     }
 
@@ -5595,6 +5700,9 @@ private:
 
     // Checks `e`, which should have type `expected` if that isn't null, and returns its type.
     Type* check(Expr* e, Type* expected) {
+        const TypeExpr* written = written_for_ == e ? written_ : nullptr;
+        written_for_ = nullptr;
+        written_ = nullptr;
         bool part = e == place_lhs_;  // a part of a place, checked when the whole place is
         Type* t = infer(e, expected);
         if (mut_loops_ && !part && !is_bad(t)) check_exclusive(e);
@@ -5625,10 +5733,22 @@ private:
             return expected;
         }
         if (expected && !is_bad(expected) && !is_bad(t) && t != expected && t->kind != TypeKind::never) {
-            mismatch(e, expected, t);
+            mismatch(e, expected, t, written);
             return T.error;
         }
         return t;
+    }
+
+    // The next `check` is of `e`, against the type `w` writes, as its declaration has it (CLX-436).
+    void expect_written(Expr* e, const TypeExpr* w) {
+        written_for_ = e;
+        written_ = w;
+    }
+
+    // `want` in a message, and as `w` wrote it when that names an alias: "`Pt`, which is `(f64, f64)`".
+    std::string spelled(const Type* want, const TypeExpr* w) {
+        if (!w || !w->via_alias || w->written != want) return name_of(want);
+        return q(span_source(w->span)) + ", which is " + name_of(want);
     }
 
     // `e`, where it may be a `T ! E`: the operand of `try` or `!`, or what `match`, `if let` or
@@ -5757,7 +5877,7 @@ private:
         return t;
     }
 
-    void mismatch(Expr* e, Type* want, Type* got) {
+    void mismatch(Expr* e, Type* want, Type* got, const TypeExpr* written = nullptr) {
         // CLX-289: `for i in 0..3` counts in `i32`, its literals' type, so each use as an index
         // was an error of its own that offered `usize.wrap(...)`. The range is what to change:
         // it's said once, there, and the variable's other uses are left alone.
@@ -5786,7 +5906,7 @@ private:
             error(r->span, msg);
             return;
         }
-        std::string msg = "expected " + name_of(want) + ", found " + name_of(got);
+        std::string msg = "expected " + spelled(want, written) + ", found " + name_of(got);
         if (is_numeric(want) && (is_numeric(got) || is_integral(got))) {
             if (exact_conversion(got, want)) {
                 msg += "; convert it with " + q(std::string(want->name) + "(...)");
@@ -6440,6 +6560,19 @@ private:
                 r.kind = NameKind::type;
                 r.type = it->declared;
                 r.item = it;
+            } else if (it->kind == ItemKind::type_alias && it->type_params.empty()) {
+                // The type it names, as if that were written: `V.new()` and `V { x: 1 }` for
+                // `type V = Vec2` (CLX-436).
+                it->used = true;
+                Type* t = resolve_alias(it);
+                if (is_bad(t)) {
+                    r.kind = NameKind::type;
+                    r.type = T.error;
+                    return r;
+                }
+                r.kind = NameKind::type;
+                r.type = t;
+                if (t->kind == TypeKind::struct_ || t->kind == TypeKind::enum_) r.item = t->item;
             } else {
                 r.kind = NameKind::item;
                 r.item = it;
@@ -6509,6 +6642,27 @@ private:
     }
 
     // A type name with generic arguments, `Pair<i32, str>`, as an expression's start.
+    // A generic type alias with the arguments written after it where a value goes, as in
+    // `Tagged<i32>()` for `type Tagged<T> = Map<String, T>`: the type it names (CLX-436).
+    Type* alias_value(Item* a, Slice<TypeExpr*> written, Span span) {
+        a->used = true;
+        Type* body = resolve_alias(a);
+        std::vector<Type*> args;
+        if (!generic_args(a, written, span, args) || is_bad(body)) return T.error;
+        return subst(body, binding(a->type_params, args));
+    }
+
+    // Whether a name is a type where a value goes: one a generic type alias names too, with the
+    // arguments `type_of_name` takes.
+    static bool names_a_type(const Resolved& r) {
+        return r.kind == NameKind::type || (r.kind == NameKind::item && r.item->kind == ItemKind::type_alias);
+    }
+
+    Type* type_of_name(Expr* n, const Resolved& r) {
+        if (r.kind == NameKind::item) return alias_value(r.item, n->type_args, n->span);
+        return type_of_name(n, r.type);
+    }
+
     Type* type_of_name(Expr* n, Type* t) {
         if (n->type_args.empty()) return t;
         if (!is_identity(t)) {
@@ -6545,7 +6699,7 @@ private:
             use_item(r.item);
             return fn_value(e, r.item, expected);
         }
-        if (!e->type_args.empty() && r.kind != NameKind::type) {
+        if (!e->type_args.empty() && !names_a_type(r)) {
             error(e->type_args[0]->span, q(text(n)) + " doesn't take generic arguments here");
             return T.error;
         }
@@ -6570,6 +6724,10 @@ private:
             case NameKind::item:
                 use_item(r.item);
                 if (r.item->kind == ItemKind::const_) return const_ref(e, r.item, expected);
+                if (r.item->kind == ItemKind::type_alias) {
+                    error(e->span, q(text(n)) + " is a type, not a value");
+                    return T.error;
+                }
                 error(e->span, q(text(n)) + " is an interface, not a value");
                 return T.error;
             case NameKind::type:
@@ -6580,6 +6738,7 @@ private:
                     return T.usize;
                 }
                 if (r.type->length_param) return T.usize;
+                if (is_bad(r.type)) return T.error;
                 error(e->span, q(text(n)) + " is a type, not a value");
                 return T.error;
             case NameKind::builtin:
@@ -7196,8 +7355,8 @@ private:
         // `i32.MAX` and other names inside a type.
         if (e->lhs->kind == ExprKind::name) {
             Resolved r = resolve_name(e->lhs->path.parts[0]);
-            if (r.kind == NameKind::type) {
-                Type* t = type_of_name(e->lhs, r.type);
+            if (names_a_type(r)) {
+                Type* t = type_of_name(e->lhs, r);
                 if (is_bad(t)) return T.error;
                 e->lhs->ref = Ref::type;
                 e->lhs->named_type = t;
@@ -7665,6 +7824,17 @@ private:
             return T.error;
         }
         Resolved r = resolve_name(e->type_path.parts[0]);
+        // `W<i32> { v: 1 }` for `type W<T> = Wrapper<T>`: the instance it names (CLX-436).
+        bool alias_applied = false;
+        if (r.kind == NameKind::item && r.item->kind == ItemKind::type_alias) {
+            r.kind = NameKind::type;
+            r.type = alias_value(r.item, e->type_args, e->type_path.span);
+            alias_applied = true;
+            if (is_bad(r.type)) {
+                for (FieldInit& f : e->fields) if (f.value) check(f.value, nullptr);
+                return T.error;
+            }
+        }
         if (r.kind == NameKind::type && r.type->kind == TypeKind::enum_) {
             error(e->type_path.span, "name the variant: " + q(std::string(r.type->name) + ".Variant { ... }"));
             for (FieldInit& f : e->fields) if (f.value) check(f.value, nullptr);
@@ -7682,7 +7852,7 @@ private:
             return T.error;
         }
         Type* t = r.type;
-        if (!e->type_args.empty()) {
+        if (!alias_applied && !e->type_args.empty()) {
             t = is_identity(t) ? generic_type(t->generic, e->type_args, e->type_path.span) : T.error;
             if (is_bad(t)) {
                 if (!is_identity(r.type)) error(e->type_args[0]->span, name_of(r.type) + " doesn't take generic arguments");
@@ -7727,6 +7897,7 @@ private:
             }
             given[index] = true;
             if (!field_visible(s, s->fields[index])) private_field(f.span, s, s->fields[index]);
+            if (s->fields[index].type) expect_written(v, s->fields[index].type);
             check_inferred(v, s->fields[index].resolved, sub, vars);
             values[index] = v;
         }
@@ -9178,14 +9349,27 @@ private:
             switch (r.kind) {
                 case NameKind::builtin: return builtin_call(e, r.builtin, expected);
                 case NameKind::item:
-                    if (r.item->kind != ItemKind::fn) {
-                        error(callee->span, q(text(n)) + " isn't a function");
-                        return T.error;
+                    if (r.item->kind != ItemKind::type_alias) {
+                        if (r.item->kind != ItemKind::fn) {
+                            error(callee->span, q(text(n)) + " isn't a function");
+                            return T.error;
+                        }
+                        use_item(r.item);
+                        return fn_call(e, r.item, nullptr, expected, Subst{}, callee->type_args);
                     }
-                    use_item(r.item);
-                    return fn_call(e, r.item, nullptr, expected, Subst{}, callee->type_args);
+                    // `Tagged<i32>()`: a generic type alias builds what it names (CLX-436).
+                    [[fallthrough]];
                 case NameKind::type: {
-                    Type* t = type_of_name(callee, r.type);
+                    Type* t = type_of_name(callee, r);
+                    // A generic alias's arguments are its own, and what it names is built as if
+                    // written without them. They're put back after, for a generic function's
+                    // instances, which check a copy of this code again (CLX-436).
+                    struct Restore {
+                        Expr* callee;
+                        Slice<TypeExpr*> args;
+                        ~Restore() { callee->type_args = args; }
+                    } restore{callee, callee->type_args};
+                    if (r.kind == NameKind::item) callee->type_args = {};
                     if (is_bad(t)) {
                         check_args(e);
                         return T.error;
@@ -9194,6 +9378,19 @@ private:
                     callee->named_type = t;
                     if (t->kind == TypeKind::struct_) return construct(e, t, expected);
                     if (t == T.string) return string_call(e);
+                    // A type alias of a collection builds one as its own name does: `Names()`
+                    // for `type Names = Map<String, i32>` is `Map<String, i32>()` (CLX-436).
+                    if (callee->type_args.empty()) {
+                        if (t->kind == TypeKind::map || t->kind == TypeKind::set) {
+                            return table_call(e, t, t->kind == TypeKind::map, t->table);
+                        }
+                        if (t->kind == TypeKind::deque) return deque_call(e, t);
+                        if (t->kind == TypeKind::slot_map) return slot_map_call(e, t);
+                        if (t->kind == TypeKind::list && !t->arena_list) {
+                            if (t->shared || t->boxed) return box_call(e, t, t->shared);
+                            return t->heap ? heap_call(e, t) : list_call(e, t);
+                        }
+                    }
                     if (t->kind == TypeKind::enum_) {
                         error(callee->span, "build " + a_type(t) + " from one of its variants, such as " + q(variant_text(t, 0)));
                         check_args(e);
@@ -9243,8 +9440,8 @@ private:
             // `T.something(...)`: a conversion or a static function.
             if (callee->lhs->kind == ExprKind::name) {
                 Resolved r = resolve_name(callee->lhs->path.parts[0]);
-                if (r.kind == NameKind::type) {
-                    Type* t = type_of_name(callee->lhs, r.type);
+                if (names_a_type(r)) {
+                    Type* t = type_of_name(callee->lhs, r);
                     if (is_bad(t)) {
                         check_args(e);
                         return T.error;
@@ -9700,6 +9897,7 @@ private:
             } else {
                 Expr* saved_view = str_view_ok_;
                 if (p.mode == ParamMode::read && want == T.string) str_view_ok_ = a.value;
+                if (!generic && p.type) expect_written(a.value, p.type);
                 Type* got = generic ? check_inferred(a.value, want, s, vars) : check(a.value, want);
                 str_view_ok_ = saved_view;
                 if (is_bad(got)) bad_arg = true;
@@ -12637,7 +12835,8 @@ private:
             }
             if (it->is_pub || it->used) continue;
             if (it->kind == ItemKind::fn && text(it->name) == "main" && mod == prog_.modules.back()) continue;
-            if (it->kind == ItemKind::fn || is_type_item(it) || it->kind == ItemKind::const_ || it->kind == ItemKind::interface) {
+            if (it->kind == ItemKind::fn || is_type_item(it) || it->kind == ItemKind::const_ || it->kind == ItemKind::interface ||
+                it->kind == ItemKind::type_alias) {
                 if (it->kind == ItemKind::fn && !it->body && !it->is_extern) continue;
                 error(it->name_span, std::string(item_kind(it)) + " " + q(text(it->name)) + " is never used");
             }
@@ -13045,6 +13244,12 @@ private:
     Expr* optional_call_ = nullptr;         // the `a?.m()` whose call is being checked, innermost
     bool pattern_var_ = false;  // the names a pattern binds are `var`s
     std::vector<std::unique_ptr<DPat>> pool_;
+    // Type aliases, `type Pt = (f64, f64)` (CLX-436).
+    std::vector<Item*> aliases_;
+    // The expression `check` is given next, and the type as its declaration wrote it, which a
+    // mismatch says as written when it names an alias (CLX-436).
+    Expr* written_for_ = nullptr;
+    const TypeExpr* written_ = nullptr;
     // Generics.
     std::vector<Item*> interfaces_;
     std::vector<std::unique_ptr<ImplInfo>> impl_infos_;
