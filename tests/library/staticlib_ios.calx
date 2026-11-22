@@ -122,31 +122,44 @@ fn main() {
             println("building the {mode} app: {swift} {signed}")
             continue
         }
-        // On a CI runner the first install on a simulator that has just booted, or two at once from
-        // the test's debug and release runs, can hang, and one after it works (CLX-424). So an
-        // install that hangs is stopped after 40 seconds and tried again, three times in all.
-        var installed = String()
+        // Installed and launched, and what the app printed, without the line simctl adds with its
+        // process's id. An app still running after 45 seconds has hung: what it printed by then
+        // shows where, and it's stopped, so it doesn't spin on through the rest of the tests.
+        //
+        // On a CI runner, the first app a run puts on a simulator that has just booted can hang
+        // while installing, or launch and print nothing, while the one after it works (CLX-424).
+        // So an install that fails or hangs past 40 seconds, or a launch that prints nothing, is
+        // tried again from the install, three times in all, and if none works, what each try got
+        // is said.
+        var printed: List<String> = []
+        var tries: List<String> = []
         for _ in 0..3 {
-            installed = run_for("xcrun", ["simctl", "install", sim.copy(), app.copy()], dir.copy(), 40000)
-            if not installed.contains("so it was stopped]") {
+            let installed = run_for("xcrun", ["simctl", "install", sim.copy(), app.copy()], dir.copy(), 40000)
+            if installed.is_empty() {
+                let said = run_for("xcrun", ["simctl", "launch", "--console-pty", sim.copy(), bundle.copy()], dir.copy(), 45000)
+                for line in said.lines() {
+                    if not line.starts_with("{bundle}: ") {
+                        printed.push(line.copy())
+                    }
+                }
+                _ = run("xcrun", ["simctl", "terminate", sim.copy(), bundle.copy()], dir.copy())
+                if printed.is_empty() {
+                    tries.push("launching printed {if said.is_empty() { String("nothing") } else { said }}")
+                }
+            } else {
+                tries.push("installing: {installed}")
+            }
+            _ = run("xcrun", ["simctl", "uninstall", sim.copy(), bundle.copy()], dir.copy())
+            if not printed.is_empty() {
                 break
             }
         }
-        if not installed.is_empty() {
-            println("installing the {mode} app: {installed}")
-            continue
+        if printed.is_empty() {
+            println("the {mode} app didn't run: {tries.join("; ")}")
         }
-        // What the app printed, without the line simctl adds with its process's id. An app still
-        // running after 45 seconds has hung: what it printed by then shows where, and it's stopped,
-        // so it doesn't spin on through the rest of the tests.
-        let said = run_for("xcrun", ["simctl", "launch", "--console-pty", sim.copy(), bundle.copy()], dir.copy(), 45000)
-        for line in said.lines() {
-            if not line.starts_with("{bundle}: ") {
-                println(line)
-            }
+        for line in printed {
+            println(line)
         }
-        _ = run("xcrun", ["simctl", "terminate", sim.copy(), bundle.copy()], dir.copy())
-        _ = run("xcrun", ["simctl", "uninstall", sim.copy(), bundle], dir.copy())
     }
     if exists(join(dir.copy(), "out")) {
         remove_dir_all(join(dir, "out"))!
