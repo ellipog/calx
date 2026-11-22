@@ -1,0 +1,97 @@
+// CLX-410: std.net and std.http on iOS. The std tests of the two are built for the simulator and
+// run there, and each must print what its expected output says, and panic where it expects a
+// panic, as on the other systems. On iOS std.net's events are kqueue's, as on macOS, while
+// std.http's requests go through URLSession and a WebSocket's connection through Network.framework,
+// which only this tests, as the other systems use libcurl. What differs on iOS is said here, line by
+// line: URLSession sends `Accept: */*` when a request has none, and the server in http.calx echoes
+// it. Not here: net_send_file and net_any, which start programs of their own, as an app can't.
+// simulator: runs std.net's and std.http's tests
+import std.env.{script, variable}
+import std.fs.{make_dir_all, read_text, remove_dir_all, temp_dir}
+import std.path.{join, parent_dir}
+import std.process.{Command, output_all}
+
+const TESTS: [str; 16] = ["http", "http_version", "http_form", "http_websocket", "http_server", "http_server_shutdown", "http_serve",
+    "http_server_ping", "http_server_push", "net", "net_echo", "net_wake", "net_errors", "net_peer", "net_wait",
+    "net_other_conn"]
+
+// The line a test prints on iOS where it prints `want` on the other systems.
+fn on_ios(test: str, want: own String) -> String {
+    if test == "http" {
+        // URLSession's Accept, which makes the server's answer a byte longer, 29 bytes.
+        return want.replace("accept=none", "accept=*/*").replace("0/? 29/29", "0/? 28/28")
+    }
+    return want
+}
+
+// What follows `// KIND:` on each line of `source` that has it.
+fn expected(source: String, kind: str) -> List<String> {
+    let mark = "// {kind}:"
+    var found: List<String> = []
+    for line in source.lines() {
+        if let at = line.find(mark.copy()) {
+            let rest = line[at + mark.len()..]
+            found.push(if rest.starts_with(" ") { rest[1..] } else { rest })
+        }
+    }
+    return found
+}
+
+fn main() {
+    let calx = variable("CALX") ?? String("calx")
+    let sim = variable("CALX_SIMULATOR") ?? String()
+    let dir = parent_dir(script()!)!
+    let temp = temp_dir()!
+    let out = join(temp.copy(), "http_ios")
+    make_dir_all(out.copy())!
+    var builds: List<Command> = []
+    for t in TESTS {
+        builds.push(Command.new(calx.copy()).args(["build", "--target", "aarch64-ios-sim", join(dir.copy(), "{t}.calx"), "-o",
+            join(out.copy(), t)]))
+    }
+    let built = output_all(builds, 4)!
+    for i in 0..TESTS.len() {
+        let t = TESTS[i]
+        if not built[i].status.success() {
+            println("{t}: building it {built[i].status}: {built[i].text()}{built[i].error_text()}".trim_end())
+            continue
+        }
+        let source = read_text(join(dir.copy(), "{t}.calx"))! ?? String()
+        let ran = Command.new("xcrun").args(["simctl", "spawn", sim.copy(), join(out.copy(), t)]).timeout(60000).output()!
+        var problems: List<String> = []
+        let got = ran.text().lines()
+        var want: List<String> = []
+        for w in expected(source.copy(), "out") {
+            want.push(on_ios(t, w.copy()))
+        }
+        if got != want {
+            problems.push("printed {got}, not {want}")
+        }
+        let panics = expected(source, "panic")
+        if panics.is_empty() {
+            if not ran.status.success() {
+                problems.push("{ran.status}: {ran.error_text().trim_end()}")
+            }
+        } else if ran.status.code != some(101) or not ran.error_text().contains(panics[0].copy()) {
+            problems.push("didn't panic with {panics[0]}, but {ran.status}: {ran.error_text().trim_end()}")
+        }
+        println(if problems.is_empty() { "{t}: as on the other systems" } else { "{t}: {problems.join("; ")}" })
+    }
+    remove_dir_all(temp)!
+    // out: http: as on the other systems
+    // out: http_version: as on the other systems
+    // out: http_form: as on the other systems
+    // out: http_websocket: as on the other systems
+    // out: http_server: as on the other systems
+    // out: http_server_shutdown: as on the other systems
+    // out: http_serve: as on the other systems
+    // out: http_server_ping: as on the other systems
+    // out: http_server_push: as on the other systems
+    // out: net: as on the other systems
+    // out: net_echo: as on the other systems
+    // out: net_wake: as on the other systems
+    // out: net_errors: as on the other systems
+    // out: net_peer: as on the other systems
+    // out: net_wait: as on the other systems
+    // out: net_other_conn: as on the other systems
+}
