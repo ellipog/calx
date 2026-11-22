@@ -1858,7 +1858,8 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
         }
     }
     if (dir) posix_spawn_file_actions_addchdir_np(&fa, dir);
-    /* What this program ignores, the child would too: SIGPIPE, which std.http ignores, goes back
+    /* What this program ignores, the child would too: SIGPIPE, which every Calx program ignores
+     * (see `cx_start`) and std.http's libcurl does in a static library's host, goes back
      * to ending a program that writes to a closed pipe, as `yes | head` needs. */
     sigset_t def, mask;
     sigemptyset(&def);
