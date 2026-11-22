@@ -608,7 +608,7 @@ void set_run_environment(const std::string& source) {
 #endif
 }
 
-int run_process(const std::vector<std::string>& argv, const std::string& name) {
+int run_process(const std::vector<std::string>& argv, const std::string& name, RunPath* started) {
 #ifdef _WIN32
     // `calx run` stands for the program: if it's killed, as a test runner stops one that ran too
     // long, the program and everything it started go with it, which `taskkill /T` alone can't
@@ -620,12 +620,14 @@ int run_process(const std::vector<std::string>& argv, const std::string& name) {
         if (job) CloseHandle(job);
         return -1;
     }
+    if (started) started->started();
     int status = finish(h);
     if (job) let_go(job);
     return status;
 #else
     auto h = start_bound(argv, name);
     if (h < 0) return -1;
+    if (started) started->started();
 #endif
     return finish(h);
 }
@@ -645,8 +647,9 @@ std::string why_not_started() {
     return {};
 }
 
-int run_last(const std::vector<std::string>& argv, const std::string& name) {
+int run_last(const std::vector<std::string>& argv, const std::string& name, RunPath* started) {
 #ifdef __APPLE__
+    (void)started;  // a RunPath holds nothing there
     // macOS can't end a child with its parent, as Linux's death signal and Windows' job do, so
     // `calx run` becomes the program: whatever kills it, a test runner or the terminal, kills the
     // program, and its signals and its status are the program's own (CLX-284). What this process
@@ -658,7 +661,7 @@ int run_last(const std::vector<std::string>& argv, const std::string& name) {
     execvp(argv[0].c_str(), args.data());
     return -1;
 #else
-    return run_process(argv, name);
+    return run_process(argv, name, started);
 #endif
 }
 
@@ -1705,6 +1708,128 @@ bool place_build(const std::string& built, const std::string& out, std::string& 
     if (!put(out, built)) return false;
 #endif
     return true;
+}
+
+#ifdef _WIN32
+namespace {
+
+// The file at `path`, open to read, so that while it's open no one can rename, replace or delete
+// it, though others can read it and start programs from it. Null if it can't be opened.
+HANDLE hold_file(const fs::path& path) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    return h == INVALID_HANDLE_VALUE ? nullptr : h;
+}
+
+// Whether the file `held` has open is the one at `path`, by another name or the same: a hard link.
+bool same_identity(HANDLE held, const fs::path& path) {
+    HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    BY_HANDLE_FILE_INFORMATION a, b;
+    bool same = GetFileInformationByHandle(held, &a) && GetFileInformationByHandle(h, &b) &&
+                a.dwVolumeSerialNumber == b.dwVolumeSerialNumber && a.nFileIndexHigh == b.nFileIndexHigh &&
+                a.nFileIndexLow == b.nFileIndexLow;
+    CloseHandle(h);
+    return same;
+}
+
+std::uint64_t filetime(const FILETIME& t) { return static_cast<std::uint64_t>(t.dwHighDateTime) << 32 | t.dwLowDateTime; }
+
+// When the file at `path` was last written, in 100 ns from 1601, which a hard link shares with
+// its other names. Asked of the file, not of its folder's listing, which keeps a link's time as it
+// was when the link was made.
+std::uint64_t written_at(const fs::path& path) {
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    return GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &d) ? filetime(d.ftLastWriteTime) : 0;
+}
+
+// The run folders of the 256 programs that ran most recently stay, each with the program's
+// path the firewall knows, and the rest go, but for any that ran in the last kCacheGrace. A
+// folder's time is its program's, which a build reusing it marks as used.
+void trim_runs(const fs::path& runs) {
+    constexpr std::size_t kKeepRuns = 256;
+    std::error_code ec;
+    std::vector<fs::path> dirs;
+    for (const fs::directory_entry& e : fs::directory_iterator(runs, ec)) {
+        if (e.is_directory(ec)) dirs.push_back(e.path());
+    }
+    if (dirs.size() <= kKeepRuns) return;
+    std::vector<std::pair<std::uint64_t, fs::path>> by_time;
+    for (const fs::path& d : dirs) {
+        std::uint64_t newest = 0;
+        for (const fs::directory_entry& e : fs::directory_iterator(d, ec)) newest = std::max(newest, written_at(e.path()));
+        by_time.push_back({newest, d});
+    }
+    std::sort(by_time.begin(), by_time.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    std::uint64_t recent = filetime(now) - static_cast<std::uint64_t>(std::chrono::seconds(kCacheGrace).count()) * 10'000'000;
+    for (std::size_t i = kKeepRuns; i < by_time.size(); i++) {
+        if (by_time[i].first < recent) fs::remove_all(by_time[i].second, ec);  // a program running there stays
+    }
+}
+
+}  // namespace
+#endif
+
+RunPath::RunPath(const std::string& built, const std::vector<std::string_view>& key, const std::string& name) : path_(built) {
+#ifdef _WIN32
+    std::string dir = (fs::path(cache_dir()) / "run" / hash_hex(key)).string();
+    std::string to = dir + "\\" + name + ".exe";
+    fs::path to_path = long_path(to), from = long_path(built);
+    // Holds the program at `to` if it's the one built: the same file, as a hard link makes it, or
+    // else a copy with the same bytes.
+    auto take = [&] {
+        HANDLE h = hold_file(to_path);
+        if (!h) return false;
+        if (!same_identity(h, from) && !same_file(to, built)) {
+            CloseHandle(h);
+            return false;
+        }
+        held_ = h;
+        path_ = to;
+        return true;
+    };
+    // Nothing changed since it was last put there: two files opened, and nothing written.
+    if (take()) return;
+    std::error_code ec;
+    make_dirs(long_path(dir));
+    // What runs before renamed aside, which goes once it's no longer running.
+    std::vector<fs::path> aside;
+    for (const fs::directory_entry& e : fs::directory_iterator(long_path(dir), ec)) {
+        if (e.path().extension() == L".old") aside.push_back(e.path());
+    }
+    for (const fs::path& p : aside) fs::remove(p, ec);
+    // Put there whole under a name of its own, then given the name, so a run beside this one never
+    // starts half a file. A hard link takes no room and no time, and Defender has scanned it
+    // already; a copy is for a cache on a file system without them.
+    std::string stamp = unique_stamp();
+    fs::path temp = long_path(to + "." + stamp + ".new");
+    if (!CreateHardLinkW(temp.c_str(), from.c_str(), nullptr) && !CopyFileW(from.c_str(), temp.c_str(), TRUE)) return;
+    // A program running from there can't be replaced, but it can be renamed, and it runs on as it was.
+    bool placed = MoveFileExW(temp.c_str(), to_path.c_str(), MOVEFILE_REPLACE_EXISTING);
+    if (!placed) {
+        fs::path old = long_path(to + "." + stamp + ".old");
+        placed = MoveFileExW(to_path.c_str(), old.c_str(), 0) && MoveFileExW(temp.c_str(), to_path.c_str(), 0);
+    }
+    if (!placed) DeleteFileW(temp.c_str());
+    // Another build may have put its own program there since, or holds the one there to start it:
+    // then this one starts from the cache.
+    take();
+    trim_runs(long_path((fs::path(cache_dir()) / "run").string()));
+#else
+    (void)key;
+    (void)name;
+#endif
+}
+
+RunPath::~RunPath() { started(); }
+
+void RunPath::started() {
+#ifdef _WIN32
+    if (held_) CloseHandle(static_cast<HANDLE>(held_));
+#endif
+    held_ = nullptr;
 }
 
 BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c_sources_in, BuildMode mode, BuildKind kind,

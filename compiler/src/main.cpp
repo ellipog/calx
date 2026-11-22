@@ -813,6 +813,29 @@ void cant_run(const std::string& exe) {
     std::fprintf(stderr, "calx: can't run %s%s%s\n", exe.c_str(), why.empty() ? "" : ": ", why.c_str());
 }
 
+// Where `run`, `test` and `serve` start the program `exe` they built (CLX-432): on Windows a path
+// of its own for each script, by its full path, and each kind and mode of build, so the
+// firewall's answer for it holds when it's built again. It's named for the script, and for its
+// folder too when the script is `main`, so the firewall's question says which program asks.
+RunPath run_path(const Options& opt, bool serve, const std::string& exe) {
+    namespace fs = std::filesystem;
+    std::string where = "serve", name = "calx-serve";
+    if (!serve) {
+        std::error_code ec;
+        fs::path full = fs::absolute(fs::path(opt.input), ec).lexically_normal();
+        where = full.string();
+#ifdef _WIN32
+        for (char& ch : where) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));  // as Windows matches names
+#endif
+        name = full.stem().string();
+        std::string folder = full.parent_path().filename().string();
+        if (name == "main" && !folder.empty()) name = folder + "-" + name;
+    }
+    const char* kind = opt.command == "test" ? "test" : "program";
+    const char* mode = opt.mode == BuildMode::release ? "release" : "debug";
+    return RunPath(exe, {"run", where, kind, mode}, name);
+}
+
 // What `run`, `build` and `test` do with the program they built, or found unchanged in the cache,
 // `reused` saying which, the build having started at `t0`.
 int finish(const Options& opt, bool serve, const std::string& exe, const std::vector<std::string>& tests,
@@ -869,11 +892,7 @@ int finish(const Options& opt, bool serve, const std::string& exe, const std::ve
         }
         return 0;
     }
-    if (opt.command == "test") {
-        set_run_environment(opt.input);
-        return run_tests(exe, tests, opt.filters);
-    }
-    if (opt.command == "eval" || serve) {
+    if (opt.command == "eval") {
         std::vector<std::string> run = {exe};
         run.insert(run.end(), opt.program_args.begin(), opt.program_args.end());
         std::fflush(stdout);
@@ -885,7 +904,13 @@ int finish(const Options& opt, bool serve, const std::string& exe, const std::ve
         }
         return status;
     }
-    std::vector<std::string> run = {exe};
+    RunPath at = run_path(opt, serve, exe);
+    if (opt.verbose) std::fprintf(stderr, "running %s\n", at.path().c_str());
+    if (opt.command == "test") {
+        set_run_environment(opt.input);
+        return run_tests(at.path(), tests, opt.filters);
+    }
+    std::vector<std::string> run = {at.path()};
     run.insert(run.end(), opt.program_args.begin(), opt.program_args.end());
     std::fflush(stdout);
     std::fflush(stderr);
@@ -893,10 +918,10 @@ int finish(const Options& opt, bool serve, const std::string& exe, const std::ve
     // `sys.argv[0]`, rather than the cached program's path, so `std.env.program()` names it.
     // Its full path is `std.env.script()`, as Python's `__file__` is, and this compiler's is in
     // CALX, as Python's `sys.executable` is.
-    set_run_environment(opt.input);
-    int status = run_last(run, opt.input);
+    if (!serve) set_run_environment(opt.input);
+    int status = run_last(run, serve ? opt.command : opt.input, &at);
     if (status < 0) {
-        cant_run(exe);
+        cant_run(at.path());
         return 1;
     }
     return status;
