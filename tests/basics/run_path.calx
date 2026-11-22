@@ -1,0 +1,88 @@
+// On Windows, `calx run` and `calx test` start a script's program from one path for each script,
+// `run\HASH\NAME.exe` in the cache, rather than from the cache's program, whose name is a hash of
+// what it holds (CLX-432). Windows Defender Firewall keeps its answer for each program's path, so
+// a server built again after an edit isn't asked about again. A program still running from there
+// is renamed aside, and goes once it has ended. Elsewhere the program starts from the cache, so
+// each line prints true there too.
+import std.env.{os, variable}
+import std.fs.{list, make_dir_all, remove_dir_all, temp_dir, write_text, separator}
+import std.process.{Command, Stdio}
+
+fn calx() -> String {
+    return variable("CALX") ?? String("calx")
+}
+
+// What `calx run main.calx` printed in `dir`, its lines joined by " | ".
+fn run(dir: String) -> String {
+    match Command.new(calx()).args(["run", "main.calx"]).dir(dir).output() {
+        ok(o) => return "{o.text()}{o.error_text()}".trim_end().replace("\r\n", " | ").replace("\n", " | "),
+        err(e) => return "{e}",
+    }
+}
+
+// A program that prints a word and the path it runs from, then waits for `stop` to be there, if
+// it's given.
+fn program(word: String, stop: String) -> String {
+    var uses = String()
+    var wait = String()
+    if stop.len() > 0 {
+        uses = String("import std.fs.\{exists\}\nimport std.io.\{flush\}\nimport std.thread.\{sleep\}\n")
+        wait = "    flush()\n    while not exists(\"{stop.replace("\\", "\\\\")}\") \{\n        unsafe \{ sleep(10_000_000) \}\n    \}\n"
+    }
+    return "{uses}import std.process.\{current_exe\}\n\nfn main() \{\n    println(\"{word}\")\n    println(current_exe())\n{wait}\}\n"
+}
+
+fn main() {
+    let s = separator()
+    let windows = os() == "windows"
+    let dir = temp_dir()!
+    let app = "{dir}{s}app"
+    make_dir_all(app)!
+    let main_file = "{app}{s}main.calx"
+
+    // Built, then built again after an edit: the same path, named for the script and its folder.
+    write_text(main_file, program(String("one"), String()))!
+    let first = run(app.copy()).split(" | ")
+    println(first[0])    // out: one
+    write_text(main_file, program(String("two"), String()))!
+    let second = run(app.copy()).split(" | ")
+    println(second[0])    // out: two
+    println("{(first[1] == second[1]) == windows} {second[1].ends_with("{s}app-main.exe") == windows}")    // out: true true
+    println("{second[1].contains("{s}run{s}") == windows}")    // out: true
+
+    // Still running from there, a program is renamed aside, and the new one takes the path.
+    let stop = "{dir}{s}stop"
+    write_text(main_file, program(String("three"), stop.copy()))!
+    let child = Command.new(calx()).args(["run", "main.calx"]).dir(app.copy()).stdout(Stdio.Pipe).spawn()!
+    let word = child.read_line(120000) ?? String("no line")
+    let running = child.read_line(10000) ?? String("no line")
+    println("{word} {running == second[1] or not windows}")    // out: three true
+    write_text(main_file, program(String("four"), String()))!
+    let fourth = run(app.copy()).split(" | ")
+    println("{fourth[0]} {(fourth[1] == running) == windows}")    // out: four true
+    write_text(stop, "")!
+    var c = child
+    println("{c.wait().status}")    // out: exited with status 0
+
+    // What was renamed aside goes the next time the program changes.
+    write_text(main_file, program(String("five"), String()))!
+    let fifth = run(app.copy()).split(" | ")
+    println("{fifth[0]} {(fifth[1] == running) == windows}")    // out: five true
+    if windows {
+        let folder = fifth[1][..fifth[1].len() - "{s}app-main.exe".len()].copy()
+        let names = list(folder)!
+        println("{names}")
+    } else {
+        println("[app-main.exe]")
+    }
+    // out: [app-main.exe]
+
+    // `calx test` starts its tests from a path of its own, named for the file.
+    let checks = "{app}{s}checks.calx"
+    write_text(checks, "import std.process.\{current_exe\}\n\n@test\nfn runs_from_its_path() \{\n    assert(current_exe().ends_with(\"checks.exe\") == {windows})\n\}\n")!
+    match Command.new(calx()).args(["test", "checks.calx"]).dir(app.copy()).output() {
+        ok(o) => println("{o.text().lines()[0]} [{o.status}]"),    // out: ok    runs_from_its_path [exited with status 0]
+        err(e) => println("{e}"),
+    }
+    remove_dir_all(dir)!
+}
