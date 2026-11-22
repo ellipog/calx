@@ -37,6 +37,8 @@ fn main() {
 | `normalize(path: String) -> String` | The path without its `.` names and doubled separators, and with each `..` after a name taken out, as Python's `os.path.normpath`: `a/c` for `a/./b/../c/` |
 | `glob_matches(path: String, pattern: String) -> bool` | Whether the path matches the glob, name by name. See [Globs](#globs) |
 | `glob_matches_name(name: String, pattern: String) -> bool` | Whether one name matches one name of a glob, the test [`std.fs.glob`](fs.md#trees) puts each name in a folder to |
+| `glob_matches_hidden(path: String, pattern: String) -> bool` | `glob_matches`, with hidden names matched like any other, for rules that must cover every file under a folder. See [Hidden names](#hidden-names) |
+| `glob_matches_name_hidden(name: String, pattern: String) -> bool` | `glob_matches_name`, with hidden names matched like any other |
 
 - The functions only read the text, so they never fail, and a path needn't exist. `..` is a name like any other to them: the parent of `logs/..` is `logs`, and `normalize` takes a `..` off with the name before it, which a link can make wrong, where [`std.fs.real_path`](fs.md) follows the link.
 - `.` names and a separator at the end don't count as names, so `logs`, `logs/` and `logs/.` have the same name and the same parent.
@@ -69,7 +71,7 @@ A glob matches a path name by name:
 | `[*]` | A `*` itself, and so on for `?` and `[` |
 | `**` | As a whole name, any number of names: none or more in the middle, as in `src/**/*.calx`, and one or more at the end, as in `logs/**` |
 
-- A name that starts with `.` is matched only by a pattern name that starts with `.`, so `*` and `**` pass over hidden files and folders, as the shell's globs and Python's `glob` do: `src/*` doesn't find `src/.git`, and `src/.*` does.
+- A name that starts with `.` is matched only by a pattern name that starts with `.`, so `*` and `**` pass over hidden files and folders, as the shell's globs and Python's `glob` do: `src/*` doesn't find `src/.git`, and `src/.*` does. `glob_matches_hidden` matches them like any other name ([Hidden names](#hidden-names)).
 - Letters match only in the same case, on Windows as well, so a pattern finds the same paths on every system. A Windows drive or share is the exception, matched without regard to case.
 - Separators match separators, so on Windows `\` and `/` match each other. `.` names and a separator at the end count in neither the path nor the pattern.
 - The roots must be the same: `/a/*` matches `/a/b` but not `a/b`.
@@ -82,6 +84,23 @@ fn main() {
     println("{glob_matches("src/a/b/main.calx", "src/**/*.calx")} {glob_matches("src/main.calx", "src/**/*.calx")}")    // out: true true
     println("{glob_matches("src/.git/x.calx", "src/**/*.calx")} {glob_matches("src/.h.calx", "src/.*")}")    // out: false true
     println("{glob_matches_name("r.0.0.mca", "r.*.mca")} {glob_matches_name("a5", "a[!0-9]")} {glob_matches_name("é", "?")}")    // out: true false true
+}
+```
+
+### Hidden names
+
+`glob_matches_hidden` and `glob_matches_name_hidden` match as `glob_matches` and `glob_matches_name` do, with the same roots, separators, case, classes and `**`, but take a hidden name like any other. They're for rules about paths rather than for finding files: a rule `deny /home/x/secrets/**` must cover `/home/x/secrets/.key`, as Python's `fnmatch` would.
+
+- `*`, `?`, `[...]` and `**` match names that start with `.`, so `/home/x/**` matches `/home/x/.ssh/id`, and `*` matches `.env`.
+- A `..` name is still matched only by a pattern name that starts with `.`, never by `*`, `?`, a class or `**`, so `/a/**` doesn't match `/a/../etc/passwd`, though `/a/../**` does. A name that only starts with `..`, such as `..b`, is a hidden name like any other.
+
+```calx
+import std.path.{glob_matches, glob_matches_hidden, glob_matches_name_hidden}
+
+fn main() {
+    println("{glob_matches("/home/x/.ssh/id", "/home/x/**")} {glob_matches_hidden("/home/x/.ssh/id", "/home/x/**")}")    // out: false true
+    println("{glob_matches_hidden("a/.git/.env", "**/.env")} {glob_matches_hidden("/a/../etc/passwd", "/a/**")}")    // out: true false
+    println("{glob_matches_name_hidden("./deploy.sh", "*")} {glob_matches_name_hidden("..", "*")}")    // out: true false
 }
 ```
 

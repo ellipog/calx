@@ -1,7 +1,7 @@
 // std.path: paths joined, taken apart, normalized and matched against globs, by the text alone,
 // with what Windows reads differently checked on each system.
 import std.env.{os}
-import std.path.{root, is_absolute, join, file_name, parent_dir, file_stem, file_extension, with_extension, with_file_name, parts, normalize, glob_matches, glob_matches_name}
+import std.path.{root, is_absolute, join, file_name, parent_dir, file_stem, file_extension, with_extension, with_file_name, parts, normalize, glob_matches, glob_matches_name, glob_matches_hidden, glob_matches_name_hidden}
 
 fn show(s: String?) -> String {
     if let v = s {
@@ -56,6 +56,12 @@ fn main() {
     println("{glob_matches("/a/b", "/a/*")} {glob_matches("a/b", "/a/*")} {glob_matches("./a/b/", "a/b")} {glob_matches("A.TXT", "*.txt")}")    // out: true false true false
     println("{glob_matches("a/b", "a")} {glob_matches("a", "a/b")} {glob_matches("a/x/y/b", "a/**/b")} {glob_matches("a/b", "a/**/b")}")    // out: false false true true
     println("{glob_matches_name("r.0.0.mca", "r.*.mca")} {glob_matches_name(".x", "*")} {glob_matches_name("", "*")}")    // out: true false true
+
+    // Globs with hidden names matched like any other, and `..` still by no wildcard (CLX-428).
+    println("{glob_matches_hidden("/home/x/.ssh/id", "/home/x/**")} {glob_matches_hidden("a/.git/.env", "**/.env")} {glob_matches_hidden("src/.h.calx", "src/*.calx")}")    // out: true true true
+    println("{glob_matches_hidden("/a/../etc/passwd", "/a/**")} {glob_matches_hidden("a/..", "a/*")} {glob_matches_hidden("a/..", "a/??")} {glob_matches_hidden("a/..", "a/.*")}")    // out: false false false true
+    println("{glob_matches_hidden("logs", "logs/**")} {glob_matches_hidden("a/..b", "a/*")} {glob_matches_hidden(".B", "*.b")}")    // out: false true false
+    println("{glob_matches_name_hidden("./deploy.sh", "*")} {glob_matches_name_hidden(".env", "*")} {glob_matches_name_hidden("..", "*")} {glob_matches_name_hidden("..", ".*")}")    // out: true true false true
 
     // What only Windows reads as roots and separators.
     let win = os() == "windows"
