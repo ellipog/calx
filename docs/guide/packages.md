@@ -1,6 +1,6 @@
 ---
 title: Packages
-description: Using Calx code from another folder or another git repository: calx.toml, path and git dependencies, calx.lock, and working offline.
+description: "Using Calx code from another folder or another git repository: calx.toml, path and git dependencies, calx.lock, and working offline."
 ---
 
 # Packages

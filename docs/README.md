@@ -78,7 +78,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 4. [std.time](std/time.md): a monotonic clock and the wall clock, which only `unsafe` code can read, the local time zone, dates: their arithmetic, strftime and strptime codes and ISO 8601, and the IANA time zones, built in
 5. [std.env](std/env.md): the command-line arguments, the environment variables, the system the program runs on, and the user it runs as
 6. [std.pool](std/pool.md): the threads `parallel for` runs on
-7. [std.net](std/net.md): TCP connections driven by events, on IOCP and epoll
+7. [std.net](std/net.md): TCP connections and UDP sockets driven by events, on IOCP, epoll and kqueue, with multicast, IP addresses and the machine's interfaces
 8. [std.hint](std/hint.md): `black_box`, which hides a value from the optimizer, for benchmarks
 9. [std.text.mutf8](std/text-mutf8.md): Java's Modified UTF-8, as `DataOutputStream.writeUTF` writes it
 10. [std.mail](std/mail.md): messages between actors, delivered at the barrier in order of sender, then of sending
@@ -138,6 +138,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 64. [std.signal](std/signal.md): Ctrl+C, SIGTERM, SIGHUP, Windows' console close and shutdown, and a service's stop, handled by the program as Python's `signal.signal` handles them, with a server's event loop woken to stop cleanly, and a program run as a Windows service
 65. [std.keyring](std/keyring.md): passwords and tokens kept in the system's own credential store, Credential Manager, the Keychain or the Secret Service, by service and account, as Python's `keyring` keeps them, with `Unavailable` where there's none, as on a headless server
 66. [std.bz2](std/bz2.md): bzip2 files decompressed as Python's `bz2.decompress` reads them, every stream in a file and randomised blocks too, with the same errors, and compressed byte for byte as `bz2.compress` writes them, several blocks at once
+67. [std.net.mdns](std/net-mdns.md): services announced and found on the local network with mDNS and DNS-SD, as Python's `zeroconf` and Bonjour do, beside the system's own responder, so Bonjour, avahi and Windows find what it announces
 
 ### Java compatibility
 

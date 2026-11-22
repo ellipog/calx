@@ -222,7 +222,7 @@ Serving HTTP on 127.0.0.1 port 8000 (http://127.0.0.1:8000/) ...
 ```
 
 - A folder's `index.html` or `index.htm` is served for it, and a folder without one gets a page listing what's in it. The rest is as [std.http.server](../std/http-server.md#serving-a-folder)'s `serve_dir` serves it, which is what `calx serve` runs.
-- It listens on `127.0.0.1` unless `--bind` (`-b`) gives another address, so only this machine reaches it, and Windows' firewall doesn't ask about it. Python listens on every address unless it's told otherwise.
+- It listens on `127.0.0.1` unless `--bind` (`-b`) gives another address, so only this machine reaches it, and Windows' firewall doesn't ask about it. Python listens on every address unless it's told otherwise. On every address, the firewall asks once, not again after each Calx update, since the program that serves always starts from the same path, `calx-serve.exe` in the cache ([Windows Firewall](#windows-firewall)).
 - `--port` (`-p`) gives the port. Without it, `calx serve` takes 8000, or the next free one up to 8010 if 8000 is taken, and says which on its first line. A port that's given and taken is an error.
 - Each request is logged to standard error, as Python logs it.
 - The program that serves is built the first time, optimized, and reused after that, so it starts at once.
@@ -366,6 +366,15 @@ signtool sign /fd sha256 /td sha256 /tr http://timestamp.digicert.com /f cert.pf
 ```
 
 A `calx build -o app.exe` after that writes the program over the signed one, since they differ, so sign after the last build. Calx's own releases are signed this way when CI has a certificate: [tools/release/package.calx](../../tools/release/package.calx) signs `calx` and `calx-update` before it packages them when `CALX_SIGN_CERT` names a `.pfx`, with its password in `CALX_SIGN_PASSWORD`, which CI sets from the repository's `WINDOWS_SIGNING_CERT` and `WINDOWS_SIGNING_PASSWORD` secrets. Without them, nothing is signed.
+
+### Windows Firewall
+
+On Windows, `calx run`, `calx file.calx`, `calx test` and `calx serve` don't start the program from its place in the cache, whose name is a hash of what it holds and so changes with each edit. Each script's program starts from a path of its own, `run\HASH\NAME.exe` in the cache, where `HASH` is a hash of the script's full path, whether it's a test build, and the build mode, and `NAME` is the script's name, or its folder's and its own for a `main.calx`, as `app-main.exe`. Windows Defender Firewall keeps its answer for each program's path, so a script that listens on every address, such as a server given `--bind ""` or one that uses [std.net.mdns](../std/net-mdns.md), is asked about once, as `python server.py` is, and not again each time it's built anew. `--verbose` says which path a program starts from.
+
+- The program there is a hard link to the one in the cache, which takes no room, no time, and no new scan from Defender, or a copy of it where the cache's file system has no hard links. With nothing changed, finding it there takes two files opened and nothing written.
+- It's the one file under the cache that's replaced, when the script's program has changed. A program still running from there, such as a server started before the edit, is renamed aside, since Windows can't replace a program that's running, and it runs on as it was; what was renamed aside goes the next time the program changes after it has ended. From the moment calx finds the program there until it has started, the file is held, so a run beside it can't put another program there in between. Where it can't be put there, such as while another run holds it, the program starts from its place in the cache, as before.
+- The cache keeps the folders of the 256 scripts that ran most recently, but for any that ran in the last 10 minutes, and deletes the rest. A script whose folder went, or one moved to another folder or another worktree, is a program the firewall asks about once more.
+- On Linux and macOS the program starts from its place in the cache, as before.
 
 ## Fast builds
 

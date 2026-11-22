@@ -14,6 +14,8 @@ extern "C" {
     fn cx_in_read(to: *u8, n: usize) -> usize
     fn cx_out_write(from: *const u8, n: usize)
     fn cx_out_flush()
+    fn cx_out_flush_checked() -> i32
+    fn cx_out_gone() -> u32
     fn cx_out_is_terminal() -> u32
     fn cx_term_read(to: *u8, n: usize) -> usize
     fn memmove(to: *u8, from: *const u8, n: usize) -> *u8
@@ -146,6 +148,14 @@ pub fn flush() {
     }
 }
 
+/// Whether standard output's reader has gone, as a pipe's has once `head` has read its lines and
+/// ended. From then on what's printed and written there is dropped, so a program that prints
+/// without end, as a generator piped into `head` does, checks this to stop. It's seen when the
+/// buffer is written out, at `flush()` or once it fills, not at each `print`.
+pub fn reader_gone() -> bool {
+    return unsafe { cx_out_gone() } == 1
+}
+
 /// Whether standard output is a terminal, not a file or a pipe, so a program can color what it
 /// prints there with ANSI escape codes. A Windows console reads them only once a program turns
 /// that on, which this does, and one that can't counts as no terminal.
@@ -222,16 +232,36 @@ impl Reader for Stdin {
 }
 
 /// Standard output as a `Writer`, which writes as `write` does, into the buffer `print` shares,
-/// and flushes as `flush` does, as Python's `sys.stdout.buffer`.
+/// and flushes as `flush` does, as Python's `sys.stdout.buffer`. Where `write` and `flush` drop
+/// what's written once the reader has gone, these fail, as Python's raise `BrokenPipeError`.
 pub struct Stdout {
+}
+
+/// What a failed write to standard output says: -1 is the reader gone, and any other number the
+/// C library's errno.
+fn out_error(e: i32) -> String {
+    if e == -1 {
+        return String("standard output's reader has gone (broken pipe)")
+    }
+    return "couldn't write to standard output (errno {e})"
 }
 
 impl Writer for Stdout {
     fn write(mut self, bytes: List<u8>) ! String {
+        if reader_gone() {
+            fail out_error(-1)
+        }
         write(bytes)
+        // Written straight out when it's larger than the buffer, or when it filled it.
+        if reader_gone() {
+            fail out_error(-1)
+        }
     }
 
     fn flush(mut self) ! String {
-        flush()
+        let e = unsafe { cx_out_flush_checked() }
+        if e != 0 {
+            fail out_error(e)
+        }
     }
 }

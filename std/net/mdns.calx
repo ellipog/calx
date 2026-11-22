@@ -1,0 +1,2092 @@
+/// Multicast DNS and DNS-SD (RFC 6762 and RFC 6763, CLX-412): a responder that announces this
+/// program's services on the local network, and a browser that finds the services others announce,
+/// as Python's `zeroconf` package and Apple's Bonjour do. It speaks the protocol on UDP port 5353
+/// beside the system's own responder: Bonjour's mDNSResponder on macOS, avahi on Linux, and
+/// Windows' own, which each find what it announces, as it finds what they announce.
+///
+/// An `Mdns` runs on a `std.net` event loop of its own. `register` announces a service, after
+/// probing that no other host has its name, `browse` starts finding a type's services, and
+/// `next_event` gives what was found, answering the network's questions meanwhile, as zeroconf's
+/// thread does: a program keeps calling it, on a thread of its own if it has other work.
+module std.net.mdns
+
+import std.net.{Address, Event, Ip, Net, NetError, Udp, Waker, host_name, interfaces}
+import std.random.{Random}
+import std.text.utf8.{decode_lossy}
+import std.time.{Instant}
+
+/// The port mDNS uses.
+pub const PORT: u16 = 5353
+
+// Record types, and the class every mDNS record has.
+const T_A: u16 = 1
+const T_PTR: u16 = 12
+const T_TXT: u16 = 16
+const T_AAAA: u16 = 28
+const T_SRV: u16 = 33
+const T_NSEC: u16 = 47
+const T_ANY: u16 = 255
+const CLASS_IN: u16 = 1
+
+// How long records live, in seconds, as RFC 6762 §10 advises: a host's addresses and a service's
+// SRV for 2 minutes, which change when the host does, and the rest for 75 minutes.
+const TTL_HOST: u32 = 120
+const TTL_OTHER: u32 = 4500
+
+// The most a record a legacy query asks for may live, in seconds (§6.7).
+const TTL_LEGACY: u32 = 10
+
+// How often the interfaces are looked at again for new addresses, in milliseconds.
+const LINKS_EVERY: u64 = 5000
+
+// The most records the cache holds, so a busy network can't fill memory.
+const CACHE_MOST: usize = 4096
+
+// A registration's state.
+const PROBING: u8 = 0
+const ANNOUNCING: u8 = 1
+const LIVE: u8 = 2
+
+/// Why registering or browsing failed.
+pub enum MdnsError {
+    /// The network failed: the sockets couldn't be opened, or a datagram couldn't be sent.
+    Net(NetError)
+    /// A name or type that DNS-SD can't carry, and why.
+    BadName(String)
+    /// Another host on the network has a service of this name and type already, and `register`
+    /// was told not to pick another.
+    NameTaken(String)
+}
+
+impl From<NetError> for MdnsError {
+    fn from(value: own NetError) -> Self {
+        return MdnsError.Net(value)
+    }
+}
+
+/// What went wrong, in words.
+impl Display for MdnsError {
+    fn show(self) {
+        match self {
+            Net(e) => print("{e}"),
+            BadName(why) => print("{why}"),
+            NameTaken(name) => print("another host has a service named {name}"),
+        }
+    }
+}
+
+/// A service, as `register` announces it and `browse` finds it: zeroconf's `ServiceInfo`.
+pub struct ServiceInfo {
+    /// Its type, `_loom._tcp`: an underscore and up to 15 letters, digits and hyphens for the
+    /// protocol, then `_tcp` or `_udp`.
+    pub kind: String
+    /// Its instance name, which people read, such as `Living Room PC`: up to 63 bytes of any
+    /// UTF-8, dots too.
+    pub name: String
+    /// The port it's reached on.
+    pub port: u16
+    /// The TXT record's keys and values, in order: `id=7f3a`. A key alone, without `=`, comes as
+    /// a key with the value `""`.
+    pub properties: LinkedMap<String, String>
+    /// The host it's on, as the SRV record names it: `Living-Room-PC-calx.local`. Empty in what
+    /// `register` is given, for the responder's own.
+    pub host: String
+    /// The host's addresses. Empty in what `register` is given, for the machine's own.
+    pub addresses: List<Ip>
+    /// The SRV record's priority and weight, which say which of several hosts with the service a
+    /// client tries first: 0 for both to start with.
+    pub priority: u16
+    pub weight: u16
+}
+
+impl ServiceInfo {
+    /// A service of type `kind` named `name` on `port`, with no properties, on this machine, as
+    /// zeroconf's `ServiceInfo(type_, name, port=port)` is.
+    pub fn new(kind: String, name: String, port: u16) -> ServiceInfo {
+        return ServiceInfo {
+            kind: kind.copy(),
+            name: name.copy(),
+            port: port,
+            properties: LinkedMap<String, String>(),
+            host: String(),
+            addresses: List<Ip>(),
+            priority: 0,
+            weight: 0,
+        }
+    }
+
+    /// The service with the property `name` set to `value`.
+    pub fn with_property(own self, name: String, value: String) -> ServiceInfo {
+        var s = self
+        s.properties.insert(name.copy(), value.copy())
+        return s
+    }
+
+    /// The value of the property `name`, or `none`. Keys are matched without regard to ASCII case,
+    /// as RFC 6763 §6.4 says.
+    pub fn property(self, name: String) -> String? {
+        let want = lower(name)
+        for (k, v) in self.properties {
+            if lower(k) == want {
+                return some(v.copy())
+            }
+        }
+        return none
+    }
+
+    /// Its whole name, as DNS writes it and zeroconf's `ServiceInfo.name` is: `Living Room
+    /// PC._loom._tcp.local.`. A dot in the instance name is written `\.`, and a backslash `\\`.
+    pub fn full_name(self) -> String {
+        var out = String()
+        for r in self.name.runes() {
+            if r == '.' or r == '\\' {
+                out.push('\\')
+            }
+            out.push(r)
+        }
+        out.push_str(".{self.kind}.local.")
+        return out
+    }
+}
+
+/// What `next_event` gives.
+pub enum MdnsEvent {
+    /// A service of a type `browse` was asked for, found, with its host, addresses, port and
+    /// properties: zeroconf's `add_service`, with `get_service_info` done.
+    Added(ServiceInfo)
+    /// A service found before changed: its addresses, its port, or its properties, as when the
+    /// host it's on moved to another address. zeroconf's `update_service`.
+    Updated(ServiceInfo)
+    /// A service found before went: it said goodbye, or its records ran out without being
+    /// renewed. It's what was last known of it. zeroconf's `remove_service`.
+    Removed(ServiceInfo)
+    /// Another host claimed the name of one of this program's services after it was announced,
+    /// and it's announced again under a new one: its type, its old name and its new one.
+    Renamed(String, String, String)
+}
+
+// A record's data.
+enum Data {
+    A([u8; 4])
+    Aaaa([u8; 16])
+    Ptr(List<String>)
+    // Priority, weight, port and target.
+    Srv(u16, u16, u16, List<String>)
+    Txt(List<List<u8>>)
+    // NSEC and any other type, as its bytes.
+    Other(List<u8>)
+}
+
+// A resource record. A name is its labels, without the root's empty one.
+struct Record {
+    name: List<String>
+    kind: u16
+    flush: bool
+    ttl: u32
+    data: Data
+}
+
+struct Question {
+    name: List<String>
+    kind: u16
+    unicast: bool
+}
+
+struct Message {
+    id: u16
+    response: bool
+    questions: List<Question>
+    answers: List<Record>
+    authority: List<Record>
+    additional: List<Record>
+}
+
+// ASCII lowercase, as DNS compares names (RFC 4343).
+fn lower(s: String) -> String {
+    var b = s.to_bytes()
+    for i in 0..b.len() {
+        if b[i] >= 65 and b[i] <= 90 {
+            b[i] += 32
+        }
+    }
+    return String.from_utf8(b) ?? String()
+}
+
+// A name's key: its labels in lowercase, each after its length, so two names have the same key
+// exactly when DNS calls them the same, dots inside labels and all.
+fn key_from(labels: List<String>, from: usize) -> String {
+    var out = String()
+    for i in from..labels.len() {
+        out.push_str("{labels[i].len()}:")
+        out.push_str(lower(labels[i]))
+    }
+    return out
+}
+
+fn key(labels: List<String>) -> String {
+    return key_from(labels, 0)
+}
+
+// The labels of a dotted name, without a final dot.
+fn labels_of(text: String) -> List<String> {
+    var out = List<String>()
+    for part in text.split(".") {
+        if not part.is_empty() {
+            out.push(part.copy())
+        }
+    }
+    return out
+}
+
+fn dotted(labels: List<String>) -> String {
+    return labels.join(".")
+}
+
+fn hex(bytes: List<u8>) -> String {
+    let digits = "0123456789abcdef"
+    var out = String()
+    for b in bytes {
+        let hi = usize(b) >> 4
+        let lo = usize(b) & 15
+        out.push_str(digits[hi..hi + 1])
+        out.push_str(digits[lo..lo + 1])
+    }
+    return out
+}
+
+// What a record's data is, for telling records apart: names compared as DNS compares them.
+fn data_key(d: Data) -> String {
+    return match d {
+        Data.A(b) => "a{b[0]}.{b[1]}.{b[2]}.{b[3]}",
+        Data.Aaaa(b) => {
+            var raw = List<u8>()
+            for i in 0usize..16 {
+                raw.push(b[i])
+            }
+            "q{hex(raw)}"
+        },
+        Data.Ptr(n) => "p{key(n)}",
+        Data.Srv(p, w, port, target) => "s{p} {w} {port} {key(target)}",
+        Data.Txt(strings) => {
+            var out = String("t")
+            for s in strings {
+                out.push_str("{s.len()}:{hex(s)}")
+            }
+            out
+        },
+        Data.Other(raw) => "o{hex(raw)}",
+    }
+}
+
+fn record_key(r: Record) -> String {
+    return "{key(r.name)}/{r.kind}/{data_key(r.data)}"
+}
+
+// Reads a DNS message, keeping its own copy of the bytes.
+struct Reader {
+    bytes: List<u8>
+    at: usize
+    bad: bool
+}
+
+impl Reader {
+    fn byte(mut self) -> u8 {
+        if self.at >= self.bytes.len() {
+            self.bad = true
+            return 0
+        }
+        let b = self.bytes[self.at]
+        self.at += 1
+        return b
+    }
+
+    fn short(mut self) -> u16 {
+        let hi = u32(self.byte())
+        let lo = u32(self.byte())
+        return u16.wrap((hi << 8) | lo)
+    }
+
+    fn long(mut self) -> u32 {
+        let hi = u32(self.short())
+        let lo = u32(self.short())
+        return (hi << 16) | lo
+    }
+
+    fn take(mut self, n: usize) -> List<u8> {
+        if self.at + n > self.bytes.len() {
+            self.bad = true
+            self.at = self.bytes.len()
+            return List<u8>()
+        }
+        let out = self.bytes[self.at..self.at + n]
+        self.at += n
+        return out
+    }
+
+    // A name, following compression pointers, each to an earlier place, so a loop can't go on.
+    fn name(mut self) -> List<String> {
+        var labels = List<String>()
+        var pos = self.at
+        var jumped = false
+        var total: usize = 0
+        loop {
+            if pos >= self.bytes.len() {
+                self.bad = true
+                return labels
+            }
+            let len = self.bytes[pos]
+            if len == 0 {
+                if not jumped {
+                    self.at = pos + 1
+                }
+                return labels
+            }
+            if (len & 0xC0) == 0xC0 {
+                if pos + 1 >= self.bytes.len() {
+                    self.bad = true
+                    return labels
+                }
+                let target = (usize(len & 0x3F) << 8) | usize(self.bytes[pos + 1])
+                if not jumped {
+                    self.at = pos + 2
+                    jumped = true
+                }
+                if target >= pos {
+                    self.bad = true
+                    return labels
+                }
+                pos = target
+                continue
+            }
+            if (len & 0xC0) != 0 {
+                self.bad = true
+                return labels
+            }
+            let n = usize(len)
+            if pos + 1 + n > self.bytes.len() {
+                self.bad = true
+                return labels
+            }
+            total += n + 1
+            if total > 255 {
+                self.bad = true
+                return labels
+            }
+            labels.push(decode_lossy(self.bytes, pos + 1, pos + 1 + n))
+            pos += 1 + n
+        }
+    }
+
+    fn question(mut self) -> Question {
+        let name = self.name()
+        let kind = self.short()
+        let class = self.short()
+        return Question { name: name, kind: kind, unicast: (class & 0x8000) != 0 }
+    }
+
+    fn record(mut self) -> Record {
+        let name = self.name()
+        let kind = self.short()
+        let class = self.short()
+        let ttl = self.long()
+        let len = usize(self.short())
+        let end = self.at + len
+        if end > self.bytes.len() {
+            self.bad = true
+            return Record { name: name, kind: kind, flush: false, ttl: 0, data: Data.Other(List<u8>()) }
+        }
+        let data = if kind == T_A and len == 4 {
+            Data.A([self.byte(), self.byte(), self.byte(), self.byte()])
+        } else if kind == T_AAAA and len == 16 {
+            var b: [u8; 16] = [0; 16]
+            for i in 0usize..16 {
+                b[i] = self.byte()
+            }
+            Data.Aaaa(b)
+        } else if kind == T_PTR {
+            Data.Ptr(self.name())
+        } else if kind == T_SRV and len >= 7 {
+            let p = self.short()
+            let w = self.short()
+            let port = self.short()
+            Data.Srv(p, w, port, self.name())
+        } else if kind == T_TXT {
+            var strings = List<List<u8>>()
+            while self.at < end and not self.bad {
+                let n = usize(self.byte())
+                strings.push(self.take(n))
+            }
+            Data.Txt(strings)
+        } else {
+            Data.Other(self.take(len))
+        }
+        if self.at != end {
+            self.bad = true
+        }
+        return Record { name: name, kind: kind, flush: (class & 0x8000) != 0, ttl: ttl, data: data }
+    }
+}
+
+// The message in `bytes`, or `none` if it isn't one.
+fn parse(bytes: own List<u8>) -> Message? {
+    var r = Reader { bytes: bytes, at: 0, bad: false }
+    let id = r.short()
+    let flags = r.short()
+    let qd = r.short()
+    let an = r.short()
+    let ns = r.short()
+    let ar = r.short()
+    // Only standard queries and responses, with no error (§18.3, §18.11).
+    if r.bad or (flags & 0x7800) != 0 or (flags & 0x000F) != 0 {
+        return none
+    }
+    var m = Message {
+        id: id,
+        response: (flags & 0x8000) != 0,
+        questions: List<Question>(),
+        answers: List<Record>(),
+        authority: List<Record>(),
+        additional: List<Record>(),
+    }
+    for _ in 0u16..qd {
+        m.questions.push(r.question())
+    }
+    for _ in 0u16..an {
+        m.answers.push(r.record())
+    }
+    for _ in 0u16..ns {
+        m.authority.push(r.record())
+    }
+    for _ in 0u16..ar {
+        m.additional.push(r.record())
+    }
+    if r.bad {
+        return none
+    }
+    return some(m)
+}
+
+// Writes a DNS message, with names compressed (RFC 1035 §4.1.4).
+struct Writer {
+    bytes: List<u8>
+    names: Map<String, u16>
+    compress: bool
+}
+
+impl Writer {
+    fn new() -> Writer {
+        return Writer { bytes: List<u8>(), names: Map<String, u16>(), compress: true }
+    }
+
+    fn short(mut self, v: u16) {
+        self.bytes.push(u8.wrap(u32(v) >> 8))
+        self.bytes.push(u8.wrap(v))
+    }
+
+    fn long(mut self, v: u32) {
+        self.short(u16.wrap(v >> 16))
+        self.short(u16.wrap(v))
+    }
+
+    fn name(mut self, labels: List<String>) {
+        for i in 0..labels.len() {
+            if self.compress {
+                let k = key_from(labels, i)
+                if let at = self.names.get(k) {
+                    self.short(0xC000 | at)
+                    return
+                }
+                if self.bytes.len() < 0x3FFF {
+                    self.names.insert(k, u16.wrap(self.bytes.len()))
+                }
+            }
+            let b = labels[i].to_bytes()
+            let n = if b.len() > 63 { 63usize } else { b.len() }
+            self.bytes.push(u8.wrap(n))
+            self.bytes.extend(b[..n])
+        }
+        self.bytes.push(0)
+    }
+
+    fn data(mut self, d: Data) {
+        match d {
+            Data.A(b) => {
+                for i in 0usize..4 {
+                    self.bytes.push(b[i])
+                }
+            },
+            Data.Aaaa(b) => {
+                for i in 0usize..16 {
+                    self.bytes.push(b[i])
+                }
+            },
+            Data.Ptr(n) => self.name(n),
+            Data.Srv(p, w, port, target) => {
+                self.short(p)
+                self.short(w)
+                self.short(port)
+                self.name(target)
+            },
+            Data.Txt(strings) => {
+                for s in strings {
+                    let n = if s.len() > 255 { 255usize } else { s.len() }
+                    self.bytes.push(u8.wrap(n))
+                    self.bytes.extend(s[..n])
+                }
+            },
+            Data.Other(raw) => self.bytes.extend(raw),
+        }
+    }
+
+    // A record, its TTL no more than `most`, and without the cache-flush bit for a legacy
+    // query's answer (§6.7).
+    fn record(mut self, r: Record, most: u32, legacy: bool) {
+        self.name(r.name)
+        self.short(r.kind)
+        self.short(if r.flush and not legacy { 0x8001u16 } else { CLASS_IN })
+        self.long(if r.ttl > most { most } else { r.ttl })
+        let at = self.bytes.len()
+        self.short(0)
+        self.data(r.data)
+        let len = self.bytes.len() - at - 2
+        self.bytes[at] = u8.wrap(len >> 8)
+        self.bytes[at + 1] = u8.wrap(len)
+    }
+}
+
+// A record's data as its bytes, uncompressed and as written, for comparing two hosts' records
+// when they probe at once (§8.2).
+fn data_bytes(d: Data) -> List<u8> {
+    var w = Writer { bytes: List<u8>(), names: Map<String, u16>(), compress: false }
+    w.data(d)
+    return w.bytes
+}
+
+fn message(id: u16, response: bool, questions: List<Question>, answers: List<Record>, authority: List<Record>, additional: List<Record>, most: u32 = 0xFFFFFFFF, legacy: bool = false) -> List<u8> {
+    var w = Writer.new()
+    w.short(id)
+    // A response is authoritative (§18.4).
+    w.short(if response { 0x8400u16 } else { 0u16 })
+    w.short(u16.wrap(questions.len()))
+    w.short(u16.wrap(answers.len()))
+    w.short(u16.wrap(authority.len()))
+    w.short(u16.wrap(additional.len()))
+    for q in questions {
+        w.name(q.name)
+        w.short(q.kind)
+        w.short(if q.unicast { 0x8001u16 } else { CLASS_IN })
+    }
+    for r in answers {
+        w.record(r, most, legacy)
+    }
+    for r in authority {
+        w.record(r, most, legacy)
+    }
+    for r in additional {
+        w.record(r, most, legacy)
+    }
+    return w.bytes
+}
+
+// The labels of a service type, `_loom._tcp`, or why it isn't one (RFC 6763 §7).
+fn kind_labels(kind: String) -> List<String> ! MdnsError {
+    var labels = labels_of(kind)
+    if labels.len() >= 1 and lower(labels[labels.len() - 1]) == "local" {
+        _ = labels.pop()
+    }
+    if labels.len() != 2 {
+        fail MdnsError.BadName("a service type is two labels, such as `_loom._tcp`, not `{kind}`")
+    }
+    let proto = lower(labels[1])
+    if proto != "_tcp" and proto != "_udp" {
+        fail MdnsError.BadName("a service type ends in `_tcp` or `_udp`, not `{labels[1]}`")
+    }
+    let name = labels[0].copy()
+    if not name.starts_with("_") or name.len() < 2 or name.len() > 16 {
+        fail MdnsError.BadName("a service type starts with `_` and 1 to 15 letters, digits and hyphens, not `{name}`")
+    }
+    for i in 1..name.len() {
+        let c = name.byte_at(i)
+        let good = (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or (c >= 48 and c <= 57) or c == 45
+        if not good {
+            fail MdnsError.BadName("a service type has only letters, digits and hyphens after `_`, not `{name}`")
+        }
+    }
+    labels.push("local")
+    return labels
+}
+
+// A host's label made of what DNS host names may have: letters, digits and hyphens (RFC 952), so
+// `iPod_2GB` is `iPod-2GB`, and only its first label, so `build-7.example.com` is `build-7`.
+fn host_label(name: String) -> String {
+    var out = List<u8>()
+    for b in name.to_bytes() {
+        if b == 46 {
+            break
+        }
+        let good = (b >= 97 and b <= 122) or (b >= 65 and b <= 90) or (b >= 48 and b <= 57) or b == 45
+        out.push(if good { b } else { 45u8 })
+        if out.len() == 50 {
+            break
+        }
+    }
+    let label = String.from_utf8(out) ?? String()
+    return if label.is_empty() { String("calx") } else { label }
+}
+
+fn txt_strings(properties: LinkedMap<String, String>) -> List<List<u8>> {
+    var out = List<List<u8>>()
+    for (k, v) in properties {
+        var s = k.to_bytes()
+        s.push(61)
+        s.extend(v.to_bytes())
+        out.push(s)
+    }
+    // A TXT record has at least one string: an empty one when there's nothing to say (§6.1).
+    if out.is_empty() {
+        out.push(List<u8>())
+    }
+    return out
+}
+
+fn properties_of(strings: List<List<u8>>) -> LinkedMap<String, String> {
+    var out = LinkedMap<String, String>()
+    for s in strings {
+        if s.is_empty() {
+            continue
+        }
+        var eq = s.len()
+        for i in 0..s.len() {
+            if s[i] == 61 {
+                eq = i
+                break
+            }
+        }
+        let k = decode_lossy(s, 0, eq)
+        if k.is_empty() {
+            continue
+        }
+        // A key that's there again is ignored (§6.4).
+        var seen = false
+        let lk = lower(k)
+        for (have, _) in out {
+            seen = seen or lower(have) == lk
+        }
+        if seen {
+            continue
+        }
+        let v = if eq < s.len() { decode_lossy(s, eq + 1, s.len()) } else { String() }
+        out.insert(k, v)
+    }
+    return out
+}
+
+// One of this program's services.
+struct Registration {
+    id: u32
+    info: ServiceInfo
+    kind: List<String>
+    host: List<String>
+    state: u8
+    step: u32
+    next_at: u64
+    allow_rename: bool
+    // Another host has the name, while `register` probes and mayn't rename it: it fails.
+    conflict: bool
+    renames: u32
+    // The name it was last announced with, or "" before it was: a name that differs once it's
+    // probed again is said with `Renamed`.
+    announced: String
+    // Its SRV and TXT records as they were before `update` changed them, until `was_until`: a
+    // response of its own sent before the change, heard after it, isn't another host's (§9).
+    was: List<String>
+    was_until: u64
+}
+
+// A browse for a type's services.
+struct Browse {
+    kind: List<String>
+    key: String
+    next_at: u64
+    interval: u64
+}
+
+// A record in the cache, with when it came, in ms on the responder's clock, when it runs out,
+// how many of its refreshing queries have gone (§5.2), and whether a newer record of its name
+// and type flushed it, which leaves it a second before it goes, though it's no longer what the
+// name has (§10.2).
+struct Cached {
+    record: Record
+    at: u64
+    expires: u64
+    step: u32
+    flushed: bool
+}
+
+// A response waiting its random delay before it's multicast (§6).
+struct Pending {
+    due: u64
+    answers: List<Record>
+    additional: List<Record>
+}
+
+// A question to ask again until it's answered: when next, and how many times it was asked.
+struct Asking {
+    name: List<String>
+    kind: u16
+    next_at: u64
+    tries: u32
+}
+
+// A UDP socket of the responder's: one for IPv4 and one for IPv6, each joined to the group on
+// each interface.
+struct Sock {
+    udp: Udp
+    v6: bool
+    joined: List<u32>
+}
+
+/// An mDNS responder and browser, zeroconf's `Zeroconf()`: it announces this program's services
+/// and finds others', on a `Net` of its own. It's one thread's, as its `Net` is, so it's made on the
+/// thread that runs it.
+pub struct Mdns {
+    net: Net
+    port: u16
+    socks: List<Sock>
+    // The host the services are on, and the machine's addresses.
+    me: List<String>
+    mine: List<Ip>
+    links: List<u32>
+    links_at: u64
+    regs: List<Registration>
+    next_id: u32
+    browses: List<Browse>
+    cache: Map<String, Cached>
+    // What browsing has found and said so, by the service's name key.
+    found: LinkedMap<String, ServiceInfo>
+    // The services `resolve` asks for, by name key.
+    wanted: List<List<String>>
+    asking: List<Asking>
+    pending: List<Pending>
+    goodbyes: List<Pending>
+    happened: Deque<MdnsEvent>
+    random: Random
+    born: Instant
+    closed: bool
+}
+
+impl Mdns {
+    /// A responder and browser on `port`, mDNS's 5353 unless it's another for a test, on every
+    /// interface with multicast, IPv4 and IPv6. Its host is `host` in `.local`, or the machine's
+    /// name with `-calx` after it, `Living-Room-PC-calx.local`, since the system's own responder
+    /// announces the machine's name with the addresses it chooses, and the same name with other
+    /// addresses would be a conflict that renames the machine.
+    pub fn new(port: u16 = PORT, host: String = "") -> Mdns ! MdnsError {
+        let net = try Net.new()
+        var socks = List<Sock>()
+        // Each socket shares the port with the system's responder and any other program's.
+        let v4 = try net.bind_udp("0.0.0.0", port, reuse: true)
+        socks.push(Sock { udp: v4, v6: false, joined: List<u32>() })
+        if let ok(v6) = net.bind_udp("::", port, reuse: true) {
+            socks.push(Sock { udp: v6, v6: true, joined: List<u32>() })
+        }
+        for s in socks {
+            // RFC 6762 §11: every mDNS packet goes with a hop limit of 255, so a receiver can
+            // tell it came from the local link.
+            if let err(_) = s.udp.set_multicast_ttl(255) {}
+            if let err(_) = s.udp.set_ttl(255) {}
+            if let err(_) = s.udp.set_multicast_loopback(true) {}
+        }
+        let name = if host.is_empty() { "{host_label(host_name())}-calx" } else { host_label(host) }
+        var m = Mdns {
+            net: net,
+            port: port,
+            socks: socks,
+            me: [name, String("local")],
+            mine: List<Ip>(),
+            links: List<u32>(),
+            links_at: 0,
+            regs: List<Registration>(),
+            next_id: 1,
+            browses: List<Browse>(),
+            cache: Map<String, Cached>(),
+            found: LinkedMap<String, ServiceInfo>(),
+            wanted: List<List<String>>(),
+            asking: List<Asking>(),
+            pending: List<Pending>(),
+            goodbyes: List<Pending>(),
+            happened: Deque<MdnsEvent>(),
+            random: Random.system(),
+            born: unsafe { Instant.now() },
+            closed: false,
+        }
+        m.check_links()
+        return m
+    }
+
+    /// The host its services are on: `Living-Room-PC-calx.local`.
+    pub fn host(self) -> String {
+        return dotted(self.me)
+    }
+
+    /// The machine's addresses it announces for its host, from every interface with multicast but
+    /// the loopback, as they were last looked at: every 5 seconds, so a host that moves to another
+    /// address announces the new one.
+    pub fn addresses(self) -> List<Ip> {
+        return self.mine.copy()
+    }
+
+    /// A `Waker` for its loop, so another thread can make `next_event` return at once.
+    pub fn waker(self) -> Waker ! NetError {
+        return try self.net.waker()
+    }
+
+    // Milliseconds since it started.
+    fn now(self) -> u64 {
+        return unsafe { Instant.now() }.nanos_since(self.born) / 1000000
+    }
+
+    // A random delay from `lo` up to `hi` milliseconds.
+    fn jitter(mut self, lo: u64, hi: u64) -> u64 {
+        return lo + self.random.below(hi - lo)
+    }
+
+    /// Announces `info` on the network, as zeroconf's `register_service` does: it probes three
+    /// times, 250 ms apart, for another host with a service of the same name and type (§8.1),
+    /// then announces it (§8.3), and returns the name it got, about a second after it's called.
+    /// With `allow_name_change`, a name another host has becomes `Name (2)`, then `Name (3)`,
+    /// as Bonjour names them; without it, `register` fails with `NameTaken`. It answers questions
+    /// about the service from then on, while the program calls `next_event`, and announces it
+    /// twice more, one and three seconds after the first time.
+    pub fn register(mut self, info: ServiceInfo, allow_name_change: bool = true) -> String ! MdnsError {
+        let kind = try kind_labels(info.kind)
+        if info.name.is_empty() or info.name.len() > 63 {
+            fail MdnsError.BadName("an instance name is 1 to 63 bytes, not {info.name.len()}")
+        }
+        for (k, v) in info.properties {
+            if k.is_empty() or k.contains("=") or k.len() + v.len() + 1 > 255 {
+                fail MdnsError.BadName("a TXT property is a key without `=`, and at most 255 bytes with its value: `{k}`")
+            }
+        }
+        let host = if info.host.is_empty() { self.me.copy() } else { labels_of(info.host) }
+        var full = host.copy()
+        if full.is_empty() or lower(full[full.len() - 1]) != "local" {
+            full.push("local")
+        }
+        var stored = info.copy()
+        stored.kind = dotted(kind[..2])
+        stored.host = dotted(full)
+        let instance = Mdns.instance_of(stored.name, kind)
+        for r in self.regs {
+            if key(Mdns.instance_of(r.info.name, r.kind)) == key(instance) {
+                fail MdnsError.BadName("{stored.full_name()} is registered already")
+            }
+        }
+        let id = self.next_id
+        self.next_id += 1
+        let first = self.now() + self.jitter(0, 250)
+        self.regs.push(Registration {
+            id: id,
+            info: stored,
+            kind: kind,
+            host: full,
+            state: PROBING,
+            step: 0,
+            next_at: first,
+            allow_rename: allow_name_change,
+            conflict: false,
+            announced: String(),
+            renames: 0,
+            was: List<String>(),
+            was_until: 0,
+        })
+        loop {
+            let at = self.reg_index(id) ?? self.regs.len()
+            if at == self.regs.len() {
+                fail MdnsError.BadName("the registration went")
+            }
+            if self.regs[at].state != PROBING {
+                return self.regs[at].info.name.copy()
+            }
+            if self.regs[at].conflict and not self.regs[at].allow_rename {
+                let gone = self.regs.remove(at)
+                fail MdnsError.NameTaken(gone.info.full_name())
+            }
+            let wait = self.wait_ms(1000)
+            try self.step(wait)
+        }
+    }
+
+    /// Changes a registered service's port, properties or addresses, as zeroconf's
+    /// `update_service` does: the service whose type and name `info` has is announced again with
+    /// what's new. `false` if there's no such service.
+    pub fn update(mut self, info: ServiceInfo) -> bool {
+        let ok(kind) = kind_labels(info.kind) else {
+            return false
+        }
+        let instance = Mdns.instance_of(info.name, kind)
+        for i in 0..self.regs.len() {
+            if key(Mdns.instance_of(self.regs[i].info.name, self.regs[i].kind)) == key(instance) {
+                // What it said before may still be on its way, to this program too: it isn't a
+                // conflict when it comes. Answers not sent yet go with what's new instead.
+                let now = self.now()
+                let before = Mdns.service_records(self.regs[i])
+                if now >= self.regs[i].was_until {
+                    self.regs[i].was = List<String>()
+                }
+                self.regs[i].was.push(record_key(before[2]))
+                self.regs[i].was.push(record_key(before[3]))
+                self.regs[i].was_until = now + 3000
+                let ik = key(instance)
+                for p in mut self.pending {
+                    p.answers.retain(|r| key(r.name) != ik)
+                    p.additional.retain(|r| key(r.name) != ik)
+                }
+                self.regs[i].info.port = info.port
+                self.regs[i].info.properties = info.properties.copy()
+                self.regs[i].info.addresses = info.addresses.copy()
+                self.regs[i].info.priority = info.priority
+                self.regs[i].info.weight = info.weight
+                if self.regs[i].state != PROBING {
+                    self.regs[i].state = ANNOUNCING
+                    self.regs[i].step = 0
+                    self.regs[i].next_at = self.now()
+                }
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Stops announcing the service of `kind` named `name`, as zeroconf's `unregister_service`
+    /// does: it says goodbye, with its records' time to live at 0, so browsers forget it at once
+    /// (§10.1). `false` if there's no such service.
+    pub fn unregister(mut self, kind: String, name: String) -> bool {
+        let ok(labels) = kind_labels(kind) else {
+            return false
+        }
+        let instance = Mdns.instance_of(name, labels)
+        for i in 0..self.regs.len() {
+            if key(Mdns.instance_of(self.regs[i].info.name, self.regs[i].kind)) == key(instance) {
+                let r = self.regs.remove(i)
+                if r.state != PROBING {
+                    self.goodbye(r)
+                }
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Starts finding services of type `kind`, `_loom._tcp`, as zeroconf's `ServiceBrowser`
+    /// does: it asks the network at once, then after 1, 2, 4 seconds and so on, to an hour apart
+    /// (§5.2), and `next_event` gives each service found, changed or gone.
+    pub fn browse(mut self, kind: String) ! MdnsError {
+        let labels = try kind_labels(kind)
+        let k = key(labels)
+        for b in self.browses {
+            if b.key == k {
+                return
+            }
+        }
+        let first = self.now() + self.jitter(20, 120)
+        self.browses.push(Browse { kind: labels, key: k, next_at: first, interval: 1000 })
+    }
+
+    /// Stops finding services of type `kind`. What was found is forgotten, without `Removed`.
+    pub fn stop_browsing(mut self, kind: String) {
+        let ok(labels) = kind_labels(kind) else {
+            return
+        }
+        let k = key(labels)
+        self.browses.retain(|b| b.key != k)
+        var gone = List<String>()
+        for (name, info) in self.found {
+            if let ok(l) = kind_labels(info.kind) {
+                if key(l) == k {
+                    gone.push(name.copy())
+                }
+            }
+        }
+        for g in gone {
+            _ = self.found.remove(g)
+        }
+    }
+
+    /// The services of the types it browses that it knows of now.
+    pub fn services(self) -> List<ServiceInfo> {
+        var out = List<ServiceInfo>()
+        for (_, info) in self.found {
+            out.push(info.copy())
+        }
+        return out
+    }
+
+    /// The service of type `kind` named `name`, with its host, addresses, port and properties, as
+    /// zeroconf's `get_service_info` gives it: from what it knows, or by asking the network,
+    /// waiting up to `timeout_ms` milliseconds for the answer. `none` if none came.
+    pub fn resolve(mut self, kind: String, name: String, timeout_ms: i64 = 3000) -> ServiceInfo? ! MdnsError {
+        let labels = try kind_labels(kind)
+        let instance = Mdns.instance_of(name, labels)
+        let start = self.now()
+        self.wanted.push(instance.copy())
+        self.ask(instance, T_SRV, start)
+        self.ask(instance, T_TXT, start)
+        var result: ServiceInfo? = none
+        loop {
+            if let info = self.info_of(instance, labels, true) {
+                result = some(info)
+                break
+            }
+            let spent = i64.wrap(self.now() - start)
+            if spent >= timeout_ms {
+                break
+            }
+            let left = timeout_ms - spent
+            let wait = self.wait_ms(left)
+            if let err(e) = self.step(wait) {
+                self.wanted.retain(|w| key(w) != key(instance))
+                fail e
+            }
+        }
+        let k = key(instance)
+        self.wanted.retain(|w| key(w) != k)
+        self.asking.retain(|a| key(a.name) != k)
+        return result
+    }
+
+    /// The next thing that happened to the services it browses, waiting up to `timeout_ms`
+    /// milliseconds for it, or forever if it's negative. `none` if nothing did in that time. It
+    /// answers the network's questions about this program's services while it waits, so a program
+    /// that only registers calls it too, in a loop.
+    pub fn next_event(mut self, timeout_ms: i64 = -1) -> MdnsEvent? ! MdnsError {
+        let start = self.now()
+        loop {
+            if let e = self.happened.pop_first() {
+                return some(e)
+            }
+            var wait: i64 = -1
+            if timeout_ms >= 0 {
+                let spent = i64.wrap(self.now() - start)
+                if spent >= timeout_ms and spent > 0 {
+                    return none
+                }
+                wait = timeout_ms - spent
+            }
+            let slice = self.wait_ms(wait)
+            try self.step(slice)
+            if timeout_ms == 0 {
+                return self.happened.pop_first()
+            }
+        }
+    }
+
+    /// Says goodbye for each of its services, so browsers forget them at once, then closes its
+    /// sockets, as zeroconf's `close()` does. Nothing works after.
+    pub fn close(mut self) {
+        if self.closed {
+            return
+        }
+        while let r = self.regs.pop() {
+            if r.state != PROBING {
+                self.goodbye(r)
+            }
+        }
+        // A goodbye goes twice, the second a little after the first.
+        while let g = self.goodbyes.pop() {
+            self.send_response(g.answers, g.additional)
+        }
+        _ = self.net.drain(500)
+        for s in self.socks {
+            s.udp.close()
+        }
+        self.socks.clear()
+        self.closed = true
+    }
+
+    // Its name's labels: the instance, then the type.
+    fn instance_of(name: String, kind: List<String>) -> List<String> {
+        var out = List<String>()
+        out.push(name.copy())
+        for l in kind {
+            out.push(l.copy())
+        }
+        return out
+    }
+
+    fn reg_index(self, id: u32) -> usize? {
+        for i in 0..self.regs.len() {
+            if self.regs[i].id == id {
+                return some(i)
+            }
+        }
+        return none
+    }
+
+    // How long to wait for the next thing to do, at most `most` milliseconds, or as long as that
+    // is if `most` is negative and there's nothing.
+    fn wait_ms(self, most: i64) -> i64 {
+        let now = self.now()
+        var due = self.links_at + LINKS_EVERY
+        for r in self.regs {
+            due = due.min(r.next_at)
+        }
+        for b in self.browses {
+            due = due.min(b.next_at)
+        }
+        for p in self.pending {
+            due = due.min(p.due)
+        }
+        for g in self.goodbyes {
+            due = due.min(g.due)
+        }
+        for a in self.asking {
+            due = due.min(a.next_at)
+        }
+        for (_, c) in self.cache {
+            due = due.min(c.expires)
+            if c.step < 4 {
+                due = due.min(refresh_at(c))
+            }
+        }
+        let left = if due <= now { 0i64 } else { i64.wrap(due - now) }
+        if most < 0 {
+            return left
+        }
+        return left.min(most)
+    }
+
+    // Polls up to `wait_ms`, handles what came, and does what's due.
+    fn step(mut self, wait_ms: i64) ! MdnsError {
+        if self.closed {
+            return
+        }
+        var events = List<Event>()
+        self.net.poll(wait_ms, mut events)
+        var got = List<(List<u8>, Address)>()
+        for e in events {
+            match e {
+                Datagram(u) => {
+                    while let d = u.receive_from() {
+                        got.push((d.bytes, d.from))
+                    }
+                },
+                _ => {},
+            }
+        }
+        // In the order they came.
+        got.reverse()
+        while let (bytes, from) = got.pop() {
+            self.handle(bytes, from)
+        }
+        try self.timers()
+    }
+
+    fn handle(mut self, bytes: own List<u8>, from: Address) {
+        let m = parse(bytes) else return
+        if m.response {
+            // A response from another port isn't mDNS's (§6).
+            if from.port == self.port {
+                self.on_response(m)
+            }
+        } else {
+            self.on_query(m, from)
+        }
+    }
+
+    // The records of a registration: its PTRs, SRV and TXT, then its host's addresses.
+    fn service_records(r: Registration) -> List<Record> {
+        let instance = Mdns.instance_of(r.info.name, r.kind)
+        var out = List<Record>()
+        out.push(Record { name: r.kind.copy(), kind: T_PTR, flush: false, ttl: TTL_OTHER, data: Data.Ptr(instance.copy()) })
+        out.push(Record {
+            name: [String("_services"), String("_dns-sd"), String("_udp"), String("local")],
+            kind: T_PTR,
+            flush: false,
+            ttl: TTL_OTHER,
+            data: Data.Ptr(r.kind.copy()),
+        })
+        out.push(Record {
+            name: instance.copy(),
+            kind: T_SRV,
+            flush: true,
+            ttl: TTL_HOST,
+            data: Data.Srv(r.info.priority, r.info.weight, r.info.port, r.host.copy()),
+        })
+        out.push(Record { name: instance, kind: T_TXT, flush: true, ttl: TTL_OTHER, data: Data.Txt(txt_strings(r.info.properties)) })
+        return out
+    }
+
+    fn host_records(self, r: Registration) -> List<Record> {
+        var out = List<Record>()
+        let addrs = if r.info.addresses.is_empty() { self.mine.copy() } else { r.info.addresses.copy() }
+        for a in addrs {
+            match a {
+                Ip.V4(b) => out.push(Record { name: r.host.copy(), kind: T_A, flush: true, ttl: TTL_HOST, data: Data.A(b) }),
+                Ip.V6(b, _) => out.push(Record { name: r.host.copy(), kind: T_AAAA, flush: true, ttl: TTL_HOST, data: Data.Aaaa(b) }),
+            }
+        }
+        return out
+    }
+
+    // NSEC for a name that has these types and no others, so a browser asking for another knows
+    // at once there's none (§6.1).
+    fn nsec(name: own List<String>, kinds: List<u16>, ttl: u32) -> Record {
+        var top: u16 = 0
+        for k in kinds {
+            top = top.max(k)
+        }
+        let len = usize(top / 8) + 1
+        var raw = List<u8>()
+        // The next name is the name itself, uncompressed (§6.1).
+        for l in name {
+            let b = l.to_bytes()
+            raw.push(u8.wrap(b.len()))
+            raw.extend(b)
+        }
+        raw.push(0)
+        raw.push(0)
+        raw.push(u8.wrap(len))
+        let start = raw.len()
+        for _ in 0..len {
+            raw.push(0)
+        }
+        for k in kinds {
+            let at = start + usize(k / 8)
+            raw[at] |= u8.wrap(0x80u32 >> u32(k % 8))
+        }
+        return Record { name: name, kind: T_NSEC, flush: true, ttl: ttl, data: Data.Other(raw) }
+    }
+
+    // What this program answers to `q` with, from the services past probing, and the records to
+    // add (RFC 6763 §12).
+    fn answer(self, q: Question, answers: mut List<Record>, additional: mut List<Record>) {
+        let qk = key(q.name)
+        let any = q.kind == T_ANY
+        let enumerate = key([String("_services"), String("_dns-sd"), String("_udp"), String("local")])
+        for r in self.regs {
+            if r.state == PROBING {
+                continue
+            }
+            let records = Mdns.service_records(r)
+            let hosts = self.host_records(r)
+            let instance_key = key(records[2].name)
+            if qk == enumerate and (any or q.kind == T_PTR) {
+                answers.push(records[1].copy())
+            }
+            if qk == key(r.kind) and (any or q.kind == T_PTR) {
+                answers.push(records[0].copy())
+                additional.push(records[2].copy())
+                additional.push(records[3].copy())
+                additional.extend(hosts)
+                additional.push(Mdns.nsec(records[2].name.copy(), [T_TXT, T_SRV], TTL_HOST))
+            }
+            if qk == instance_key {
+                if any or q.kind == T_SRV {
+                    answers.push(records[2].copy())
+                    additional.extend(hosts)
+                }
+                if any or q.kind == T_TXT {
+                    answers.push(records[3].copy())
+                }
+                if not any and q.kind != T_SRV and q.kind != T_TXT {
+                    answers.push(Mdns.nsec(records[2].name.copy(), [T_TXT, T_SRV], TTL_HOST))
+                }
+            }
+            if qk == key(r.host) {
+                var kinds = List<u16>()
+                for h in hosts {
+                    if any or h.kind == q.kind {
+                        answers.push(h.copy())
+                    }
+                    if not kinds.contains(h.kind) {
+                        kinds.push(h.kind)
+                    }
+                }
+                if (q.kind == T_A or q.kind == T_AAAA) and not kinds.contains(q.kind) {
+                    answers.push(Mdns.nsec(r.host.copy(), kinds, TTL_HOST))
+                } else if not any {
+                    additional.push(Mdns.nsec(r.host.copy(), kinds, TTL_HOST))
+                }
+            }
+        }
+    }
+
+    fn on_query(mut self, m: Message, from: Address) {
+        let now = self.now()
+        // Another host probing for a name this program is probing for too: the one whose data
+        // comes later wins (§8.2).
+        if not m.authority.is_empty() {
+            for i in 0..self.regs.len() {
+                if self.regs[i].state != PROBING {
+                    continue
+                }
+                let ours = Mdns.service_records(self.regs[i])
+                let instance_key = key(ours[2].name)
+                var theirs = List<Record>()
+                for a in m.authority {
+                    if key(a.name) == instance_key {
+                        theirs.push(a.copy())
+                    }
+                }
+                // The loser waits a second and probes again, when the winner answers (§8.2).
+                if not theirs.is_empty() and later(theirs, [ours[2].copy(), ours[3].copy()]) {
+                    self.regs[i].next_at = now + 1000
+                    self.regs[i].step = 0
+                }
+            }
+        }
+        var answers = List<Record>()
+        var additional = List<Record>()
+        var unicast = true
+        for q in m.questions {
+            self.answer(q, mut answers, mut additional)
+            unicast = unicast and q.unicast
+        }
+        if answers.is_empty() {
+            return
+        }
+        // Known answers: what the asker has already, with at least half its time to live left
+        // (§7.1).
+        var known = Set<String>()
+        for k in m.answers {
+            let mine = answers.find(|a| record_key(a) == record_key(k))
+            if let a = mine {
+                if k.ttl >= a.ttl / 2 {
+                    known.insert(record_key(k))
+                }
+            }
+        }
+        answers = dedupe(answers, known)
+        if answers.is_empty() {
+            return
+        }
+        var skip = known.copy()
+        for a in answers {
+            skip.insert(record_key(a))
+        }
+        additional = dedupe(additional, skip)
+        if from.port != self.port {
+            // A legacy query, from a resolver that isn't mDNS's: answer it alone, with its id and
+            // question, and short times to live (§6.7).
+            let bytes = message(m.id, true, m.questions, answers, List<Record>(), additional, TTL_LEGACY, true)
+            self.send_to(bytes, from)
+            return
+        }
+        if unicast and m.authority.is_empty() {
+            let bytes = message(0, true, List<Question>(), answers, List<Record>(), additional)
+            self.send_to(bytes, from)
+            return
+        }
+        // Shared records wait 20 to 120 ms, so several hosts' answers don't collide; a unique
+        // record's answer goes at once (§6).
+        var shared = false
+        for a in answers {
+            shared = shared or not a.flush
+        }
+        if not shared {
+            self.send_response(answers, additional)
+            return
+        }
+        let due = now + self.jitter(20, 120)
+        if self.pending.is_empty() {
+            self.pending.push(Pending { due: due, answers: answers, additional: additional })
+        } else {
+            for a in answers {
+                self.pending[0].answers.push(a.copy())
+            }
+            for a in additional {
+                self.pending[0].additional.push(a.copy())
+            }
+        }
+    }
+
+    fn on_response(mut self, m: Message) {
+        let now = self.now()
+        // Another host with a name this program has (§8.1, §9).
+        for i in 0..self.regs.len() {
+            let ours = Mdns.service_records(self.regs[i])
+            let instance_key = key(ours[2].name)
+            var clash = false
+            for section in [0, 1, 2] {
+                let records = if section == 0 { m.answers.copy() } else if section == 1 { m.authority.copy() } else { m.additional.copy() }
+                for r in records {
+                    if key(r.name) != instance_key or (r.kind != T_SRV and r.kind != T_TXT) or r.ttl == 0 {
+                        continue
+                    }
+                    let rk = record_key(r)
+                    let mine = (r.kind == T_SRV and rk == record_key(ours[2])) or (r.kind == T_TXT and rk == record_key(ours[3]))
+                    let was_mine = now < self.regs[i].was_until and self.regs[i].was.contains(rk)
+                    clash = clash or not (mine or was_mine)
+                }
+            }
+            if not clash {
+                continue
+            }
+            if self.regs[i].state == PROBING {
+                // A name announced before is renamed whether `register` was told it may be or not,
+                // since it must either be or stop (§9).
+                if self.regs[i].allow_rename or not self.regs[i].announced.is_empty() {
+                    self.rename(i, now)
+                } else {
+                    self.regs[i].conflict = true
+                }
+            } else {
+                // Announced already: it's probed again under its name, and renamed only if the
+                // other host answers the probe (§9).
+                self.regs[i].state = PROBING
+                self.regs[i].step = 0
+                self.regs[i].next_at = now + self.jitter(0, 250)
+            }
+        }
+        // What browsing and resolving need goes in the cache.
+        var targets = Set<String>()
+        for (_, c) in self.cache {
+            match c.record.data {
+                Data.Srv(_, _, _, t) => targets.insert(key(t)),
+                _ => {},
+            }
+        }
+        for section in [0, 1] {
+            let records = if section == 0 { m.answers.copy() } else { m.additional.copy() }
+            for r in records {
+                if r.kind == T_SRV and self.interesting(r.name) {
+                    match r.data {
+                        Data.Srv(_, _, _, t) => targets.insert(key(t)),
+                        _ => {},
+                    }
+                }
+            }
+        }
+        var changed = false
+        for section in [0, 1] {
+            let records = if section == 0 { m.answers.copy() } else { m.additional.copy() }
+            for r in records {
+                let keep = match r.kind {
+                    1 => targets.contains(key(r.name)),
+                    28 => targets.contains(key(r.name)),
+                    12 => self.browsing(r.name),
+                    16 => self.interesting(r.name),
+                    33 => self.interesting(r.name),
+                    _ => false,
+                }
+                if keep {
+                    self.cache_put(r, now)
+                    changed = true
+                }
+            }
+        }
+        if changed {
+            self.update_found(now)
+        }
+    }
+
+    // Whether a PTR with this name is one browsing wants.
+    fn browsing(self, name: List<String>) -> bool {
+        let k = key(name)
+        for b in self.browses {
+            if b.key == k {
+                return true
+            }
+        }
+        return false
+    }
+
+    // Whether an SRV or TXT with this name is one browsing or resolving wants: a service of a type
+    // that's browsed, or one `resolve` asks for.
+    fn interesting(self, name: List<String>) -> bool {
+        if name.len() >= 4 {
+            let k = key_from(name, 1)
+            for b in self.browses {
+                if b.key == k {
+                    return true
+                }
+            }
+        }
+        let k = key(name)
+        for w in self.wanted {
+            if key(w) == k {
+                return true
+            }
+        }
+        return false
+    }
+
+    fn cache_put(mut self, r: Record, now: u64) {
+        // A unique record with the cache-flush bit replaces the others of its name and type that
+        // came more than a second ago: they're gone in a second (§10.2).
+        if r.flush {
+            let nk = key(r.name)
+            let dk = data_key(r.data)
+            for c in mut self.cache.values() {
+                if c.record.kind == r.kind and c.at + 1000 < now and key(c.record.name) == nk and data_key(c.record.data) != dk {
+                    c.expires = c.expires.min(now + 1000)
+                    c.flushed = true
+                }
+            }
+        }
+        let k = record_key(r)
+        if r.ttl == 0 {
+            // A goodbye: it's gone in a second (§10.1).
+            if let c = mut self.cache.find(k) {
+                c.expires = c.expires.min(now + 1000)
+            }
+            return
+        }
+        if self.cache.len() >= CACHE_MOST and not self.cache.contains(k) {
+            return
+        }
+        let ttl = r.ttl
+        self.cache.insert(k, Cached { record: r.copy(), at: now, expires: now + u64(ttl) * 1000, step: 0, flushed: false })
+    }
+
+    // The service named `instance`, of the type `kind`, from the cache, if its SRV, TXT and an
+    // address are there. With `ask`, the records missing are asked for.
+    fn info_of(mut self, instance: List<String>, kind: List<String>, ask: bool) -> ServiceInfo? {
+        let ik = key(instance)
+        let now = self.now()
+        // The newest SRV and TXT, where two came within the second a flush leaves them both.
+        var srv: Record? = none
+        var txt: Record? = none
+        var srv_at: u64 = 0
+        var txt_at: u64 = 0
+        for (_, c) in self.cache {
+            if c.expires <= now or c.flushed or key(c.record.name) != ik {
+                continue
+            }
+            if c.record.kind == T_SRV and (srv == none or c.at > srv_at) {
+                srv = some(c.record.copy())
+                srv_at = c.at
+            }
+            if c.record.kind == T_TXT and (txt == none or c.at > txt_at) {
+                txt = some(c.record.copy())
+                txt_at = c.at
+            }
+        }
+        if ask {
+            if srv == none {
+                self.ask(instance, T_SRV, now)
+            }
+            if txt == none {
+                self.ask(instance, T_TXT, now)
+            }
+        }
+        let s = srv else return none
+        let (priority, weight, port, target) = match s.data {
+            Data.Srv(p, w, port, t) => (p, w, port, t.copy()),
+            _ => (0u16, 0u16, 0u16, List<String>()),
+        }
+        let tk = key(target)
+        var addresses = List<Ip>()
+        for (_, c) in self.cache {
+            if c.expires <= now or c.flushed or key(c.record.name) != tk {
+                continue
+            }
+            match c.record.data {
+                Data.A(b) => addresses.push(Ip.V4(b)),
+                // Without a scope: which interface a link-local address is reached on is this
+                // host's to know, and it came on each of them.
+                Data.Aaaa(b) => addresses.push(Ip.V6(b, 0)),
+                _ => {},
+            }
+        }
+        if ask and addresses.is_empty() {
+            self.ask(target, T_A, now)
+            self.ask(target, T_AAAA, now)
+        }
+        let t = txt else return none
+        if addresses.is_empty() {
+            return none
+        }
+        // In one order, so the same addresses are the same service.
+        addresses.sort()
+        var dedup = List<Ip>()
+        for a in addresses {
+            if not dedup.contains(a) {
+                dedup.push(a)
+            }
+        }
+        let properties = match t.data {
+            Data.Txt(strings) => properties_of(strings),
+            _ => LinkedMap<String, String>(),
+        }
+        return some(ServiceInfo {
+            kind: dotted(kind[..2]),
+            name: instance[0].copy(),
+            port: port,
+            properties: properties,
+            host: dotted(target),
+            addresses: dedup,
+            priority: priority,
+            weight: weight,
+        })
+    }
+
+    // Asks for the record `kind` of `name`, unless it's being asked for already: now, then a
+    // second later, then two, then a minute apart.
+    fn ask(mut self, name: List<String>, kind: u16, now: u64) {
+        let k = key(name)
+        for a in self.asking {
+            if a.kind == kind and key(a.name) == k {
+                return
+            }
+        }
+        self.asking.push(Asking { name: name.copy(), kind: kind, next_at: now, tries: 0 })
+    }
+
+    // What browsing has found, against what it knew: `Added`, `Updated` and `Removed` for the
+    // differences.
+    fn update_found(mut self, now: u64) {
+        var present = Set<String>()
+        var instances = List<(List<String>, List<String>)>()
+        for (_, c) in self.cache {
+            if c.record.kind != T_PTR or c.expires <= now {
+                continue
+            }
+            let pk = key(c.record.name)
+            var kind: List<String>? = none
+            for b in self.browses {
+                if b.key == pk {
+                    kind = some(b.kind.copy())
+                }
+            }
+            let k = kind else continue
+            match c.record.data {
+                Data.Ptr(instance) => {
+                    // A service's name is one label more than its type's.
+                    if instance.len() == k.len() + 1 and key_from(instance, 1) == pk {
+                        let ik = key(instance)
+                        if not present.contains(ik) {
+                            present.insert(ik.copy())
+                            instances.push((instance.copy(), k.copy()))
+                        }
+                    }
+                },
+                _ => {},
+            }
+        }
+        for (instance, kind) in instances {
+            let ik = key(instance)
+            if let info = self.info_of(instance, kind, true) {
+                // 0 new, 1 changed, 2 the same.
+                var what = 0
+                if let was = self.found.find(ik) {
+                    what = if was != info { 1 } else { 2 }
+                }
+                if what == 0 {
+                    self.happened.push_last(MdnsEvent.Added(info.copy()))
+                } else if what == 1 {
+                    self.happened.push_last(MdnsEvent.Updated(info.copy()))
+                }
+                self.found.insert(ik, info)
+            }
+        }
+        var gone = List<String>()
+        for (k, _) in self.found {
+            if not present.contains(k) {
+                gone.push(k.copy())
+            }
+        }
+        for g in gone {
+            if let info = self.found.remove(g) {
+                self.happened.push_last(MdnsEvent.Removed(info))
+            }
+        }
+    }
+
+    // Renames registration `i` after a conflict, `Name (2)` and on, and probes again. One that was
+    // announced before says so with `Renamed` once the new name is.
+    fn rename(mut self, i: usize, now: u64) {
+        var base = self.regs[i].info.name.copy()
+        var n: u32 = 2
+        if base.ends_with(")") {
+            if let at = base.find_last(" (") {
+                if let k = u32.parse(base[at + 2..base.len() - 1]) {
+                    n = k + 1
+                    base = base[..at]
+                }
+            }
+        }
+        self.regs[i].info.name = "{base} ({n})"
+        self.regs[i].state = PROBING
+        self.regs[i].step = 0
+        self.regs[i].conflict = false
+        self.regs[i].renames += 1
+        // After 15 conflicts, probing waits 5 seconds each time (§8.1).
+        let wait = if self.regs[i].renames > 15 { 5000u64 } else { self.jitter(0, 250) }
+        self.regs[i].next_at = now + wait
+    }
+
+    // Sends the registration's records with their time to live at 0, now and once more soon.
+    fn goodbye(mut self, r: Registration) {
+        var records = Mdns.service_records(r)
+        for x in mut records {
+            x.ttl = 0
+        }
+        // The host's addresses stay, while another service is on the host.
+        var shared = false
+        for other in self.regs {
+            shared = shared or key(other.host) == key(r.host)
+        }
+        if not shared {
+            for h in self.host_records(r) {
+                var x = h.copy()
+                x.ttl = 0
+                records.push(x)
+            }
+        }
+        let now = self.now()
+        self.send_response(records.copy(), List<Record>())
+        self.goodbyes.push(Pending { due: now + 250, answers: records, additional: List<Record>() })
+    }
+
+    // Multicasts a response on every socket and interface.
+    fn send_response(self, answers: List<Record>, additional: List<Record>) {
+        if answers.is_empty() {
+            return
+        }
+        let bytes = message(0, true, List<Question>(), answers, List<Record>(), additional)
+        self.multicast(bytes)
+    }
+
+    fn multicast(self, bytes: List<u8>) {
+        for s in self.socks {
+            let group = if s.v6 {
+                Address { ip: Ip.V6([0xFF, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFB], 0), port: self.port }
+            } else {
+                Address { ip: Ip.V4([224, 0, 0, 251]), port: self.port }
+            }
+            if s.joined.is_empty() {
+                if let err(_) = s.udp.set_multicast_interface(0) {}
+                if let err(_) = s.udp.send_to(bytes, group) {}
+                continue
+            }
+            for index in s.joined {
+                // A send that fails, as on an interface that just went, is like a lost datagram.
+                if let ok = s.udp.set_multicast_interface(index) {
+                    if let err(_) = s.udp.send_to(bytes, group) {}
+                }
+            }
+        }
+    }
+
+    fn send_to(self, bytes: List<u8>, to: Address) {
+        for s in self.socks {
+            if s.v6 != not to.ip.is_v4() {
+                continue
+            }
+            if let err(_) = s.udp.send_to(bytes, to) {}
+            return
+        }
+    }
+
+    fn query(self, questions: List<Question>, known: List<Record>, authority: List<Record>) {
+        if questions.is_empty() {
+            return
+        }
+        let bytes = message(0, false, questions, known, authority, List<Record>())
+        self.multicast(bytes)
+    }
+
+    // The interfaces with multicast and their addresses, looked at every 5 seconds: the sockets
+    // join the group on each new one, and when the addresses change, the services are announced
+    // again with the new ones.
+    fn check_links(mut self) {
+        let now = self.now()
+        self.links_at = now
+        let ok(list) = interfaces() else {
+            return
+        }
+        var links = List<u32>()
+        var addresses = List<Ip>()
+        var have4 = List<u32>()
+        var have6 = List<u32>()
+        for i in list {
+            if not i.up or not i.multicast {
+                continue
+            }
+            if i.loopback {
+                // The loopback interface, where it carries multicast, as macOS's does: programs on
+                // this machine find each other over it with no network, and on macOS without the
+                // local network permission a program may not have (TN3179). Its addresses aren't
+                // announced, since they're no use to another host.
+                if i.addresses.any(|a| a.is_v4()) {
+                    have4.push(i.index)
+                }
+                if i.addresses.any(|a| not a.is_v4()) {
+                    have6.push(i.index)
+                }
+                continue
+            }
+            links.push(i.index)
+            for a in i.addresses {
+                match a {
+                    Ip.V4(_) => {
+                        if not have4.contains(i.index) {
+                            have4.push(i.index)
+                        }
+                    },
+                    Ip.V6(b, _) => {
+                        if not have6.contains(i.index) {
+                            have6.push(i.index)
+                        }
+                        // The scope says nothing to another host.
+                        addresses.push(Ip.V6(b, 0))
+                        continue
+                    },
+                }
+                addresses.push(a)
+            }
+        }
+        addresses.sort()
+        for k in 0..self.socks.len() {
+            let v6 = self.socks[k].v6
+            let want = if v6 { have6.copy() } else { have4.copy() }
+            for index in want {
+                if self.socks[k].joined.contains(index) {
+                    continue
+                }
+                let group = if v6 { Ip.V6([0xFF, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFB], 0) } else { Ip.V4([224, 0, 0, 251]) }
+                if let ok = self.socks[k].udp.join_multicast(group, index) {
+                    self.socks[k].joined.push(index)
+                }
+            }
+            // An interface that went is left as it is: the system dropped its membership.
+            self.socks[k].joined.retain(|j| want.contains(j))
+        }
+        // No interface with multicast, as on a machine with only loopback: the system's choice.
+        for k in 0..self.socks.len() {
+            if self.socks[k].joined.is_empty() and links.is_empty() {
+                let group = if self.socks[k].v6 { Ip.V6([0xFF, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFB], 0) } else { Ip.V4([224, 0, 0, 251]) }
+                if let err(_) = self.socks[k].udp.join_multicast(group, 0) {}
+            }
+        }
+        let moved = addresses != self.mine
+        self.mine = addresses
+        self.links = links
+        if moved {
+            for r in mut self.regs {
+                if r.state != PROBING {
+                    r.state = ANNOUNCING
+                    r.step = 0
+                    r.next_at = now
+                }
+            }
+        }
+    }
+
+    // Does what's due: probes, announcements, delayed responses, goodbyes, browsing's queries,
+    // records that ran out and those to refresh, and questions to ask again.
+    fn timers(mut self) ! MdnsError {
+        var now = self.now()
+        if now >= self.links_at + LINKS_EVERY {
+            self.check_links()
+            now = self.now()
+        }
+        for i in 0..self.regs.len() {
+            if self.regs[i].next_at > now {
+                continue
+            }
+            if self.regs[i].state == PROBING {
+                if self.regs[i].conflict {
+                    continue
+                }
+                if self.regs[i].step < 3 {
+                    // A probe: the name, with what this program would answer for it (§8.1).
+                    let ours = Mdns.service_records(self.regs[i])
+                    let q = Question { name: ours[2].name.copy(), kind: T_ANY, unicast: false }
+                    self.query([q], List<Record>(), [ours[2].copy(), ours[3].copy()])
+                    self.regs[i].step += 1
+                    self.regs[i].next_at = now + 250
+                } else {
+                    self.regs[i].state = ANNOUNCING
+                    self.regs[i].step = 0
+                    let was = self.regs[i].announced.copy()
+                    let name = self.regs[i].info.name.copy()
+                    if not was.is_empty() and was != name {
+                        self.happened.push_last(MdnsEvent.Renamed(self.regs[i].info.kind.copy(), was, name.copy()))
+                    }
+                    self.regs[i].announced = name
+                }
+            }
+            if self.regs[i].state == ANNOUNCING {
+                var all = Mdns.service_records(self.regs[i])
+                all.extend(self.host_records(self.regs[i]))
+                self.send_response(all, List<Record>())
+                self.regs[i].step += 1
+                if self.regs[i].step >= 3 {
+                    self.regs[i].state = LIVE
+                    self.regs[i].next_at = u64.MAX
+                } else {
+                    self.regs[i].next_at = now + 1000 * u64(self.regs[i].step)
+                }
+            }
+        }
+        var k: usize = 0
+        while k < self.pending.len() {
+            if self.pending[k].due <= now {
+                let p = self.pending.remove(k)
+                self.send_response(dedupe(p.answers, Set<String>()), dedupe(p.additional, Set<String>()))
+            } else {
+                k += 1
+            }
+        }
+        k = 0
+        while k < self.goodbyes.len() {
+            if self.goodbyes[k].due <= now {
+                let g = self.goodbyes.remove(k)
+                self.send_response(g.answers, g.additional)
+            } else {
+                k += 1
+            }
+        }
+        // Browsing's queries, with the services known as known answers (§7.1).
+        for i in 0..self.browses.len() {
+            if self.browses[i].next_at > now {
+                continue
+            }
+            let q = Question { name: self.browses[i].kind.copy(), kind: T_PTR, unicast: false }
+            var known = List<Record>()
+            let bk = self.browses[i].key.copy()
+            for (_, c) in self.cache {
+                if c.record.kind == T_PTR and key(c.record.name) == bk and c.expires > now {
+                    let left = u32.wrap((c.expires - now) / 1000)
+                    if u64(left) * 2000 > u64(c.record.ttl) * 1000 {
+                        var r = c.record.copy()
+                        r.ttl = left
+                        known.push(r)
+                    }
+                }
+            }
+            self.query([q], known, List<Record>())
+            self.browses[i].next_at = now + self.browses[i].interval
+            self.browses[i].interval = (self.browses[i].interval * 2).min(3600000)
+        }
+        // Records that ran out go, and those half-way to it are asked for again (§5.2).
+        var expired = List<String>()
+        var refresh = List<Question>()
+        for (ck, c) in self.cache {
+            if c.expires <= now {
+                expired.push(ck.copy())
+            }
+        }
+        let changed = not expired.is_empty()
+        for e in expired {
+            _ = self.cache.remove(e)
+        }
+        for c in mut self.cache.values() {
+            if c.step < 4 and refresh_at(c) <= now {
+                c.step += 1
+                let q = Question { name: c.record.name.copy(), kind: c.record.kind, unicast: false }
+                var dup = false
+                for have in refresh {
+                    dup = dup or (have.kind == q.kind and key(have.name) == key(q.name))
+                }
+                if not dup {
+                    refresh.push(q)
+                }
+            }
+        }
+        // Only what's still wanted is asked for again.
+        refresh.retain(|q| q.kind == T_PTR or q.kind == T_A or q.kind == T_AAAA or self.interesting(q.name))
+        self.query(refresh, List<Record>(), List<Record>())
+        var asks = List<Question>()
+        var a: usize = 0
+        while a < self.asking.len() {
+            if self.asking[a].next_at > now {
+                a += 1
+                continue
+            }
+            // Asked six times, a minute apart at the end, with no answer: the service has gone.
+            if self.answered(self.asking[a].name, self.asking[a].kind, now) or self.asking[a].tries >= 6 {
+                _ = self.asking.remove(a)
+                continue
+            }
+            asks.push(Question { name: self.asking[a].name.copy(), kind: self.asking[a].kind, unicast: false })
+            self.asking[a].tries += 1
+            let tries = self.asking[a].tries
+            self.asking[a].next_at = now + if tries < 3 { 1000u64 << u64(tries - 1) } else { 60000u64 }
+            a += 1
+        }
+        self.query(asks, List<Record>(), List<Record>())
+        if changed {
+            self.update_found(now)
+        }
+    }
+
+    // Whether the cache has a record `kind` of `name` now.
+    fn answered(self, name: List<String>, kind: u16, now: u64) -> bool {
+        let k = key(name)
+        for (_, c) in self.cache {
+            if c.record.kind == kind and c.expires > now and not c.flushed and key(c.record.name) == k {
+                return true
+            }
+        }
+        return false
+    }
+}
+
+// When a cached record's next refreshing query is due: at 80, 85, 90 and 95% of its time to
+// live (§5.2).
+fn refresh_at(c: Cached) -> u64 {
+    let span = c.expires - c.at
+    return c.at + span * (80 + 5 * u64(c.step)) / 100
+}
+
+// The records, without those whose keys are in `skip` or that came before.
+fn dedupe(records: List<Record>, skip: Set<String>) -> List<Record> {
+    var seen = skip.copy()
+    var out = List<Record>()
+    for r in records {
+        let k = record_key(r)
+        if seen.contains(k) {
+            continue
+        }
+        seen.insert(k)
+        out.push(r.copy())
+    }
+    return out
+}
+
+// Whether `theirs` comes after `ours` in the order RFC 6762 §8.2 compares two probes' records by:
+// each sorted, then compared a record at a time, by class, type and data, the first difference
+// deciding, and the longer list winning if one is the start of the other.
+fn later(theirs: List<Record>, ours: List<Record>) -> bool {
+    var a = List<(u16, List<u8>)>()
+    for r in theirs {
+        a.push((r.kind, data_bytes(r.data)))
+    }
+    var b = List<(u16, List<u8>)>()
+    for r in ours {
+        b.push((r.kind, data_bytes(r.data)))
+    }
+    a.sort()
+    b.sort()
+    let n = a.len().min(b.len())
+    for i in 0..n {
+        if a[i] != b[i] {
+            return a[i] > b[i]
+        }
+    }
+    return a.len() > b.len()
+}
+
+/// The services of type `kind` on the network, `_loom._tcp`, found in `timeout_ms` milliseconds,
+/// sorted by name: a responder made for it browses that long, then closes. It's zeroconf's
+/// `ServiceBrowser` with a listener that collects what's added, for a script that looks once.
+pub fn find(kind: String, timeout_ms: i64 = 3000) -> List<ServiceInfo> ! MdnsError {
+    var m = try Mdns.new()
+    try m.browse(kind)
+    let start = unsafe { Instant.now() }
+    loop {
+        let spent = i64.wrap(unsafe { Instant.now() }.nanos_since(start) / 1000000)
+        if spent >= timeout_ms {
+            break
+        }
+        _ = try m.next_event(timeout_ms - spent)
+    }
+    var out = m.services()
+    m.close()
+    out.sort_by(|x, y| x.name.cmp(y.name))
+    return out
+}

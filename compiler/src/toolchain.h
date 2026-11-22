@@ -86,12 +86,14 @@ std::string hash_hex(const std::vector<std::string_view>& parts);
 
 // Runs a program and waits for it. Returns its exit status, or -1 if it couldn't start. With
 // `name`, the program sees that as its `argv[0]`, rather than its path.
-int run_process(const std::vector<std::string>& argv, const std::string& name = "");
+// `started`, if given, is told once it has started, before it's waited for.
+class RunPath;
+int run_process(const std::vector<std::string>& argv, const std::string& name = "", RunPath* started = nullptr);
 
 // Runs the program `calx run` stands for, as the last thing this process does, and returns its
 // status, or -1 if it couldn't start: on macOS in this process's place, so it doesn't return if it
 // started, and elsewhere as run_process, which ties the program's life to this process's.
-int run_last(const std::vector<std::string>& argv, const std::string& name);
+int run_last(const std::vector<std::string>& argv, const std::string& name, RunPath* started = nullptr);
 
 // Why the last program this thread tried to start couldn't, when there's more to say than that it
 // couldn't: on Windows, that an antivirus stopped it or took it from the cache, and what to do
@@ -183,5 +185,29 @@ bool make_xcframework(const Toolchain& tc, const std::string& device, const std:
 // Copies what `build_program` built to `out`, for `calx build`. On Windows its PDB goes beside it
 // as `out.pdb`, so stack traces and debuggers still find it once the cache has let it go.
 bool place_build(const std::string& built, const std::string& out, std::string& error);
+
+// CLX-432: where `calx run`, `calx test` and `calx serve` start the program `built` in the cache.
+// On Windows, one path for each script and kind of build: `NAME.exe` in a folder of the cache's
+// `run` named for a hash of `key`, made a hard link to `built`, or a copy of it, when it holds
+// another program. Windows Defender Firewall keeps its answer for each program's path, so a
+// program that listens on every address is asked about once, not again each time it's built
+// anew. A program still running from there is renamed aside first, as Windows can't replace it.
+// The file is held from here until `started`, or the end, so no other build can put another
+// program there in between. Where it can't be put there, and elsewhere, it's `built` itself.
+class RunPath {
+public:
+    RunPath(const std::string& built, const std::vector<std::string_view>& key, const std::string& name);
+    ~RunPath();
+    RunPath(const RunPath&) = delete;
+    RunPath& operator=(const RunPath&) = delete;
+
+    const std::string& path() const { return path_; }
+    // Lets the file go, once the program has started from it.
+    void started();
+
+private:
+    std::string path_;
+    void* held_ = nullptr;
+};
 
 }  // namespace calx

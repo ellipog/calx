@@ -368,6 +368,20 @@ pub fn normalize(path: String) -> String {
 /// separators match separators, so `\` and `/` match each other on Windows. `.` names and a
 /// separator at the end are passed over in both.
 pub fn glob_matches(path: String, pattern: String) -> bool {
+    return glob_match(path, pattern, false)
+}
+
+/// Whether `path` matches the glob `pattern` by the rules of `glob_matches`, but with hidden names
+/// matched like any other, for rules that must cover every file under a folder: `/home/x/**`
+/// matches `/home/x/.ssh/id`, and `*` matches `.env`. A `..` name is still matched only by a
+/// pattern name that starts with `.`, never by `*`, `?` or `**`, so `/a/**` doesn't match
+/// `/a/../etc/passwd`.
+pub fn glob_matches_hidden(path: String, pattern: String) -> bool {
+    return glob_match(path, pattern, true)
+}
+
+// `glob_matches`, with hidden names matched like any other when `hidden` is set.
+fn glob_match(path: String, pattern: String, hidden: bool) -> bool {
     let win = windows()
     let pr = root_len(pattern, win)
     let sr = root_len(path, win)
@@ -384,15 +398,20 @@ pub fn glob_matches(path: String, pattern: String) -> bool {
             return false
         }
     }
-    return match_names(pattern, next_name(pattern, pr, win), path, next_name(path, sr, win), win)
+    return match_names(pattern, next_name(pattern, pr, win), path, next_name(path, sr, win), win, hidden)
 }
 
-fn is_up_or_hidden(s: String, at: usize) -> bool {
-    return s.byte_at(at) == 46
+// Whether the name from `si` to `se` in `s` is one `*`, `?` and `**` pass over: `..`, and any
+// hidden name unless `hidden` is set.
+fn passed_over(s: String, si: usize, se: usize, hidden: bool) -> bool {
+    if si >= se or s.byte_at(si) != 46 {
+        return false
+    }
+    return not hidden or (se - si == 2 and s.byte_at(si + 1) == 46)
 }
 
 // Whether the names of `pat` from `pi` match those of `s` from `si`.
-fn match_names(pat: String, pi: usize, s: String, si: usize, win: bool) -> bool {
+fn match_names(pat: String, pi: usize, s: String, si: usize, win: bool, hidden: bool) -> bool {
     if pi >= pat.len() {
         return si >= s.len()
     }
@@ -400,44 +419,56 @@ fn match_names(pat: String, pi: usize, s: String, si: usize, win: bool) -> bool 
     let pnext = next_name(pat, pe, win)
     if pe - pi == 2 and pat.byte_at(pi) == 42 and pat.byte_at(pi + 1) == 42 {
         if pnext >= pat.len() {
-            // `**` at the end: one name or more, none of them hidden.
+            // `**` at the end: one name or more, none of them passed over.
             if si >= s.len() {
                 return false
             }
             var at = si
             while at < s.len() {
-                if is_up_or_hidden(s, at) {
+                let end = name_end(s, at, win)
+                if passed_over(s, at, end, hidden) {
                     return false
                 }
-                at = next_name(s, name_end(s, at, win), win)
+                at = next_name(s, end, win)
             }
             return true
         }
         var at = si
         loop {
-            if match_names(pat, pnext, s, at, win) {
+            if match_names(pat, pnext, s, at, win, hidden) {
                 return true
             }
-            if at >= s.len() or is_up_or_hidden(s, at) {
+            if at >= s.len() {
                 return false
             }
-            at = next_name(s, name_end(s, at, win), win)
+            let end = name_end(s, at, win)
+            if passed_over(s, at, end, hidden) {
+                return false
+            }
+            at = next_name(s, end, win)
         }
     }
     if si >= s.len() {
         return false
     }
     let se = name_end(s, si, win)
-    if not match_name(pat, pi, pe, s, si, se) {
+    if not match_name(pat, pi, pe, s, si, se, hidden) {
         return false
     }
-    return match_names(pat, pnext, s, next_name(s, se, win), win)
+    return match_names(pat, pnext, s, next_name(s, se, win), win, hidden)
 }
 
 /// Whether the name `name` matches the glob `pattern`, a single name, by the rules of
 /// `glob_matches`: the test `std.fs.glob` puts each name in a folder to.
 pub fn glob_matches_name(name: String, pattern: String) -> bool {
-    return match_name(pattern, 0, pattern.len(), name, 0, name.len())
+    return match_name(pattern, 0, pattern.len(), name, 0, name.len(), false)
+}
+
+/// Whether the name `name` matches the glob `pattern`, a single name, by the rules of
+/// `glob_matches_hidden`: a hidden name is matched like any other, so `*` matches `.env` and
+/// `./deploy.sh`, but `..` is matched only by a pattern that starts with `.`.
+pub fn glob_matches_name_hidden(name: String, pattern: String) -> bool {
+    return match_name(pattern, 0, pattern.len(), name, 0, name.len(), true)
 }
 
 // The bytes of the rune whose first byte is `b`.
@@ -516,9 +547,10 @@ fn in_class(pat: String, p: usize, end: usize, r: u32) -> bool {
 }
 
 // Whether the name from `si` to `se` in `s` matches the pattern name from `pi` to `pe`.
-fn match_name(pat: String, pi: usize, pe: usize, s: String, si: usize, se: usize) -> bool {
-    // A hidden name only for a pattern that starts with a dot.
-    if si < se and s.byte_at(si) == 46 and not (pi < pe and pat.byte_at(pi) == 46) {
+fn match_name(pat: String, pi: usize, pe: usize, s: String, si: usize, se: usize, hidden: bool) -> bool {
+    // A hidden name, unless `hidden` is set, and `..` always, only for a pattern that starts
+    // with a dot.
+    if passed_over(s, si, se, hidden) and not (pi < pe and pat.byte_at(pi) == 46) {
         return false
     }
     var p = pi
@@ -573,4 +605,71 @@ fn match_name(pat: String, pi: usize, pe: usize, s: String, si: usize, se: usize
         p += 1
     }
     return p == pe
+}
+
+@test
+fn hidden_names_match_like_any_other() {
+    assert(glob_matches_hidden("/home/x/.ssh/id", "/home/x/**"))
+    assert(glob_matches_hidden("/home/x/secrets/.key", "/home/x/secrets/**"))
+    assert(glob_matches_hidden("/home/x/a/.env", "/home/x/**/.env"))
+    assert(glob_matches_hidden(".env", "**/.env"))
+    assert(glob_matches_hidden("a/.git/b/.env", "**/.env"))
+    assert(glob_matches_hidden("src/.h.calx", "src/*.calx"))
+    assert(glob_matches_hidden("src/.git/x.calx", "src/**/*.calx"))
+    assert(glob_matches_hidden(".a", "?a"))
+    assert(glob_matches_hidden(".a", "[.]a"))
+    assert(not glob_matches_hidden("/home/x/.ssh/id", "/home/y/**"))
+    // The shell's rule stays in glob_matches.
+    assert(not glob_matches("/home/x/.ssh/id", "/home/x/**"))
+    assert(not glob_matches("src/.h.calx", "src/*.calx"))
+}
+
+@test
+fn up_names_are_never_matched_by_wildcards() {
+    assert(not glob_matches_hidden("/a/../etc/passwd", "/a/**"))
+    assert(not glob_matches_hidden("/a/../etc/passwd", "/a/**/passwd"))
+    assert(not glob_matches_hidden("/a/../etc/passwd", "/a/*/etc/passwd"))
+    assert(not glob_matches_hidden("a/..", "a/*"))
+    assert(not glob_matches_hidden("a/..", "a/??"))
+    assert(not glob_matches_hidden("a/..", "a/**"))
+    assert(not glob_matches_hidden("..", "*"))
+    assert(not glob_matches_name_hidden("..", "*"))
+    assert(not glob_matches_name_hidden("..", "??"))
+    assert(not glob_matches_name_hidden("..", "[.]."))
+    // A pattern name that starts with `.` still matches it, as in glob_matches.
+    assert(glob_matches_hidden("/a/../etc/passwd", "/a/../**"))
+    assert(glob_matches_hidden("a/..", "a/.*"))
+    assert(glob_matches_name_hidden("..", ".*"))
+    // Names that only start with `..` are hidden names.
+    assert(glob_matches_hidden("a/..b", "a/*"))
+    assert(glob_matches_hidden("a/...", "a/**"))
+    assert(glob_matches_name_hidden("..b", "*"))
+}
+
+@test
+fn hidden_matching_keeps_the_other_rules() {
+    assert(glob_matches_hidden("a/x/y/b", "a/**/b"))
+    assert(glob_matches_hidden("a/b", "a/**/b"))
+    assert(not glob_matches_hidden("logs", "logs/**"))
+    assert(glob_matches_hidden("logs/.a/.b", "logs/**"))
+    assert(not glob_matches_hidden("a/b", "/a/*"))
+    assert(glob_matches_hidden("./a/.b/", "a/.b"))
+    assert(glob_matches_hidden("./.b", "*"))
+    assert(not glob_matches_hidden(".B", "*.b"))
+    assert(glob_matches_hidden(".5", ".[0-9]"))
+    assert(not glob_matches_hidden(".5", "*[!0-9]"))
+    assert(glob_matches_hidden("é/.é", "?/??"))
+    assert(glob_matches_hidden("C:\\x\\.y", "c:/x/*") == windows())
+}
+
+@test
+fn hidden_names_alone() {
+    assert(glob_matches_name_hidden("./deploy.sh", "*"))
+    assert(glob_matches_name_hidden(".env", "*"))
+    assert(glob_matches_name_hidden(".env", ".env"))
+    assert(glob_matches_name_hidden(".bashrc", "*rc"))
+    assert(glob_matches_name_hidden("", "*"))
+    assert(not glob_matches_name_hidden(".env", "*.txt"))
+    assert(not glob_matches_name("./deploy.sh", "*"))
+    assert(not glob_matches_name(".env", "*"))
 }

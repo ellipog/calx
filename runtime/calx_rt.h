@@ -158,6 +158,10 @@ CX_FN(void, cx_print_newline, (void));
 CX_FN(cx_usize, cx_in_read, (cx_u8* p, cx_usize n));
 CX_FN(void, cx_out_write, (const cx_u8* p, cx_usize n));
 CX_FN(void, cx_out_flush, (void));
+/* For std.io's `Stdout` and `reader_gone`: a flush that gives 0, -1 once standard output's reader
+ * has gone, or errno, and whether it has gone, after which what's written there is dropped. */
+CX_FN(cx_i32, cx_out_flush_checked, (void));
+CX_FN(cx_u32, cx_out_gone, (void));
 
 /* `eprint` and `eprintln`: between these, the print functions write to standard error, which
  * isn't buffered. Output waiting for standard output goes first, so the two keep their order.
@@ -1085,6 +1089,18 @@ CX_FN(cx_bool, cx_net_drain, (cx_u64 h, cx_i64 timeout_ms));
 CX_FN(cx_u32, cx_net_peer, (cx_u64 h, cx_u32 id, cx_u8* out));
 CX_FN(cx_u32, cx_net_error_kind, (void));
 CX_FN(cx_i32, cx_net_error_code, (void));
+/* UDP sockets in the same `Net` (CLX-412), the machine's interfaces and its name. */
+CX_FN(cx_u32, cx_net_udp_open, (cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port, cx_bool reuse));
+CX_FN(cx_u16, cx_net_udp_port, (cx_u64 h, cx_u32 id));
+CX_FN(cx_i32, cx_net_udp_send, (cx_u64 h, cx_u32 id, const cx_u8* p, cx_usize len, const cx_u8* to, cx_u32 family));
+CX_FN(cx_i64, cx_net_udp_size, (cx_u64 h, cx_u32 id));
+CX_FN(cx_u32, cx_net_udp_take, (cx_u64 h, cx_u32 id, cx_u8* to, cx_u8* from));
+CX_FN(cx_bool, cx_net_udp_join, (cx_u64 h, cx_u32 id, const cx_u8* group, cx_u32 family, cx_u32 index, cx_bool leave));
+CX_FN(cx_bool, cx_net_udp_option, (cx_u64 h, cx_u32 id, cx_u32 which, cx_u32 value));
+CX_FN(void, cx_net_udp_close, (cx_u64 h, cx_u32 id));
+CX_FN(cx_i64, cx_net_interfaces, (void));
+CX_FN(void, cx_net_interfaces_copy, (cx_u8* to));
+CX_FN(cx_usize, cx_net_host_name, (cx_u8* to, cx_usize cap));
 
 /* HTTP and HTTPS requests, in calx_http.c (D118): each on a thread of its own on Windows, and
  * together on one on Linux and macOS. A request is a handle that's never 0. `version` is the HTTP

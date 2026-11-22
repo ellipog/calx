@@ -1,0 +1,98 @@
+// A write to standard output after its reader has gone (CLX-433): every program ignores SIGPIPE
+// from the start, so on every system the write fails rather than ending the program, as it did
+// on Linux and macOS before, unless the program had made an HTTP request. `println` drops what it
+// can't write, `reader_gone` says so, and `Stdout`'s `write` and `flush` fail. The programs a Calx
+// program starts still get the default SIGPIPE, as `yes | head` needs.
+//
+// The test starts a copy of itself, "mid", whose standard output is a pipe. Mid starts "late"
+// with the same standard output and ends, and waiting for mid closes this end of the pipe. Late
+// then runs "repro" and "checks" with that output, whose reader has gone, and writes how they
+// ended to a file, since its own streams are the pipe's and the closed one's too.
+import std.env.{args, os}
+import std.fs.{exists, read_text, remove_dir_all, rename, temp_dir, write_text}
+import std.io.{Stdout, flush, reader_gone}
+import std.process.{Command, Stdio, current_exe}
+import std.thread.{sleep}
+
+fn child(a: List<String>) {
+    let what = a[0].copy()
+    if what == "mid" {
+        _ = Command.new(current_exe()).args(["late", a[1].copy()]).stderr(Stdio.Null).spawn()!
+    } else if what == "late" {
+        late(a[1].copy())
+    } else if what == "repro" {
+        // The card's: the line is written as the program ends, and fails then.
+        println("late line")
+        eprintln("still alive after the write")
+    } else if what == "checks" {
+        eprintln("gone before: {reader_gone()}")
+        println("late line")
+        flush()
+        eprintln("gone after: {reader_gone()}")
+        println("dropped")
+        var out = Stdout {}
+        match out.write("more".to_bytes()) {
+            ok => eprintln("write: ok"),
+            err(e) => eprintln("write: {e}"),
+        }
+        match out.flush() {
+            ok => eprintln("flush: ok"),
+            err(e) => eprintln("flush: {e}"),
+        }
+    }
+}
+
+// Waits for the test to close its end of the pipe, then runs each, and writes what each said and
+// how it ended to `{dir}/said`.
+fn late(dir: String) {
+    while not exists("{dir}/go") {
+        unsafe {
+            sleep(10000000)
+        }
+    }
+    var said = String()
+    for what in ["repro", "checks"] {
+        let o = Command.new(current_exe()).arg(what).stdout(Stdio.Inherit).stderr(Stdio.Pipe).output()!
+        said.push_str("{what}: {o.status}\n{o.error_text()}")
+    }
+    write_text("{dir}/said.part", said)!
+    rename("{dir}/said.part", "{dir}/said")!
+}
+
+fn main() {
+    let a = args()
+    if a.len() > 0 {
+        child(a)
+        return
+    }
+    let dir = temp_dir()!
+    var mid = Command.new(current_exe()).args(["mid", dir.copy()]).stdout(Stdio.Pipe).spawn()!
+    println("mid: {mid.wait().status}")    // out: mid: exited with status 0
+    write_text("{dir}/go", "")!
+    var waited: u64 = 0
+    while not exists("{dir}/said") and waited < 60000 {
+        unsafe {
+            sleep(10000000)
+        }
+        waited += 10
+    }
+    print(read_text("{dir}/said")! ?? String("late never said\n"))
+    // out: repro: exited with status 0
+    // out: still alive after the write
+    // out: checks: exited with status 0
+    // out: gone before: false
+    // out: gone after: true
+    // out: write: standard output's reader has gone (broken pipe)
+    // out: flush: standard output's reader has gone (broken pipe)
+    remove_dir_all(dir)!
+
+    // A program that isn't Calx gets the default: `yes` ends at the signal, quietly, where with
+    // SIGPIPE ignored it would say "Broken pipe" and end with an error.
+    if os() == "windows" {
+        println("yes: [y] []")
+    } else {
+        let o = Command.new("sh").args(["-c", "yes | head -n 1"]).output()!
+        println("yes: [{o.text().trim()}] [{o.error_text().trim()}]")
+    }
+    // out: yes: [y] []
+}

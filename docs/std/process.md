@@ -68,6 +68,8 @@ Each method gives the command back with one more thing said, so they chain. A co
 | `c.spawn() -> Child ! ProcessError` | Starts it and goes on: the `Child` writes to it, reads from it, waits for it or kills it |
 | `output_all(commands: List<Command>, at_once: usize) -> List<Output> ! ProcessError` | Runs each as `output` does, at most `at_once` at a time, the next starting as one ends, and gives their outputs in order. Fails if one doesn't start, after killing the rest. Panics if `at_once` is 0 |
 
+A program starts with SIGPIPE at its default, and no signals blocked, whatever this program has: a Calx program ignores SIGPIPE ([`std.io`](io.md#when-the-reader-has-gone)), but `yes | head` run through `sh` ends when `head` does, as it would from a shell, only if `yes` doesn't. A Calx program it starts ignores it again itself. Writing to a child's input once it has stopped reading fails with `InputClosed`, never ending this program.
+
 Where each stream goes unless the command says:
 
 | | Input | Output | Errors |
