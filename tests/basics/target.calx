@@ -2,7 +2,8 @@
 // by its Calx name or the triple Rust gives it, and a Mac builds static libraries for iOS too,
 // for an iPhone and for the simulator, with Xcode's SDKs. A target that isn't one, or one this
 // calx can't build for from where it runs, is an error before anything is built, and so is
-// running what's built for another system.
+// running what's built for another system, and an XCFramework, for iOS, anywhere but in a build on
+// a Mac.
 import std.env.{arch, os, variable}
 import std.fs.{remove_dir_all, temp_dir, write_text, separator}
 import std.process.{Command}
@@ -103,5 +104,11 @@ fn main() {
         println("{run_ios.contains("isn't supported yet")} {lib_ios.contains("isn't supported yet")}")
     }
     // out: true true
+
+    // An XCFramework is built, and for both kinds of iOS, on a Mac (CLX-408).
+    println(refused(calx.copy(), ["emit-c", "--xcframework", "core.calx"], dir.copy()))
+    // out: calx: an XCFramework is built with `calx build --xcframework` [exited with status 2]
+    let xcf = refused(calx.copy(), ["build", "--xcframework", "--target", host.copy(), "core.calx"], dir.copy())
+    println("{xcf.contains("so it takes no --target")}")    // out: true
     remove_dir_all(dir)!
 }

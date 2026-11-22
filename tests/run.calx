@@ -50,6 +50,10 @@
 // - `// needs: PROGRAM` marks a test that runs PROGRAM, a tool Calx doesn't need, such as `rustc`
 //   for a Rust host of a static library. Where `PROGRAM --version` doesn't run, it's skipped, saying
 //   so.
+// - `// simulator: TEXT` marks a test that runs something on the iOS simulator, which takes a Mac
+//   with Xcode. It finds the simulator in CALX_SIMULATOR, the UDID `xcrun simctl` takes, of one
+//   that this started for the run, or found running. Elsewhere, or without one, such a test is skipped,
+//   saying so; in CI on macOS, a missing simulator fails the run (CLX-408).
 //
 // A test can be several modules. A line `// file: NAME.calx` starts each one, and the first is the
 // main module. Each file keeps its lines' numbers from the whole test, so errors in any of them are
@@ -60,7 +64,9 @@
 // use, which must report the same errors at the same places. Each other test that's one file must
 // be formatted as `calx fmt` formats it.
 //
-// A test that runs longer than two minutes (RUN_SECONDS) fails, and its program is stopped.
+// A test that runs longer than two minutes (RUN_SECONDS) fails, and its program is stopped. One that
+// runs on the iOS simulator has ten (SIMULATOR_SECONDS), as it builds for iOS, installs an app and
+// launches it, which a busy CI runner can take minutes over (CLX-424).
 //
 // Each program's temporary folder, TMP and TEMP on Windows and TMPDIR elsewhere, is one of its own
 // in its test's folder. A test that leaves anything there fails, as a folder `fs.temp_dir()`
@@ -79,6 +85,7 @@ import std.process.{Command, Output, output_all}
 import std.regex.{Regex}
 
 const RUN_SECONDS: u64 = 120
+const SIMULATOR_SECONDS: u64 = 600
 
 /// Runs the compiler's tests: the files under tests/ and the examples in the docs.
 @cli(name: "tests/run.calx")
@@ -110,7 +117,7 @@ struct Patterns {
 
 fn patterns() -> Patterns {
     return Patterns {
-        expect: Regex.new("//\\s*(out|error|panic|trace|stderr|stdin|args|status|lib|kind|firewall|needs):(.*)$")!,
+        expect: Regex.new("//\\s*(out|error|panic|trace|stderr|stdin|args|status|lib|kind|firewall|needs|simulator):(.*)$")!,
         file: Regex.new("^// file: (\\S+)\\s*$")!,
         diag: Regex.new("^(.*?):(\\d+):(\\d+): error: (.*)$")!,
         panic_line: Regex.new("^panic at (.*?):(\\d+):(\\d+): (.*)$")!,
@@ -139,13 +146,14 @@ struct Test {
     kind: String                  // what it's checked as: "library", "staticlib" or empty for a program
     firewall: String?             // why it listens on every address
     needs: List<String>           // programs it runs that Calx doesn't need, such as `rustc`
+    simulator: String?            // what it runs on the iOS simulator
     files: List<(String, String)> // (name, text) for a test of several modules, the main one first
 }
 
 fn parse_test(name: own String, source: String, file_path: own String?, p: mut Patterns) -> Test {
     var t = Test {
         name: name, source: source.copy(), file_path: file_path, out: [], errors: [], panics: none, trace: [], stderr: [],
-        stdin: [], args: [], status: 0, libs: [], kind: String(), firewall: none, needs: [], files: [],
+        stdin: [], args: [], status: 0, libs: [], kind: String(), firewall: none, needs: [], simulator: none, files: [],
     }
     let lines = source.lines()
     var starts: List<(usize, String)> = []
@@ -186,6 +194,8 @@ fn parse_test(name: own String, source: String, file_path: own String?, p: mut P
                 t.libs.push(text.trim())
             } else if kind == "kind" {
                 t.kind = text.trim()
+            } else if kind == "simulator" {
+                t.simulator = some(text.trim())
             } else if kind == "firewall" {
                 t.firewall = some(text.trim())
             } else if kind == "needs" {
@@ -386,6 +396,31 @@ fn main() {
         }
     }
     tests.retain(|t| lacks(t, missing) == none)
+    // The iOS simulator, for the tests that run there: one for them all, found on a Mac with Xcode,
+    // and started if none is running. Elsewhere, or without one, they're skipped, saying so, but in
+    // CI on macOS, whose runners have Xcode, a missing simulator is a failure.
+    var simulator: Simulator? = none
+    if tests.any(|t| t.simulator != none) {
+        simulator = find_simulator()
+        let ci_mac = env.os() == "macos" and env.variable("CI") != none
+        if simulator == none and ci_mac {
+            eprintln("no iOS simulator to run the tests that need one on; this runner's Xcode should have one")
+            process.exit(1)
+        }
+        if simulator == none {
+            for t in tests {
+                if let why = t.simulator {
+                    println("skipped {t.name}: it {why}, which takes a Mac with Xcode's iOS simulator")
+                    skipped += 1
+                }
+            }
+            tests.retain(|t| t.simulator == none)
+        }
+    }
+    let sim_id = match simulator {
+        some(s) => s.id.copy(),
+        none => String(),
+    }
     let tmp = slashes(fs.temp_dir()!)
 
     // The jobs, each test's files written into its folder, and the commands of each round.
@@ -467,7 +502,10 @@ fn main() {
                 }
                 // The system's temporary folder, for the program, is one of its own in its test's
                 // folder, so what it leaves there is seen, and removed with the test's folder.
-                let run = calx_cmd(calx.copy(), root.copy(), words).env("CALX", calx.copy()).input_text(input).timeout(RUN_SECONDS * 1000)
+                var run = calx_cmd(calx.copy(), root.copy(), words).env("CALX", calx.copy()).input_text(input).timeout(limit(t) * 1000)
+                if t.simulator != none {
+                    run = run.env("CALX_SIMULATOR", sim_id.copy())
+                }
                 job.main_cmd = cmds.len()
                 if windows {
                     let temp = "{dir}/tmp".replace("/", "\\")
@@ -596,9 +634,76 @@ fn main() {
     let formats = if unformatted > 0 { ", {unformatted} not formatted" } else { "" }
     let system = if windows { "Windows" } else if env.os() == "macos" { "macOS" } else { "Linux" }
     println("{jobs.len() - failed} passed, {failed} failed{formats}{skips} ({tests.len()} tests, modes: {modes.join(", ")}, {system})")
+    // A simulator this started is shut down again, as it found it.
+    if let s = simulator {
+        if s.started {
+            match Command.new("xcrun").args(["simctl", "shutdown", s.id.copy()]).output() {
+                ok(_) => {},
+                err(e) => eprintln("can't shut down the iOS simulator {s.id}: {e}"),
+            }
+        }
+    }
     if failed > 0 or unformatted > 0 {
         process.exit(1)
     }
+}
+
+// How many seconds a test's program may run before it's stopped.
+fn limit(t: Test) -> u64 {
+    return if t.simulator != none { SIMULATOR_SECONDS } else { RUN_SECONDS }
+}
+
+// An iOS simulator the tests that need one run on (CLX-408): its UDID, for `xcrun simctl`, and
+// whether this started it.
+struct Simulator {
+    id: String
+    started: bool
+}
+
+// An iPhone simulator on a Mac with Xcode: one that's running, or else the first that's there,
+// started and waited for. `none` elsewhere, or where Xcode has none.
+fn find_simulator() -> Simulator? {
+    if env.os() != "macos" {
+        return none
+    }
+    let listed = match Command.new("xcrun").args(["simctl", "list", "devices", "available", "-j"]).output() {
+        ok(o) => if o.status.success() { o.text() } else { return none },
+        err(_) => return none,
+    }
+    let devices = match json.parse(listed) {
+        ok(j) => j.get("devices") ?? json.Json.Null,
+        err(_) => return none,
+    }
+    var first = String()
+    for runtime in devices.keys() {
+        if not runtime.contains("SimRuntime.iOS") {
+            continue
+        }
+        if let json.Json.Array(list) = devices.get(runtime.copy()) ?? json.Json.Null {
+            for d in list {
+                let name = (d.get("name") ?? json.Json.Null).as_str() ?? String()
+                let id = (d.get("udid") ?? json.Json.Null).as_str() ?? String()
+                if not name.starts_with("iPhone") or id.is_empty() {
+                    continue
+                }
+                if (d.get("state") ?? json.Json.Null).as_str() == some(String("Booted")) {
+                    return some(Simulator { id: id, started: false })
+                }
+                if first.is_empty() {
+                    first = id
+                }
+            }
+        }
+    }
+    if first.is_empty() {
+        return none
+    }
+    // `bootstatus -b` starts it, and returns once it has finished starting.
+    match Command.new("xcrun").args(["simctl", "bootstatus", first.copy(), "-b"]).output() {
+        ok(o) => if not o.status.success() { return none },
+        err(_) => return none,
+    }
+    return some(Simulator { id: first, started: true })
 }
 
 // The repository this file is in, or for a build of it, the one the current folder is in: the
@@ -647,7 +752,7 @@ fn signal_name(s: i32) -> String {
 
 fn check_run(t: Test, job: Job, o: Output, p: mut Patterns, problems: mut List<String>) {
     if o.status.timed_out {
-        problems.push("still running after {RUN_SECONDS} seconds, so it was stopped")
+        problems.push("still running after {limit(t)} seconds, so it was stopped")
         return
     }
     let code = o.status.code ?? -1

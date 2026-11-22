@@ -269,6 +269,7 @@ Starting it takes a few hundred microseconds more, 0.6 ms in all on the referenc
 | `BadArgument(why)` | It can't be given what the command says: a name that's empty, a zero byte in an argument, a variable's name with `=` in it, a line break in an argument to a batch file, or processors to pin it to that the machine doesn't have, or that macOS can't pin it to |
 | `Failed { command, status }` | It ran, and didn't succeed. Only `run` and `read` fail with it |
 | `InputClosed` | It stopped reading before all of its input was written. Only `Child.write` fails with it |
+| `Unsupported` | The system starts no programs: iOS, where an app runs alone in its sandbox, so every way to start one fails with it there, on the simulator too ([iOS](#ios)) |
 | `Os(code)` | Something else, with the system's error code |
 
 Each shows as a sentence, such as `can't find the program git on PATH`.
@@ -287,6 +288,10 @@ The program is found the same way on each system, by Calx, not by the system's o
 | --- | --- |
 | `which(name: String) -> String?` | The path of the program `name` would start, made whole, or `none` if there's nothing to run |
 | `current_exe() -> String` | The path of this program's own executable, to start it again |
+
+## iOS
+
+An app on iOS runs alone in its sandbox, which lets it start no other program, so every way to start one fails with `Unsupported`, which shows as `iOS doesn't let an app start other programs`. The simulator would let it, since it runs on a Mac, but a build for it fails the same way, so what works there works on an iPhone. `which`, `current_exe` and the rest of [this process](#this-process) work as elsewhere (CLX-408).
 
 ## When this program ends
 

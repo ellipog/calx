@@ -16,6 +16,8 @@
 #include <windows.h>
 #include <bcrypt.h>
 #pragma comment(lib, "bcrypt.lib")
+#elif defined(CX_IOS)
+#include <stdlib.h>
 #else
 #include <errno.h>
 #include <sys/random.h>
@@ -40,6 +42,10 @@ void cx_crypto_random(cx_u8* p, cx_usize n) {
         p += take;
         n -= take;
     }
+#elif defined(CX_IOS)
+    // iOS declares no getentropy, and arc4random_buf takes its bytes from the same source, the
+    // kernel's, and never fails (CLX-408).
+    arc4random_buf(p, n);
 #elif defined(__APPLE__)
     // macOS has no getrandom; getentropy takes at most 256 bytes a call.
     while (n) {

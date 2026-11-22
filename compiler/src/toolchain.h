@@ -173,6 +173,15 @@ std::string staticlib_name(Target t, const std::string& stem);
 // elsewhere llvm-ar beside clang, or ar. Says what's wrong and returns false if it can't.
 bool archive_objects(const Toolchain& tc, const std::vector<std::string>& objects, const std::string& output, bool verbose);
 
+// CLX-408: puts static libraries built for an iPhone and for the simulator, `device` and
+// `simulator`, in the XCFramework `out`, which Xcode links as one for either, with `header`, named
+// `stem.h`, and a module map that lets Swift import it as `stem`, both in a folder named for it so
+// two XCFrameworks in one app don't clash. Made with `xcodebuild -create-xcframework`, in a folder
+// of its own in the cache, and then put at `out` in place of the XCFramework there, if any. Says
+// what's wrong and returns false if it can't.
+bool make_xcframework(const Toolchain& tc, const std::string& device, const std::string& simulator, const std::string& header,
+                      const std::string& stem, const std::string& out, bool verbose);
+
 // Copies what `build_program` built to `out`, for `calx build`. On Windows its PDB goes beside it
 // as `out.pdb`, so stack traces and debuggers still find it once the cache has let it go.
 bool place_build(const std::string& built, const std::string& out, std::string& error);

@@ -77,6 +77,7 @@ fn kind(e: ProcessError) -> String {
         BadArgument(why) => "bad argument: {why}",
         Failed { command, status } => "failed: {command.ends_with(" fail")} {status}",
         InputClosed => String("input closed"),
+        Unsupported => String("unsupported"),
         Os(code) => "os {code}",
     }
 }

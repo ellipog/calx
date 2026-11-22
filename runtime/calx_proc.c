@@ -34,6 +34,9 @@
  * which Ctrl+Break goes to, and a job of its own inside the one above, which ends them all.
  *
  * This file is compiled into a program only when it starts other programs. */
+/* First, for CX_IOS, which says which system headers there are; it includes none itself. */
+#include "calx_rt.h"
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -54,7 +57,9 @@
 #include <unistd.h>
 extern char** environ;
 #ifdef __APPLE__
+#ifndef CX_IOS
 #include <libproc.h>
+#endif
 #include <mach-o/dyld.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
@@ -72,8 +77,6 @@ extern char** environ;
 #include <stdlib.h>
 #include <string.h>
 
-#include "calx_rt.h"
-
 CX_COLD void cx_panic_text(const char* at, const char* message);
 
 /* In calx_rt.c: called as the program ends, with whether it's ending as it means to. */
@@ -82,7 +85,7 @@ extern void (*cx_children_at_exit)(int normal);
 /* Where a stream goes, as std.process numbers `Stdio`. */
 enum { IO_INHERIT = 0, IO_PIPE = 1, IO_NULL = 2, IO_STDOUT = 3 };
 /* Why a child didn't start, as std.process numbers `ProcessError`. */
-enum { E_NOT_FOUND = 1, E_DENIED = 2, E_BAD_DIR = 3, E_BAD_ARG = 4, E_CLOSED = 5, E_OS = 6 };
+enum { E_NOT_FOUND = 1, E_DENIED = 2, E_BAD_DIR = 3, E_BAD_ARG = 4, E_CLOSED = 5, E_OS = 6, E_UNSUPPORTED = 7 };
 /* `cx_proc_state`'s bits. */
 enum { ST_EXITED = 1, ST_KILLED = 2, ST_TIMED_OUT = 4, ST_FINISHED = 8, ST_HAS_CODE = 16 };
 
@@ -1360,7 +1363,13 @@ static void read_some(stream* s) {
 /* What the process has used while it runs: its CPU time in ns from /proc/<pid>/stat, and its
  * resident set now and at its peak from /proc/<pid>/status, in bytes, each 0 where /proc can't
  * say. */
-#ifdef __APPLE__
+#if defined(CX_IOS)
+/* iOS starts no children (see cx_proc_spawn), so there's none to measure. */
+static void usage_os(proc* p, cx_u64* out) {
+    (void)p;
+    out[0] = out[1] = out[2] = 0;
+}
+#elif defined(__APPLE__)
 /* On macOS, from proc_pid_rusage: its CPU time, counted in the machine's ticks, and its footprint
  * now and at its most, Activity Monitor's "Memory": the pages that are its own, without the shared
  * ones its resident set counts, which could put the peak below the present. */
@@ -1743,6 +1752,13 @@ static int helper_said(int fd, pid_t hpid, pid_t* pid, cx_u64* at) {
 }
 #endif
 
+#ifdef CX_IOS
+/* Never called: cx_proc_spawn fails first on iOS, whose SDK leaves out what this takes. */
+static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n) {
+    (void)p, (void)sp, (void)input, (void)input_n;
+    return 0;
+}
+#else
 static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n) {
     int ok = 0;
     char* dir = NULL;
@@ -2015,6 +2031,7 @@ done:
     free(exe.p);
     return ok;
 }
+#endif
 
 static void free_os(proc* p) {
     pthread_mutex_lock(&live_lock);
@@ -2059,6 +2076,14 @@ cx_i32 cx_proc_error_code(void) { return err_code; }
  * input is a pipe. Returns the child, or 0 with why in `cx_proc_error_kind`. With `g` 0 the child
  * waits alone. */
 cx_i64 cx_proc_spawn(const cx_u8* spec_p, cx_usize spec_n, const cx_u8* input, cx_usize input_n, cx_i64 g) {
+#ifdef CX_IOS
+    /* An app on iOS runs alone in its sandbox, which lets it start no other program: posix_spawn
+     * fails on an iPhone, though the simulator, a Mac's process, would let it. So it fails on both
+     * before trying, with E_UNSUPPORTED, which std.process says plainly (CLX-408). */
+    (void)spec_p, (void)spec_n, (void)input, (void)input_n, (void)g;
+    fail(E_UNSUPPORTED, 0);
+    return 0;
+#endif
     spec sp;
     if (!spec_read(&sp, spec_p, spec_n)) {
         spec_free(&sp);
