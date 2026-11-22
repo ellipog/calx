@@ -151,27 +151,68 @@ static void out_unlock(int shared) {
 #endif
 }
 
-static void flush_locked(void) {
-    if (out_len) {
-        fwrite(out_buf, 1, out_len, stdout);
-        out_len = 0;
-    }
-    fflush(stdout);
+/* Set once a write to standard output has failed because its reader has gone, as a pipe's has
+ * once `head` has read its lines and ended. What's written from then on is dropped, without
+ * trying, so a program that goes on printing goes on cheaply (CLX-433). SIGPIPE is ignored from
+ * the start (see `cx_start`), so the write fails with EPIPE rather than ending the program. */
+static int out_gone;
+
+/* Whether the write that just failed failed because the reader has gone. On Windows that's a pipe
+ * whose read end was closed, ERROR_NO_DATA, or ERROR_BROKEN_PIPE, which the C library needn't give
+ * as EPIPE, so its own code for the system's error is looked at too. */
+static int out_reader_gone(void) {
+#ifdef _WIN32
+    unsigned long e = _doserrno;
+    return errno == EPIPE || e == ERROR_NO_DATA || e == ERROR_BROKEN_PIPE;
+#else
+    return errno == EPIPE;
+#endif
 }
 
-static void flush_out(void) {
+/* Writes the bytes to standard output through C's buffer, and with `flush` flushes that: 0, -1
+ * once the reader has gone, or the C library's errno for any other failure. */
+static int out_put(const void* p, size_t n, int flush) {
+    if (__atomic_load_n(&out_gone, __ATOMIC_RELAXED)) return -1;
+    errno = 0;
+#ifdef _WIN32
+    _doserrno = 0;
+#endif
+    if ((n == 0 || fwrite(p, 1, n, stdout) == n) && (!flush || fflush(stdout) == 0)) return 0;
+    int e = errno ? errno : EIO;
+    if (out_reader_gone()) {
+        __atomic_store_n(&out_gone, 1, __ATOMIC_RELAXED);
+        e = -1;
+    }
+    clearerr(stdout);
+    return e;
+}
+
+/* 0, -1 once the reader has gone, or errno, as `out_put` gives. */
+static int flush_locked(void) {
+    int e = 0;
+    if (out_len) {
+        e = out_put(out_buf, out_len, 0);
+        out_len = 0;
+    }
+    int f = out_put(NULL, 0, 1);
+    return e ? e : f;
+}
+
+static int flush_out(void) {
     int l = out_lock();
-    flush_locked();
+    int e = flush_locked();
     out_unlock(l);
+    return e;
 }
 
 static void out_bytes(const void* p, size_t n) {
     if (n == 0) return; /* an empty string's pointer can be null, which memcpy can't take */
+    if (__atomic_load_n(&out_gone, __ATOMIC_RELAXED)) return;
     int l = out_lock();
     if (n > sizeof out_buf - out_len) {
         flush_locked();
         if (n > sizeof out_buf) {
-            fwrite(p, 1, n, stdout);
+            out_put(p, n, 0);
             out_unlock(l);
             return;
         }
@@ -953,6 +994,12 @@ void cx_start(int argc, char** argv) {
     counter_hz = (cx_u64)hz.QuadPart;
     read_args();
 #else
+    /* A write to a pipe or a socket whose reader has gone fails with EPIPE, rather than ending
+     * the program, as in Python and Rust, and as Windows has it. Whether `println` could end a
+     * program used to depend on whether it had made an HTTP request, as libcurl's loading ignored
+     * it (CLX-433). The programs it starts get the default back (see calx_proc.c). After the
+     * helper above, which starts its child with the default as it was given it. */
+    signal(SIGPIPE, SIG_IGN);
     read_args(argc, argv);
 #endif
     take_script();
@@ -1122,6 +1169,16 @@ void cx_out_write(const cx_u8* p, cx_usize n) {
 void cx_out_flush(void) {
     if (!par_buffered) flush_out();
 }
+
+/* As `cx_out_flush`, for std.io's `Stdout`: 0, -1 once standard output's reader has gone, or the
+ * C library's errno for any other failure. */
+cx_i32 cx_out_flush_checked(void) {
+    if (par_buffered) return 0;
+    return flush_out();
+}
+
+/* Whether standard output's reader has gone, so what's written to it is dropped (see `out_gone`). */
+cx_u32 cx_out_gone(void) { return __atomic_load_n(&out_gone, __ATOMIC_RELAXED) ? 1 : 0; }
 
 /* Whether standard output is a terminal. A Windows console reads ANSI escape codes only once a
  * program turns that on, which this does, and a console that can't, before Windows 10, counts as

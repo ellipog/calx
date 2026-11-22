@@ -324,7 +324,7 @@ fn main() {
 }
 ```
 
-`Denied` is a permission the system refuses, such as writing a read-only file, and `Os` is anything else, such as a file another program holds open on Windows.
+`Denied` is a permission the system refuses, such as writing a read-only file, and `Os` is anything else, such as a file another program holds open on Windows, or a pipe, such as a FIFO, whose reader has gone: a Calx program ignores SIGPIPE, so that write fails rather than ending the program ([`std.io`](io.md#when-the-reader-has-gone)).
 
 ## Saving safely
 

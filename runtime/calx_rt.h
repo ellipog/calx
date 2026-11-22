@@ -151,6 +151,10 @@ CX_FN(void, cx_print_newline, (void));
 CX_FN(cx_usize, cx_in_read, (cx_u8* p, cx_usize n));
 CX_FN(void, cx_out_write, (const cx_u8* p, cx_usize n));
 CX_FN(void, cx_out_flush, (void));
+/* For std.io's `Stdout` and `reader_gone`: a flush that gives 0, -1 once standard output's reader
+ * has gone, or errno, and whether it has gone, after which what's written there is dropped. */
+CX_FN(cx_i32, cx_out_flush_checked, (void));
+CX_FN(cx_u32, cx_out_gone, (void));
 
 /* `eprint` and `eprintln`: between these, the print functions write to standard error, which
  * isn't buffered. Output waiting for standard output goes first, so the two keep their order.
