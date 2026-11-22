@@ -122,7 +122,16 @@ fn main() {
             println("building the {mode} app: {swift} {signed}")
             continue
         }
-        let installed = run("xcrun", ["simctl", "install", sim.copy(), app.copy()], dir.copy())
+        // On a CI runner the first install on a simulator that has just booted, or two at once from
+        // the test's debug and release runs, can hang, and one after it works (CLX-424). So an
+        // install that hangs is stopped after 40 seconds and tried again, three times in all.
+        var installed = String()
+        for _ in 0..3 {
+            installed = run_for("xcrun", ["simctl", "install", sim.copy(), app.copy()], dir.copy(), 40000)
+            if not installed.contains("so it was stopped]") {
+                break
+            }
+        }
         if not installed.is_empty() {
             println("installing the {mode} app: {installed}")
             continue
