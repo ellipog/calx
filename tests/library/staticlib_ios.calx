@@ -50,15 +50,21 @@ const ENTITLEMENTS: str = #"
     "#
 
 // What a command printed, standard output and error together, or with how it ended if it failed.
+// Each is stopped after a minute, and says so, so a step that hangs on a slow runner shows which it
+// was, before the test runner's own limit stops the whole test and what it printed with it (CLX-424).
 fn run(exe: String, args: List<String>, dir: String) -> String {
-    return run_for(exe, args, dir, 0)
+    return run_for(exe, args, dir, 60000)
 }
 
-// The same, stopped once it has run `ms` milliseconds, if `ms` isn't 0.
+// The same, stopped once it has run `ms` milliseconds.
 fn run_for(exe: String, args: List<String>, dir: String, ms: u64) -> String {
+    let what = "{exe} {args.join(" ")}"
     match Command.new(exe).args(args).dir(dir).timeout(ms).output() {
         ok(o) => {
             let text = "{o.text()}{o.error_text()}".trim_end()
+            if o.status.timed_out {
+                return "{text} [{what} still running after {ms / 1000} s, so it was stopped]"
+            }
             return if o.status.success() { text } else { "{text} [{o.status}]" }
         },
         err(e) => return "can't run {exe}: {e}",
@@ -79,7 +85,8 @@ fn main() {
             words.push("--release")
         }
         words.extend(["core.calx", "-o", xcf.copy()])
-        let built = run(calx.copy(), words, dir.copy())
+        // It builds the runtime twice, so it has three minutes.
+        let built = run_for(calx.copy(), words, dir.copy(), 180000)
         if not built.is_empty() {
             println("building the {mode} XCFramework: {built}")
             continue

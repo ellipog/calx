@@ -64,7 +64,9 @@
 // use, which must report the same errors at the same places. Each other test that's one file must
 // be formatted as `calx fmt` formats it.
 //
-// A test that runs longer than two minutes (RUN_SECONDS) fails, and its program is stopped.
+// A test that runs longer than two minutes (RUN_SECONDS) fails, and its program is stopped. One that
+// runs on the iOS simulator has ten (SIMULATOR_SECONDS), as it builds for iOS, installs an app and
+// launches it, which a busy CI runner can take minutes over (CLX-424).
 //
 // Each program's temporary folder, TMP and TEMP on Windows and TMPDIR elsewhere, is one of its own
 // in its test's folder. A test that leaves anything there fails, as a folder `fs.temp_dir()`
@@ -83,6 +85,7 @@ import std.process.{Command, Output, output_all}
 import std.regex.{Regex}
 
 const RUN_SECONDS: u64 = 120
+const SIMULATOR_SECONDS: u64 = 600
 
 /// Runs the compiler's tests: the files under tests/ and the examples in the docs.
 @cli(name: "tests/run.calx")
@@ -499,7 +502,7 @@ fn main() {
                 }
                 // The system's temporary folder, for the program, is one of its own in its test's
                 // folder, so what it leaves there is seen, and removed with the test's folder.
-                var run = calx_cmd(calx.copy(), root.copy(), words).env("CALX", calx.copy()).input_text(input).timeout(RUN_SECONDS * 1000)
+                var run = calx_cmd(calx.copy(), root.copy(), words).env("CALX", calx.copy()).input_text(input).timeout(limit(t) * 1000)
                 if t.simulator != none {
                     run = run.env("CALX_SIMULATOR", sim_id.copy())
                 }
@@ -645,6 +648,11 @@ fn main() {
     }
 }
 
+// How many seconds a test's program may run before it's stopped.
+fn limit(t: Test) -> u64 {
+    return if t.simulator != none { SIMULATOR_SECONDS } else { RUN_SECONDS }
+}
+
 // An iOS simulator the tests that need one run on (CLX-408): its UDID, for `xcrun simctl`, and
 // whether this started it.
 struct Simulator {
@@ -744,7 +752,7 @@ fn signal_name(s: i32) -> String {
 
 fn check_run(t: Test, job: Job, o: Output, p: mut Patterns, problems: mut List<String>) {
     if o.status.timed_out {
-        problems.push("still running after {RUN_SECONDS} seconds, so it was stopped")
+        problems.push("still running after {limit(t)} seconds, so it was stopped")
         return
     }
     let code = o.status.code ?? -1
