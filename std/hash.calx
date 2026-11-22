@@ -1,12 +1,13 @@
-/// MD5, SHA-1, SHA-256, SHA-384 and SHA-512, and HMAC with any of them (D118), and BLAKE2b
-/// (CLX-384).
+/// MD5, SHA-1, SHA-256, SHA-384 and SHA-512, and HMAC with any of them (D118), BLAKE2b (CLX-384)
+/// and BLAKE2s (CLX-411).
 ///
 /// Vanilla uses MD5 for an offline player's UUID, SHA-1 for the server hash the session server
 /// checks a login by, and SHA-256 for the seed it sends a joining player. Velocity signs the
 /// player data it forwards with HMAC-SHA256. Scripts check what they download with SHA-256 and
 /// SHA-512. They give what Java's `MessageDigest` and `Mac` and Python's `hashlib` and `hmac` give.
 /// BLAKE2b, of any length up to 64 bytes and with a key or none, is Python's `hashlib.blake2b`,
-/// and what argon2 in `std.crypto` is built on.
+/// and what argon2 in `std.crypto` is built on. BLAKE2s, its 32-bit sibling of up to 32 bytes, is
+/// `hashlib.blake2s`, and the hash of WireGuard and of Noise's `BLAKE2s` handshakes.
 module std.hash
 
 import std.fs.{FsError, open_read}
@@ -19,6 +20,9 @@ extern "C" {
     fn cx_digest_blake2b_start(ctx: *u8, len: usize, key: *const u8, key_len: usize)
     fn cx_digest_blake2b_add(ctx: *u8, p: *const u8, n: usize)
     fn cx_digest_blake2b_finish(ctx: *u8, out: *u8) -> usize
+    fn cx_digest_blake2s_start(ctx: *u8, len: usize, key: *const u8, key_len: usize)
+    fn cx_digest_blake2s_add(ctx: *u8, p: *const u8, n: usize)
+    fn cx_digest_blake2s_finish(ctx: *u8, out: *u8) -> usize
 }
 
 /// Which hash a `Digest` works out.
@@ -240,6 +244,67 @@ impl Blake2b {
 @track_caller
 pub fn blake2b(bytes: List<u8>, len: usize = 64, key: List<u8> = []) -> List<u8> {
     var d = Blake2b.new(len, key)
+    d.add(bytes)
+    return d.finish()
+}
+
+/// A BLAKE2s hash being worked out, as RFC 7693 makes it and Python's `hashlib.blake2s` does:
+/// BLAKE2b's design on 32-bit words, of `len` bytes, 1 to 32, and with a key of up to 32 bytes or
+/// none. It's faster than BLAKE2b on 32-bit processors, and slower on 64-bit ones.
+pub struct Blake2s {
+    ctx: List<u8>,
+}
+
+impl Blake2s {
+    /// A hash of `len` bytes under `key`, as Python's `hashlib.blake2s(digest_size=len, key=key)`.
+    /// Panics unless `len` is 1 to 32 and the key is 32 bytes or fewer.
+    @track_caller
+    pub fn new(len: usize = 32, key: List<u8> = []) -> Blake2s {
+        if len < 1 or len > 32 {
+            panic("a BLAKE2s hash is 1 to 32 bytes, not {len}")
+        }
+        if key.len() > 32 {
+            panic("a BLAKE2s key is 32 bytes or fewer, not {key.len()}")
+        }
+        var ctx: List<u8> = [0; 224]
+        unsafe {
+            cx_digest_blake2s_start(ctx.as_mut_ptr(), len, key.as_ptr(), key.len())
+        }
+        return Blake2s { ctx: ctx }
+    }
+
+    /// Adds the bytes.
+    pub fn add(mut self, bytes: List<u8>) {
+        unsafe {
+            cx_digest_blake2s_add(self.ctx.as_mut_ptr(), bytes.as_ptr(), bytes.len())
+        }
+    }
+
+    /// Adds the text's UTF-8 bytes.
+    pub fn add_text(mut self, text: String) {
+        unsafe {
+            cx_digest_blake2s_add(self.ctx.as_mut_ptr(), text.as_ptr(), text.len())
+        }
+    }
+
+    /// The hash of everything added, as long as `new` was told.
+    pub fn finish(own self) -> List<u8> {
+        var ctx = self.ctx
+        var out: List<u8> = [0; 32]
+        unsafe {
+            let n = cx_digest_blake2s_finish(ctx.as_mut_ptr(), out.as_mut_ptr())
+            out.truncate(n)
+        }
+        return out
+    }
+}
+
+/// The BLAKE2s of the bytes, `len` of them, 1 to 32, under `key` if there's one, as Python's
+/// `hashlib.blake2s(bytes, digest_size=len, key=key).digest()`. Panics unless `len` is 1 to 32
+/// and the key is 32 bytes or fewer.
+@track_caller
+pub fn blake2s(bytes: List<u8>, len: usize = 32, key: List<u8> = []) -> List<u8> {
+    var d = Blake2s.new(len, key)
     d.add(bytes)
     return d.finish()
 }

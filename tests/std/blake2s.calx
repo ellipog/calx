@@ -1,0 +1,64 @@
+// BLAKE2s against RFC 7693: Appendix B's "abc", and Appendix E's self-test, whose grand hash is
+// the BLAKE2s-256 of 48 hashes, keyed and not, of 16, 20, 28 and 32 bytes over inputs of 0, 3,
+// 64, 65, 255 and 1024 bytes. Then the reference implementation's keyed answers, and pieces
+// around a block's end (CLX-411).
+
+import std.bytes.{hex}
+import std.hash.{Blake2s, blake2s}
+
+// RFC 7693's selftest_seq: a Fibonacci sequence's top bytes, from a seed.
+fn seq(len: usize, seed: u32) -> List<u8> {
+    var out: List<u8> = []
+    var a = u32.wrap(u64(0xDEAD4BADu32) * u64(seed))
+    var b: u32 = 1
+    for _ in 0..len {
+        let t = a + b
+        a = b
+        b = t
+        out.push(u8.wrap(t >> 24))
+    }
+    return out
+}
+
+fn main() {
+    println(hex(blake2s("abc".to_bytes())))    // out: 508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982
+    println(hex(blake2s([])))    // out: 69217a3079908094e11121d042354a7c1f55b6482ca1a51e1b250dfd1ed0eef9
+
+    var grand = Blake2s.new(32)
+    for outlen in [16usize, 20, 28, 32] {
+        for inlen in [0usize, 3, 64, 65, 255, 1024] {
+            let input = seq(inlen, u32.wrap(inlen))
+            grand.add(blake2s(input.copy(), outlen))
+            grand.add(blake2s(input, outlen, key: seq(outlen, u32.wrap(outlen))))
+        }
+    }
+    println(hex(grand.finish()))    // out: 6a411f08ce25adcdfb02aba641451cec53c598b24f4fc787fbdc88797f4c1dfe
+
+    // blake2s-kat.txt's keyed answers, with the key 00 01 ... 1f: for no input, and for the 64
+    // bytes 00 to 3f, a whole block that's also the last.
+    var key: List<u8> = []
+    var block: List<u8> = []
+    for i in 0..64 {
+        block.push(u8.wrap(i))
+        if i < 32 {
+            key.push(u8.wrap(i))
+        }
+    }
+    println(hex(blake2s([], key: key.copy())))    // out: 48a8997da407876b3d79c0d92325ad3b89cbb754d86ab71aee047ad345fd2c49
+    println(hex(blake2s(block.copy(), key: key.copy())))    // out: 8975b0577fd35566d750b362b0897a26c399136df07bababbde6203ff2954ed4
+
+    // In pieces, across where a block ends, give the hash of them all at once.
+    let all = seq(1000, 7)
+    for cut in [0usize, 1, 63, 64, 65, 128, 999, 1000] {
+        var d = Blake2s.new(24, key: "secret".to_bytes())
+        d.add(all[..cut])
+        d.add(all[cut..])
+        if d.finish() != blake2s(all.copy(), 24, key: "secret".to_bytes()) {
+            println("pieces cut at {cut} differ")
+        }
+    }
+
+    var t = Blake2s.new(1)
+    t.add_text("Grüße")
+    println("{t.finish() == blake2s("Grüße".to_bytes(), 1)}")    // out: true
+}

@@ -1068,7 +1068,8 @@ static void curl_load(void) {
     }
     /* Not safe to call while another thread uses libcurl, so it's done here, once, before any
      * request's thread starts. A write to a closed TLS connection would raise SIGPIPE, which a
-     * server never wants. */
+     * server never wants. A program ignores it from the start (see `cx_start`), so this is for a
+     * static library, whose host may not. */
     if (curl.global_init(3) != 0) return;
     struct sigaction sa;
     if (sigaction(SIGPIPE, NULL, &sa) == 0 && sa.sa_handler == SIG_DFL) signal(SIGPIPE, SIG_IGN);

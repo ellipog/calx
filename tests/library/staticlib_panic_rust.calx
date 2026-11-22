@@ -1,0 +1,159 @@
+// CLX-407: a panic in a static library comes back to a Rust host, as it does to a C one. The host
+// gives `calx_on_panic` a Rust function, with a `Mutex` of its own as the context, calls a function
+// that panics, which gives its `on_panic` value, reads `calx_panicked`, shuts the library down and
+// starts it again, and calls it once more. Built in debug and release, and linked by `rustc`.
+// needs: rustc
+// file: main.calx
+import std.env.{os, script, variable}
+import std.fs.{is_file}
+import std.path.{join, parent_dir}
+import std.process.{Command}
+
+/// What `command` printed, and how it ended, or what went wrong.
+fn run_command(command: own Command, what: String) -> String {
+    match command.output() {
+        ok(o) => {
+            let text = "{o.text()}{o.error_text()}".trim_end()
+            return if o.status.success() { text } else { "{text}\n{o.status}" }
+        },
+        err(e) => return "can't run {what}: {e}",
+    }
+}
+
+fn run(exe: String, args: List<String>, dir: String) -> String {
+    return run_command(Command.new(exe.copy()).args(args).dir(dir), exe)
+}
+
+/// On Windows, PATH without the folders whose `link.exe` isn't Visual Studio's, such as Git's
+/// usr/bin, which has coreutils' `link`. Where Visual Studio's environment is set, as CI's is,
+/// `rustc` runs the first `link.exe` on PATH, and Git's bash puts its own first. Visual Studio's
+/// has `cl.exe` beside it, which is how clang tells them apart too.
+fn msvc_path() -> String? {
+    if os() != "windows" {
+        return none
+    }
+    let path = variable("PATH") ?? String()
+    var kept: List<String> = []
+    for folder in path.split(";") {
+        let other_link = is_file(join(folder.copy(), "link.exe")) and not is_file(join(folder.copy(), "cl.exe"))
+        if not folder.is_empty() and not other_link {
+            kept.push(folder.copy())
+        }
+    }
+    return some(kept.join(";"))
+}
+
+fn main() {
+    let calx = variable("CALX") ?? String("calx")
+    let dir = parent_dir(script()!)!
+    let windows = os() == "windows"
+    for mode in ["debug", "release"] {
+        let lib = if windows { "out/{mode}/engine.lib" } else { "out/{mode}/libengine.a" }
+        var words: List<String> = ["build", "--staticlib"]
+        if mode == "release" {
+            words.push("--release")
+        }
+        for w in ["engine.calx", "-o"] {
+            words.push(String(w))
+        }
+        words.push(lib)
+        let built = run(calx.copy(), words, dir.copy())
+        if not built.is_empty() {
+            println("building the {mode} library: {built}")
+            continue
+        }
+        let exe = "out/{mode}/host{if windows { ".exe" } else { "" }}"
+        var rustc = Command.new("rustc").args(["--edition", "2021", "main.rs", "-L", "native=out/{mode}", "-l", "static=engine", "-o", exe.copy()]).dir(dir.copy())
+        if let path = msvc_path() {
+            rustc = rustc.env("PATH", path)
+        }
+        let linked = run_command(rustc, "rustc")
+        if not linked.is_empty() {
+            println("linking the {mode} host: {linked}")
+            continue
+        }
+        println(run(join(dir.copy(), exe), [], dir.copy()))
+    }
+    // out: engine_divide(7, 2) gave 3
+    // out: engine_divide(1, 0) gave -1
+    // out: the hook heard: engine_divide: division by zero, at engine.calx:99:12
+    // out: calx_panicked: division by zero
+    // out: engine_divide(8, 2) gave -1, as the library has stopped
+    // out: calx_shutdown gave 101
+    // out: after calx_init, engine_divide(8, 2) gave 4, and calx_panicked gives nothing
+    // out: calx_shutdown gave 0
+    // out: engine_divide(7, 2) gave 3
+    // out: engine_divide(1, 0) gave -1
+    // out: the hook heard: engine_divide: division by zero, at engine.calx:99:12
+    // out: calx_panicked: division by zero
+    // out: engine_divide(8, 2) gave -1, as the library has stopped
+    // out: calx_shutdown gave 101
+    // out: after calx_init, engine_divide(8, 2) gave 4, and calx_panicked gives nothing
+    // out: calx_shutdown gave 0
+}
+
+// file: engine.calx
+/// `a / b`, or -1 if the library panics.
+@export_c(on_panic: -1)
+fn engine_divide(a: i32, b: i32) -> i32 {
+    return a / b
+}
+
+// file: main.rs
+use std::ffi::CStr;
+use std::os::raw::{c_char, c_void};
+use std::sync::Mutex;
+
+/// The header's `calx_panic`.
+#[repr(C)]
+struct CalxPanic {
+    message: *const c_char,
+    location: *const c_char,
+    trace: *const c_char,
+    function: *const c_char,
+}
+
+extern "C" {
+    fn calx_init();
+    fn calx_shutdown() -> i32;
+    fn calx_on_panic(hook: Option<extern "C" fn(*mut c_void, *const CalxPanic)>, ctx: *mut c_void);
+    fn calx_panicked() -> *const CalxPanic;
+    fn engine_divide(a: i32, b: i32) -> i32;
+}
+
+fn text(p: *const c_char) -> String {
+    if p.is_null() {
+        return String::from("(none)");
+    }
+    unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+}
+
+/// What the library's panics said, in the `Mutex` the host gave as the context.
+extern "C" fn on_panic(ctx: *mut c_void, p: *const CalxPanic) {
+    let heard = unsafe { &*(ctx as *const Mutex<Vec<String>>) };
+    let p = unsafe { &*p };
+    let line = format!("{}: {}, at {}", text(p.function), text(p.message), text(p.location));
+    heard.lock().unwrap().push(line);
+}
+
+fn main() {
+    let heard: &'static Mutex<Vec<String>> = Box::leak(Box::new(Mutex::new(Vec::new())));
+    unsafe {
+        calx_on_panic(Some(on_panic), heard as *const _ as *mut c_void);
+        calx_init();
+        println!("engine_divide(7, 2) gave {}", engine_divide(7, 2));
+        println!("engine_divide(1, 0) gave {}", engine_divide(1, 0));
+        for line in heard.lock().unwrap().iter() {
+            println!("the hook heard: {}", line);
+        }
+        let p = calx_panicked();
+        println!("calx_panicked: {}", if p.is_null() { String::from("nothing") } else { text((*p).message) });
+        println!("engine_divide(8, 2) gave {}, as the library has stopped", engine_divide(8, 2));
+        println!("calx_shutdown gave {}", calx_shutdown());
+        calx_init();
+        let r = engine_divide(8, 2);
+        let none = calx_panicked().is_null();
+        println!("after calx_init, engine_divide(8, 2) gave {}, and calx_panicked gives {}", r, if none { "nothing" } else { "a panic" });
+        println!("calx_shutdown gave {}", calx_shutdown());
+    }
+}

@@ -9,7 +9,14 @@
 ///
 /// Beside those, argon2id for storing passwords (CLX-384), as Python's argon2-cffi does, in the
 /// PHC strings it writes, and Ed25519 signatures (CLX-379), which minisign and SSH keys are, as
-/// Python's `cryptography` signs and checks them.
+/// Python's `cryptography` signs and checks them. And ES256 signatures (CLX-406), ECDSA on P-256
+/// with SHA-256, which JWTs for Apple's push service and App Store Connect are signed with, from
+/// PKCS#8 keys such as Apple's `.p8` files, as `cryptography` signs and checks them.
+///
+/// X25519 key exchange (CLX-411), as `cryptography`'s `X25519PrivateKey` makes it, and Noise
+/// handshakes over it, as Python's `noiseprotocol` runs them: the patterns of revision 34 of the
+/// spec, IK and XX among them, with ChaChaPoly or AESGCM and SHA256, SHA512, BLAKE2s or
+/// BLAKE2b, and the transport they give, with its nonces and rekeying.
 ///
 /// And authenticated encryption (CLX-397), sealing secrets so that reading them takes the key and
 /// changing them is noticed: ChaCha20-Poly1305 and XChaCha20-Poly1305, and AES-GCM, as Python's
@@ -17,7 +24,7 @@
 module std.crypto
 
 import std.bytes.{base64, from_base64}
-import std.hash.{Algorithm, Digest}
+import std.hash.{Algorithm, Digest, blake2b, blake2s, sha256, sha512}
 
 extern "C" {
     fn cx_crypto_random(p: *u8, n: usize)
@@ -54,6 +61,14 @@ extern "C" {
     fn cx_ed25519_sign(seed: *const u8, public: *const u8, msg: *const u8, len: usize, out: *u8)
     fn cx_ed25519_check(public: *const u8) -> bool
     fn cx_ed25519_verify(public: *const u8, msg: *const u8, len: usize, sig: *const u8) -> bool
+    fn cx_x25519(scalar: *const u8, u: *const u8, out: *u8) -> bool
+    fn cx_x25519_public(scalar: *const u8, out: *u8)
+    fn cx_p256_scalar_check(d: *const u8) -> bool
+    fn cx_p256_public(d: *const u8, out: *u8)
+    fn cx_p256_check(xy: *const u8) -> bool
+    fn cx_p256_decompress(x: *const u8, odd: bool, y: *u8) -> bool
+    fn cx_p256_sign(d: *const u8, msg: *const u8, len: usize, out: *u8)
+    fn cx_p256_verify(xy: *const u8, msg: *const u8, len: usize, sig: *const u8) -> bool
     fn cx_aead_chacha_seal(key: *const u8, nonce: *const u8, nonce_len: usize, pt: *const u8, n: usize, aad: *const u8, alen: usize, out: *u8)
     fn cx_aead_chacha_open(key: *const u8, nonce: *const u8, nonce_len: usize, sealed: *const u8, n: usize, aad: *const u8, alen: usize, out: *u8) -> bool
     fn cx_gcm_start(ctx: *u8, key: *const u8, len: usize)
@@ -594,6 +609,477 @@ impl Ed25519PublicKey {
     }
 }
 
+/// An X25519 private key, RFC 7748's: 32 bytes, as Python's `cryptography` `X25519PrivateKey`
+/// holds it. With another's public key it makes a secret the two share, which the other makes
+/// from this key's public key and its own private key, and which no one watching can.
+pub struct X25519Key {
+    secret: List<u8>,
+    public: List<u8>,
+}
+
+impl X25519Key {
+    /// A new key, 32 bytes from the system's random source, as `X25519PrivateKey.generate()`.
+    pub fn generate() -> X25519Key {
+        return X25519Key.from_bytes(random_bytes(32)) ?? panic("32 random bytes are a key")
+    }
+
+    /// The key in these 32 bytes, as `X25519PrivateKey.from_private_bytes(bytes)` reads it, or
+    /// `none` unless they're 32 bytes. Every 32 bytes are a key: X25519 clears the low three bits
+    /// and the top one, and sets the one below the top, as it uses them.
+    pub fn from_bytes(bytes: List<u8>) -> X25519Key? {
+        if bytes.len() != 32 {
+            return none
+        }
+        var public: List<u8> = [0; 32]
+        unsafe {
+            cx_x25519_public(bytes.as_ptr(), public.as_mut_ptr())
+        }
+        return some(X25519Key { secret: bytes.copy(), public: public })
+    }
+
+    /// The key's 32 bytes, as they were given, as `private_bytes_raw()` gives them. Anyone with
+    /// them has every secret the key shares.
+    pub fn bytes(self) -> List<u8> {
+        return self.secret.copy()
+    }
+
+    /// The public key, 9 on the curve times this key, which is given to the other side.
+    pub fn public_key(self) -> X25519PublicKey {
+        return X25519PublicKey { encoded: self.public.copy() }
+    }
+
+    /// The 32 bytes this key shares with `peer`, as `exchange(peer)` gives them, or `none` where
+    /// they'd be all zeros, where `cryptography` raises `ValueError`: `peer` is a point of small
+    /// order, which shares the same zeros with every key, so nothing is secret. Hash them, with
+    /// both public keys, before using them as a key, as HKDF or Noise does.
+    pub fn exchange(self, peer: X25519PublicKey) -> List<u8>? {
+        var out: List<u8> = [0; 32]
+        let shared = unsafe { cx_x25519(self.secret.as_ptr(), peer.encoded.as_ptr(), out.as_mut_ptr()) }
+        if not shared {
+            return none
+        }
+        return some(out)
+    }
+}
+
+/// An X25519 public key: 32 bytes, a point's u, little-endian, as Python's `cryptography`
+/// `X25519PublicKey` holds it.
+pub struct X25519PublicKey {
+    encoded: List<u8>,
+}
+
+impl X25519PublicKey {
+    /// The key in these 32 bytes, as `X25519PublicKey.from_public_bytes(bytes)` reads it, or
+    /// `none` unless they're 32 bytes. Every 32 bytes are taken, as RFC 7748 says: the top bit is
+    /// left out, and a u of the field's prime or more is taken less the prime. A point of small
+    /// order is taken too, and `exchange` with it gives `none`.
+    pub fn from_bytes(bytes: List<u8>) -> X25519PublicKey? {
+        if bytes.len() != 32 {
+            return none
+        }
+        return some(X25519PublicKey { encoded: bytes.copy() })
+    }
+
+    /// The key's 32 bytes, as `public_bytes_raw()` gives them.
+    pub fn bytes(self) -> List<u8> {
+        return self.encoded.copy()
+    }
+}
+
+/// An ECDSA private key on NIST's P-256 curve, also called secp256r1 and prime256v1, which signs
+/// with SHA-256: JWS's ES256, which Apple's push service, App Store Connect's API and Sign in
+/// with Apple take, as Python's `cryptography` signs with `ec.ECDSA(hashes.SHA256())`. It's a
+/// number from 1 to the group's order less 1, kept in a PKCS#8 file, which Apple's `.p8` keys
+/// are.
+pub struct P256Key {
+    // d, 32 bytes, big-endian, and its public key's x and y, 32 bytes each.
+    secret: List<u8>,
+    public: List<u8>,
+}
+
+impl P256Key {
+    /// A new key, a number from the system's random source, as `ec.generate_private_key(ec.SECP256R1())`.
+    pub fn generate() -> P256Key {
+        loop {
+            // 32 random bytes are n or more, and drawn again, about once in 2^32 times.
+            if let key = P256Key.from_scalar(random_bytes(32)) {
+                return key
+            }
+        }
+    }
+
+    /// The key whose private number d is these 32 bytes, big-endian, as
+    /// `ec.derive_private_key(d, ec.SECP256R1())` makes it, or `none` unless they're 32 bytes of
+    /// a number from 1 to the group's order less 1.
+    pub fn from_scalar(bytes: List<u8>) -> P256Key? {
+        if bytes.len() != 32 or not unsafe { cx_p256_scalar_check(bytes.as_ptr()) } {
+            return none
+        }
+        var public: List<u8> = [0; 64]
+        unsafe {
+            cx_p256_public(bytes.as_ptr(), public.as_mut_ptr())
+        }
+        return some(P256Key { secret: bytes.copy(), public: public })
+    }
+
+    /// The key in DER, as `serialization.load_der_private_key(der, None)` reads it: a PKCS#8
+    /// PrivateKeyInfo for a P-256 key, or a SEC1 ECPrivateKey that names the curve, as OpenSSL's
+    /// `ecparam -genkey` writes, every length in its shortest form and nothing after. `none` for
+    /// anything else, an encrypted key or another curve's among them, or if the public key in it
+    /// isn't the private key's.
+    pub fn from_der(der: List<u8>) -> P256Key? {
+        if let key = pkcs8_key(der.copy()) {
+            return some(key)
+        }
+        return ec_private_key(der, true)
+    }
+
+    /// The key in PEM, as `serialization.load_pem_private_key(pem, None)` reads it: the PKCS#8
+    /// of a `-----BEGIN PRIVATE KEY-----` block, which is what an Apple `.p8` file holds, or the
+    /// SEC1 of a `-----BEGIN EC PRIVATE KEY-----` one, read as `from_der` reads them. Text before
+    /// and after the block is skipped. `none` if there's no such block, or what's in it isn't
+    /// such a key.
+    pub fn from_pem(pem: String) -> P256Key? {
+        if let der = pem_block(pem.copy(), "PRIVATE KEY") {
+            return pkcs8_key(der)
+        }
+        let der = pem_block(pem, "EC PRIVATE KEY") else return none
+        return ec_private_key(der, true)
+    }
+
+    /// The private number d, 32 bytes, big-endian, which `from_scalar` makes the same key from,
+    /// as `private_numbers().private_value` holds it. Anyone with it can sign as the key.
+    pub fn scalar(self) -> List<u8> {
+        return self.secret.copy()
+    }
+
+    /// The key as a PKCS#8 PrivateKeyInfo in DER, unencrypted, with the public key in it, as
+    /// `private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())` and OpenSSL write it,
+    /// and as Apple's `.p8` files hold it: 138 bytes.
+    pub fn der(self) -> List<u8> {
+        var ec: List<u8> = [0x02, 0x01, 0x01]
+        ec.extend(der_tlv(0x04, self.secret.copy()))
+        ec.extend(der_tlv(0xA1, der_tlv(0x03, point_bits(self.public.copy()))))
+        var info: List<u8> = [0x02, 0x01, 0x00]
+        info.extend(P256_ALGORITHM)
+        info.extend(der_tlv(0x04, der_tlv(0x30, ec)))
+        return der_tlv(0x30, info)
+    }
+
+    /// `der()` as a `-----BEGIN PRIVATE KEY-----` PEM block, base64 in lines of 64, as
+    /// `private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())` writes it.
+    pub fn pem(self) -> String {
+        return pem_text(self.der(), "PRIVATE KEY")
+    }
+
+    /// The public key, which checks what this key signs.
+    pub fn public_key(self) -> P256PublicKey {
+        return P256PublicKey { point: self.public.copy() }
+    }
+
+    /// The ES256 signature of the message: r then s, 32 bytes each, big-endian, the 64 bytes JWS
+    /// and WebAuthn's COSE put in a token, where `cryptography`'s `sign` gives DER and
+    /// `utils.decode_dss_signature` takes it apart. The nonce is RFC 6979's, worked out from the
+    /// key and the message's SHA-256, so the same message always signs the same and no random
+    /// source is needed.
+    pub fn sign(self, message: List<u8>) -> List<u8> {
+        var out: List<u8> = [0; 64]
+        unsafe {
+            cx_p256_sign(self.secret.as_ptr(), message.as_ptr(), message.len(), out.as_mut_ptr())
+        }
+        return out
+    }
+
+    /// The same signature in DER, a SEQUENCE of r and s as INTEGERs, as `cryptography`'s
+    /// `sign(message, ec.ECDSA(hashes.SHA256()))`, X.509 and TLS give it: 70 to 72 bytes, most
+    /// often.
+    pub fn sign_der(self, message: List<u8>) -> List<u8> {
+        let raw = self.sign(message)
+        var both = der_uint(raw[..32])
+        both.extend(der_uint(raw[32..]))
+        return der_tlv(0x30, both)
+    }
+}
+
+/// A P-256 public key: a point on the curve, x and y, as Python's `cryptography`
+/// `EllipticCurvePublicKey` holds it. It checks ES256 signatures.
+pub struct P256PublicKey {
+    // x then y, 32 bytes each, big-endian.
+    point: List<u8>,
+}
+
+impl P256PublicKey {
+    /// The key in SEC1's encoding of a point, X9.62's, as
+    /// `EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), bytes)` reads it: 65 bytes, 4
+    /// then x and y, or 33, 2 or 3 for y's parity then x. `none` unless it's one of those, with x
+    /// and y below the field's prime and the point on the curve.
+    pub fn from_sec1(bytes: List<u8>) -> P256PublicKey? {
+        if bytes.len() == 65 and bytes[0] == 4 {
+            let point = bytes[1..]
+            if not unsafe { cx_p256_check(point.as_ptr()) } {
+                return none
+            }
+            return some(P256PublicKey { point: point })
+        }
+        if bytes.len() == 33 and (bytes[0] == 2 or bytes[0] == 3) {
+            var point = bytes[1..]
+            var y: List<u8> = [0; 32]
+            if not unsafe { cx_p256_decompress(point.as_ptr(), bytes[0] == 3, y.as_mut_ptr()) } {
+                return none
+            }
+            point.extend(y)
+            return some(P256PublicKey { point: point })
+        }
+        return none
+    }
+
+    /// The key in an X.509 SubjectPublicKeyInfo in DER, as `serialization.load_der_public_key`
+    /// reads one and Java's `getEncoded()` writes it: `id-ecPublicKey` with `prime256v1`, then
+    /// the point as `from_sec1` takes it, every length in its shortest form and nothing after.
+    /// `none` for anything else.
+    pub fn from_der(der: List<u8>) -> P256PublicKey? {
+        var r = Der { bytes: der.copy(), at: 0 }
+        let info = r.enter(0x30) else return none
+        if info != der.len() or not r.next_are(P256_ALGORITHM[..]) {
+            return none
+        }
+        let bits = r.enter(0x03) else return none
+        if bits != info or r.byte() != some(0) {
+            return none
+        }
+        return P256PublicKey.from_sec1(der[r.at..])
+    }
+
+    /// The key in a `-----BEGIN PUBLIC KEY-----` PEM block, as
+    /// `serialization.load_pem_public_key` reads it, the DER in it read as `from_der` reads it.
+    pub fn from_pem(pem: String) -> P256PublicKey? {
+        let der = pem_block(pem, "PUBLIC KEY") else return none
+        return P256PublicKey.from_der(der)
+    }
+
+    /// The point in SEC1's encoding: 65 bytes, 4 then x and y, as
+    /// `public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)`, or with `compressed` 33, 2
+    /// or 3 for y's parity then x, as `PublicFormat.CompressedPoint`.
+    pub fn sec1(self, compressed: bool = false) -> List<u8> {
+        if compressed {
+            var out: List<u8> = [2 + (self.point[63] & 1)]
+            out.extend(self.point[..32])
+            return out
+        }
+        var out: List<u8> = [4]
+        out.extend(self.point.copy())
+        return out
+    }
+
+    /// x and y, 32 bytes each, big-endian, as a JWK's `x` and `y` hold them in base64url.
+    pub fn x(self) -> List<u8> {
+        return self.point[..32]
+    }
+
+    /// y, as `x` gives x.
+    pub fn y(self) -> List<u8> {
+        return self.point[32..]
+    }
+
+    /// The key as an X.509 SubjectPublicKeyInfo in DER, 91 bytes, as
+    /// `public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)` writes it.
+    pub fn der(self) -> List<u8> {
+        var info = P256_ALGORITHM[..]
+        info.extend(der_tlv(0x03, point_bits(self.point.copy())))
+        return der_tlv(0x30, info)
+    }
+
+    /// `der()` as a `-----BEGIN PUBLIC KEY-----` PEM block.
+    pub fn pem(self) -> String {
+        return pem_text(self.der(), "PUBLIC KEY")
+    }
+
+    /// Whether `signature`, r then s in 64 bytes as `P256Key.sign` gives them, is the key's ES256
+    /// signature of `message`, as `cryptography`'s `verify` decides, where that raises
+    /// `InvalidSignature` for no: r and s from 1 to the group's order less 1, and the point
+    /// worked out from them, the message's SHA-256 and the key having r as its x. One that isn't
+    /// 64 bytes isn't.
+    pub fn verify(self, message: List<u8>, signature: List<u8>) -> bool {
+        if signature.len() != 64 {
+            return false
+        }
+        return unsafe { cx_p256_verify(self.point.as_ptr(), message.as_ptr(), message.len(), signature.as_ptr()) }
+    }
+
+    /// Whether `signature`, in DER as `P256Key.sign_der` and `cryptography` give it, is the key's
+    /// signature of `message`, as `verify` decides. It must be DER, not BER: a SEQUENCE of two
+    /// positive INTEGERs, every length and number in its shortest form, and nothing after, so no
+    /// second form of a signature passes.
+    pub fn verify_der(self, message: List<u8>, signature: List<u8>) -> bool {
+        let raw = der_signature(signature) else return false
+        return self.verify(message, raw)
+    }
+}
+
+// The AlgorithmIdentifier of a P-256 key: id-ecPublicKey, 1.2.840.10045.2.1, with prime256v1,
+// 1.2.840.10045.3.1.7, as its parameters.
+const P256_ALGORITHM: [u8; 21] = [
+    0x30, 0x13, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07,
+]
+
+// prime256v1's OBJECT IDENTIFIER, as SEC1's ECPrivateKey names its curve.
+const P256_CURVE: [u8; 10] = [0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07]
+
+// A P-256 key from a PKCS#8 PrivateKeyInfo: version 0, P-256's AlgorithmIdentifier, then the
+// SEC1 ECPrivateKey in an OCTET STRING.
+fn pkcs8_key(der: List<u8>) -> P256Key? {
+    var r = Der { bytes: der.copy(), at: 0 }
+    let info = r.enter(0x30) else return none
+    if info != der.len() or not r.next_are([0x02, 0x01, 0x00]) or not r.next_are(P256_ALGORITHM[..]) {
+        return none
+    }
+    let inner = r.enter(0x04) else return none
+    if inner != info {
+        return none
+    }
+    return ec_private_key(der[r.at..inner], false)
+}
+
+// A P-256 key from a SEC1 ECPrivateKey: version 1, the private number in an OCTET STRING, then
+// the curve in [0], which must be prime256v1 if it's there and is needed with `named`, since
+// nothing else says which curve the number is on, then the public key in [1], which must be the
+// private key's if it's there.
+fn ec_private_key(der: List<u8>, named: bool) -> P256Key? {
+    var r = Der { bytes: der.copy(), at: 0 }
+    let end = r.enter(0x30) else return none
+    if end != der.len() or not r.next_are([0x02, 0x01, 0x01]) {
+        return none
+    }
+    let number = r.enter(0x04) else return none
+    let len = number - r.at
+    // RFC 5915 says 32 bytes. Some writers have left out the zeros at the front.
+    if len == 0 or len > 32 {
+        return none
+    }
+    var scalar: List<u8> = [0; 32 - len]
+    scalar.extend(der[r.at..number])
+    r.at = number
+    var has_curve = false
+    if r.at < end and der[r.at] == 0xA0 {
+        let curve = r.enter(0xA0) else return none
+        if not r.next_are(P256_CURVE[..]) or r.at != curve {
+            return none
+        }
+        has_curve = true
+    }
+    var public: List<u8>? = none
+    if r.at < end and der[r.at] == 0xA1 {
+        let tagged = r.enter(0xA1) else return none
+        let bits = r.enter(0x03) else return none
+        if bits != tagged or r.byte() != some(0) {
+            return none
+        }
+        public = some(der[r.at..bits])
+        r.at = bits
+    }
+    if r.at != end or (named and not has_curve) {
+        return none
+    }
+    let key = P256Key.from_scalar(scalar) else return none
+    if let encoded = public {
+        let point = P256PublicKey.from_sec1(encoded) else return none
+        if point.point != key.public {
+            return none
+        }
+    }
+    return some(key)
+}
+
+// A tag, its length in DER's shortest form, and the content.
+fn der_tlv(tag: u8, content: List<u8>) -> List<u8> {
+    var out: List<u8> = [tag]
+    let n = content.len()
+    if n < 0x80 {
+        out.push(u8.wrap(n))
+    } else if n < 0x100 {
+        out.push(0x81)
+        out.push(u8.wrap(n))
+    } else {
+        out.push(0x82)
+        out.push(u8.wrap(n >> 8))
+        out.push(u8.wrap(n))
+    }
+    out.extend(content)
+    return out
+}
+
+// A big-endian unsigned number as a DER INTEGER: without the zeros at its front, and with one
+// if its top bit is set, which would make it negative.
+fn der_uint(bytes: List<u8>) -> List<u8> {
+    var start: usize = 0
+    while start + 1 < bytes.len() and bytes[start] == 0 {
+        start += 1
+    }
+    var content: List<u8> = []
+    if bytes[start] & 0x80 != 0 {
+        content.push(0)
+    }
+    content.extend(bytes[start..])
+    return der_tlv(0x02, content)
+}
+
+// A point's BIT STRING content: no unused bits, then 4, x and y.
+fn point_bits(xy: List<u8>) -> List<u8> {
+    var out: List<u8> = [0, 4]
+    out.extend(xy)
+    return out
+}
+
+// r and s, 32 bytes each, from a signature in DER, or none unless it's a SEQUENCE of two positive
+// INTEGERs of up to 32 bytes, in DER's shortest forms, with nothing after.
+fn der_signature(der: List<u8>) -> List<u8>? {
+    var r = Der { bytes: der.copy(), at: 0 }
+    let end = r.enter(0x30) else return none
+    if end != der.len() {
+        return none
+    }
+    let first = r.integer() else return none
+    let second = r.integer() else return none
+    if r.at != end or first.len() > 32 or second.len() > 32 {
+        return none
+    }
+    var out: List<u8> = [0; 32 - first.len()]
+    out.extend(first)
+    out.extend([0; 32 - second.len()])
+    out.extend(second)
+    return some(out)
+}
+
+// The bytes of the first `-----BEGIN label-----` block in PEM text, its base64 with the line
+// breaks taken out, or none if there's none or what's in it isn't base64, as a header line, such
+// as an encrypted key's `Proc-Type:`, isn't.
+fn pem_block(pem: String, label: str) -> List<u8>? {
+    let begin = "-----BEGIN {label}-----"
+    let start = pem.find(begin.copy()) else return none
+    let rest = pem[(start + begin.len())..]
+    let stop = rest.find("-----END {label}-----") else return none
+    let body = rest[..stop].split_whitespace().join("")
+    if body.is_empty() {
+        return none
+    }
+    return from_base64(body)
+}
+
+// DER as a PEM block, its base64 in lines of 64, as OpenSSL writes it.
+fn pem_text(der: List<u8>, label: str) -> String {
+    let encoded = base64(der)
+    var out = "-----BEGIN {label}-----\n"
+    var at: usize = 0
+    while at < encoded.len() {
+        let stop = if at + 64 < encoded.len() { at + 64 } else { encoded.len() }
+        out.push_str(encoded[at..stop])
+        out.push('\n')
+        at = stop
+    }
+    out.push_str("-----END {label}-----\n")
+    return out
+}
+
 /// ChaCha20-Poly1305, RFC 8439's authenticated encryption, as Python's `cryptography`
 /// `ChaCha20Poly1305` gives it: a 32-byte key and a 12-byte nonce, and what it seals is the
 /// ciphertext with a 16-byte tag after it, which `decrypt` checks before it gives anything back.
@@ -791,6 +1277,821 @@ impl AesGcm {
 
 // The most GCM encrypts under one nonce: 2^32 - 2 blocks of 16 bytes, NIST's 2^39 - 256 bits.
 const GCM_MAX: u64 = 68719476704
+
+/// Why a Noise handshake's message couldn't be written or read. After either, the handshake is
+/// over: writing, reading or taking its transport panics.
+pub enum NoiseError {
+    /// The message is too short for what the pattern says comes in it.
+    Truncated
+    /// The message is over Noise's 65535 bytes.
+    TooLong
+    /// A key, or the payload, didn't decrypt: the message was changed on the way, or the two
+    /// sides have different keys, prologues, pre-shared keys or protocols.
+    Decrypt
+    /// A Diffie-Hellman gave all zeros, as it does with a public key of small order, which shares
+    /// nothing secret with any key. One that comes in a message, or one given to
+    /// `set_remote_static`, can be.
+    SmallOrder
+}
+
+impl NoiseError {
+    /// What went wrong, for a message.
+    pub fn message(self) -> str {
+        return match self {
+            NoiseError.Truncated => "the Noise message is too short",
+            NoiseError.TooLong => "the Noise message is over 65535 bytes",
+            NoiseError.Decrypt => "the Noise message didn't decrypt",
+            NoiseError.SmallOrder => "a public key in the Noise handshake is of small order",
+        }
+    }
+}
+
+/// A Noise handshake, as revision 34 of the Noise Protocol Framework makes it and Python's
+/// `noiseprotocol` package runs it: the two sides send each other the messages a pattern such as
+/// `IK` or `XX` lays out, and each comes out with the other's static key, where the pattern sends
+/// it, and a `NoiseTransport` that encrypts what they say after. The protocol's name says which:
+/// `Noise_`, the pattern with any `psk` modifiers, `25519`, `ChaChaPoly` or `AESGCM`, and
+/// `SHA256`, `SHA512`, `BLAKE2s` or `BLAKE2b`, as `Noise_IK_25519_ChaChaPoly_SHA256`.
+pub struct NoiseHandshake {
+    name: String,
+    is_initiator: bool,
+    protocol: NoiseProtocol,
+    prologue: List<u8>,
+    s: X25519Key?,
+    e: X25519Key?,
+    rs: X25519PublicKey?,
+    re: X25519PublicKey?,
+    psks: List<List<u8>>,
+    psk_next: usize,
+    started: bool,
+    failed: bool,
+    next: usize,
+    symmetric: NoiseSymmetric,
+}
+
+impl NoiseHandshake {
+    /// The initiator's side of the handshake the protocol's name gives, as `noiseprotocol`'s
+    /// `NoiseConnection.from_name(name)` then `set_as_initiator()`. Give it the keys and anything
+    /// else the pattern needs before its first message. Panics for a name `supports` says no to.
+    @track_caller
+    pub fn initiator(name: String) -> NoiseHandshake {
+        return NoiseHandshake.new(name, true)
+    }
+
+    /// The responder's side, as `set_as_responder()`.
+    @track_caller
+    pub fn responder(name: String) -> NoiseHandshake {
+        return NoiseHandshake.new(name, false)
+    }
+
+    /// Whether there's a handshake for the protocol's name: one of Noise's 38 patterns, the
+    /// fundamental and the deferred ones, with any `psk` modifiers, as `XXpsk3` or `NNpsk0+psk2`,
+    /// over `25519` with either cipher and any of the four hashes.
+    pub fn supports(name: String) -> bool {
+        return noise_protocol(name) != none
+    }
+
+    @track_caller
+    fn new(name: String, initiator: bool) -> NoiseHandshake {
+        let protocol = noise_protocol(name) else panic("std.crypto has no Noise protocol `{name}`")
+        let symmetric = NoiseSymmetric.new(name, protocol.hash, protocol.cipher)
+        return NoiseHandshake {
+            name: name.copy(),
+            is_initiator: initiator,
+            protocol: protocol,
+            prologue: [],
+            s: none,
+            e: none,
+            rs: none,
+            re: none,
+            psks: [],
+            psk_next: 0,
+            started: false,
+            failed: false,
+            next: 0,
+            symmetric: symmetric,
+        }
+    }
+
+    /// Sets the prologue: bytes both sides must give the same of, though neither sends them, such
+    /// as a version, or the messages that chose this protocol. A handshake whose sides give
+    /// different ones fails at its first encrypted payload. Empty unless set.
+    @track_caller
+    pub fn set_prologue(mut self, prologue: List<u8>) {
+        self.check_unstarted("set_prologue")
+        self.prologue = prologue.copy()
+    }
+
+    /// Sets this side's static key, its long-term identity, which a pattern with an `s` of this
+    /// side's sends, or has the other side know beforehand.
+    @track_caller
+    pub fn set_static(mut self, key: X25519Key) {
+        self.check_unstarted("set_static")
+        self.s = some(key.copy())
+    }
+
+    /// Sets the other side's static key, known beforehand, as `IK`'s and `NK`'s initiator knows
+    /// the responder's, from a QR code, say, and `KK`'s responder knows the initiator's.
+    @track_caller
+    pub fn set_remote_static(mut self, key: X25519PublicKey) {
+        self.check_unstarted("set_remote_static")
+        self.rs = some(key.copy())
+    }
+
+    /// Sets this side's ephemeral key, which the handshake otherwise makes new from the system's
+    /// random source, as it must for the handshake to keep its secrets. For tests against fixed
+    /// vectors alone.
+    @track_caller
+    pub fn set_ephemeral(mut self, key: X25519Key) {
+        self.check_unstarted("set_ephemeral")
+        self.e = some(key.copy())
+    }
+
+    /// Sets the pre-shared keys, 32 bytes each, one for each `psk` modifier of the protocol, in
+    /// the order the handshake mixes them in, as `noiseprotocol`'s `set_psks(psks=...)`. Panics
+    /// for a key of another length.
+    @track_caller
+    pub fn set_psks(mut self, psks: List<List<u8>>) {
+        self.check_unstarted("set_psks")
+        for psk in psks {
+            if psk.len() != 32 {
+                panic("a Noise pre-shared key is 32 bytes, not {psk.len()}")
+            }
+        }
+        self.psks = psks.copy()
+    }
+
+    /// Whether every message of the pattern has been written or read, so `transport` can be had,
+    /// as `handshake_finished` says.
+    pub fn is_finished(self) -> bool {
+        return self.next == self.protocol.messages.len()
+    }
+
+    /// Whether this side writes the next message, and the other side reads it.
+    pub fn is_my_turn(self) -> bool {
+        return not self.is_finished() and (self.next % 2 == 0) == self.is_initiator
+    }
+
+    /// The handshake's hash so far, h, which is the same on both sides once it's finished, as
+    /// `get_handshake_hash()` gives it: what's said later can be tied to this handshake by
+    /// signing it, say.
+    pub fn handshake_hash(self) -> List<u8> {
+        return self.symmetric.h.copy()
+    }
+
+    /// The other side's static key, once it's been set or read from a message.
+    pub fn remote_static(self) -> X25519PublicKey? {
+        return self.rs.copy()
+    }
+
+    /// The next message of the pattern, its keys and then the payload, which is encrypted once
+    /// the two sides have a key, as `write_message(payload)`. Fails with `SmallOrder` where a
+    /// Diffie-Hellman with the other side's key gives all zeros. Panics if it isn't this side's
+    /// turn, if a key the pattern needs wasn't set, or if the message would be over 65535 bytes.
+    @track_caller
+    pub fn write_message(mut self, payload: List<u8> = []) -> List<u8> ! NoiseError {
+        self.start()
+        if not self.is_my_turn() {
+            panic(if self.is_finished() { "the Noise handshake is finished; write with its transport" } else { "it's the other side's turn to write" })
+        }
+        var out = List<u8>()
+        for token in self.protocol.messages[self.next].copy() {
+            if token == NoiseToken.E {
+                if self.e == none {
+                    self.e = some(X25519Key.generate())
+                }
+                let public = self.e.copy()!.public
+                out.extend(public)
+                self.symmetric.mix_hash(public)
+                if self.protocol.psks > 0 {
+                    self.symmetric.mix_key(public)
+                }
+            } else if token == NoiseToken.S {
+                out.extend(self.symmetric.encrypt_and_hash(self.s.copy()!.public))
+            } else if token == NoiseToken.Psk {
+                self.mix_psk()
+            } else if not self.mix_dh(token) {
+                self.failed = true
+                fail NoiseError.SmallOrder
+            }
+        }
+        out.extend(self.symmetric.encrypt_and_hash(payload))
+        if out.len() > NOISE_MAX {
+            panic("a Noise message is up to {NOISE_MAX} bytes, and this one would be {out.len()}")
+        }
+        self.next += 1
+        return out
+    }
+
+    /// The payload of the other side's next message, with the keys in it taken and checked, as
+    /// `read_message(message)`. Fails if the message is too short or too long, doesn't decrypt,
+    /// or makes a Diffie-Hellman give all zeros, and then the handshake can't go on. Panics if
+    /// it's this side's turn to write, or if a key the pattern needs wasn't set.
+    @track_caller
+    pub fn read_message(mut self, message: List<u8>) -> List<u8> ! NoiseError {
+        self.start()
+        if self.is_finished() or self.is_my_turn() {
+            panic(if self.is_finished() { "the Noise handshake is finished; read with its transport" } else { "it's this side's turn to write" })
+        }
+        if message.len() > NOISE_MAX {
+            self.failed = true
+            fail NoiseError.TooLong
+        }
+        var at: usize = 0
+        for token in self.protocol.messages[self.next].copy() {
+            if token == NoiseToken.E {
+                if message.len() - at < 32 {
+                    self.failed = true
+                    fail NoiseError.Truncated
+                }
+                let public = message[at..at + 32]
+                at += 32
+                self.symmetric.mix_hash(public)
+                if self.protocol.psks > 0 {
+                    self.symmetric.mix_key(public)
+                }
+                self.re = some(X25519PublicKey { encoded: public })
+            } else if token == NoiseToken.S {
+                let len: usize = if self.symmetric.cipher.has_key() { 48 } else { 32 }
+                if message.len() - at < len {
+                    self.failed = true
+                    fail NoiseError.Truncated
+                }
+                let sealed = message[at..at + len]
+                at += len
+                let public = self.symmetric.decrypt_and_hash(sealed) else {
+                    self.failed = true
+                    fail NoiseError.Decrypt
+                }
+                self.rs = some(X25519PublicKey { encoded: public })
+            } else if token == NoiseToken.Psk {
+                self.mix_psk()
+            } else if not self.mix_dh(token) {
+                self.failed = true
+                fail NoiseError.SmallOrder
+            }
+        }
+        if self.symmetric.cipher.has_key() and message.len() - at < 16 {
+            self.failed = true
+            fail NoiseError.Truncated
+        }
+        let payload = self.symmetric.decrypt_and_hash(message[at..]) else {
+            self.failed = true
+            fail NoiseError.Decrypt
+        }
+        self.next += 1
+        return payload
+    }
+
+    /// The transport the finished handshake gives, a key and a nonce for each direction, which
+    /// `noiseprotocol`'s connection switches to once `handshake_finished` is true. Panics unless
+    /// it's finished.
+    @track_caller
+    pub fn transport(own self) -> NoiseTransport {
+        if self.failed {
+            panic("the Noise handshake failed, so it has no transport")
+        }
+        if not self.is_finished() {
+            panic("the Noise handshake isn't finished: it has {self.protocol.messages.len() - self.next} more messages")
+        }
+        let (first, second) = self.symmetric.split()
+        // A one-way pattern's initiator only writes, and its responder only reads.
+        let one_way = self.protocol.messages.len() == 1
+        if self.is_initiator {
+            return NoiseTransport { send: first, receive: second, sends: true, receives: not one_way, hash: self.symmetric.h, remote: self.rs }
+        }
+        return NoiseTransport { send: second, receive: first, sends: not one_way, receives: true, hash: self.symmetric.h, remote: self.rs }
+    }
+
+    @track_caller
+    fn check_unstarted(self, what: str) {
+        if self.started {
+            panic("`{what}` is for before the Noise handshake's first message")
+        }
+    }
+
+    // What comes before the first message: once the keys the pattern needs are checked, the
+    // prologue, and the static keys its pre-messages say each side knows of the other's, are
+    // hashed in after the protocol's name.
+    @track_caller
+    fn start(mut self) {
+        if self.failed {
+            panic("the Noise handshake failed, and can't go on")
+        }
+        if self.started {
+            return
+        }
+        let side = if self.is_initiator { "initiator" } else { "responder" }
+        var sends_s = if self.is_initiator { self.protocol.initiator_known } else { self.protocol.responder_known }
+        for i in 0..self.protocol.messages.len() {
+            if (i % 2 == 0) == self.is_initiator and self.protocol.messages[i].contains(NoiseToken.S) {
+                sends_s = true
+            }
+        }
+        if sends_s and self.s == none {
+            panic("{self.name}'s {side} needs its static key: give it with `set_static`")
+        }
+        let knows_rs = if self.is_initiator { self.protocol.responder_known } else { self.protocol.initiator_known }
+        if knows_rs and self.rs == none {
+            panic("{self.name}'s {side} needs the other side's static key: give it with `set_remote_static`")
+        }
+        if self.psks.len() != self.protocol.psks {
+            panic("{self.name} takes {self.protocol.psks} pre-shared keys, not {self.psks.len()}: give them with `set_psks`")
+        }
+        self.started = true
+        self.symmetric.mix_hash(self.prologue)
+        if self.protocol.initiator_known {
+            let public = if self.is_initiator { self.s.copy()!.public } else { self.rs.copy()!.encoded }
+            self.symmetric.mix_hash(public)
+        }
+        if self.protocol.responder_known {
+            let public = if self.is_initiator { self.rs.copy()!.encoded } else { self.s.copy()!.public }
+            self.symmetric.mix_hash(public)
+        }
+    }
+
+    // The next pre-shared key, mixed into the key and the hash.
+    fn mix_psk(mut self) {
+        let psk = self.psks[self.psk_next].copy()
+        self.psk_next += 1
+        self.symmetric.mix_key_and_hash(psk)
+    }
+
+    // The Diffie-Hellman `ee`, `es`, `se` or `ss` names, the initiator's key with the responder's,
+    // mixed into the key, or false if it gave all zeros. The pattern has sent or set each key it
+    // takes by then.
+    fn mix_dh(mut self, token: NoiseToken) -> bool {
+        let initiator_e = token == NoiseToken.Ee or token == NoiseToken.Es
+        let responder_e = token == NoiseToken.Ee or token == NoiseToken.Se
+        let mine_e = if self.is_initiator { initiator_e } else { responder_e }
+        let theirs_e = if self.is_initiator { responder_e } else { initiator_e }
+        let key = if mine_e { self.e.copy()! } else { self.s.copy()! }
+        let peer = if theirs_e { self.re.copy()! } else { self.rs.copy()! }
+        let shared = key.exchange(peer) else return false
+        self.symmetric.mix_key(shared)
+        return true
+    }
+}
+
+/// What a finished Noise handshake gives: a key and a nonce for each direction, as
+/// `noiseprotocol`'s `encrypt` and `decrypt` use them once the handshake is done. A message's
+/// nonce is its place in the stream, so messages must be decrypted in the order they were
+/// encrypted, as over TCP or a WebSocket, and each is up to 65535 bytes, its 16-byte tag among
+/// them.
+pub struct NoiseTransport {
+    send: NoiseCipherState,
+    receive: NoiseCipherState,
+    sends: bool,
+    receives: bool,
+    hash: List<u8>,
+    remote: X25519PublicKey?,
+}
+
+impl NoiseTransport {
+    /// The plaintext encrypted for the other side, 16 bytes longer, as `encrypt(data)`. Panics
+    /// for a plaintext over 65519 bytes, which a program splits into messages of its own, and on
+    /// a one-way pattern's responder, which only reads.
+    @track_caller
+    pub fn encrypt(mut self, plaintext: List<u8>) -> List<u8> {
+        if not self.sends {
+            panic("a one-way Noise pattern's responder only reads")
+        }
+        if plaintext.len() > NOISE_MAX - 16 {
+            panic("a Noise message holds up to {NOISE_MAX - 16} bytes of plaintext, not {plaintext.len()}")
+        }
+        return self.send.encrypt([], plaintext)
+    }
+
+    /// The plaintext of the other side's next message, as `decrypt(data)`, or `none` if it doesn't
+    /// decrypt, where `noiseprotocol` raises: it was changed on the way, or isn't the next one,
+    /// or isn't from this handshake. The nonce then stays as it was, so a connection that goes on
+    /// is still in step. Panics on a one-way pattern's initiator, which only writes.
+    @track_caller
+    pub fn decrypt(mut self, message: List<u8>) -> List<u8>? {
+        if not self.receives {
+            panic("a one-way Noise pattern's initiator only writes")
+        }
+        if message.len() > NOISE_MAX {
+            return none
+        }
+        return self.receive.decrypt([], message)
+    }
+
+    /// Changes the key this side encrypts with to one worked out from it, as
+    /// `rekey_outbound_cipher()` does, so a key that leaks later doesn't open what was sent
+    /// before. The other side calls `rekey_inbound` at the same place in the stream, as the two
+    /// agree: every so many messages, say. The nonce goes on from where it was.
+    pub fn rekey_outbound(mut self) {
+        self.send.rekey()
+    }
+
+    /// Changes the key this side decrypts with, as the other side's `rekey_outbound` changes its,
+    /// as `rekey_inbound_cipher()` does.
+    pub fn rekey_inbound(mut self) {
+        self.receive.rekey()
+    }
+
+    /// The handshake's hash, the same on both sides, as `NoiseHandshake.handshake_hash` gave it
+    /// at the end.
+    pub fn handshake_hash(self) -> List<u8> {
+        return self.hash.copy()
+    }
+
+    /// The other side's static key, if the handshake had one.
+    pub fn remote_static(self) -> X25519PublicKey? {
+        return self.remote.copy()
+    }
+}
+
+// The longest Noise message, and the nonce no message is sealed with, which REKEY uses.
+const NOISE_MAX: usize = 65535
+const NOISE_NONCE_MAX: u64 = 18446744073709551615
+
+// Noise's ciphers and hashes, as a protocol's name gives them.
+enum NoiseCipher {
+    ChaChaPoly
+    AesGcm
+}
+
+enum NoiseHash {
+    Sha256
+    Sha512
+    Blake2s
+    Blake2b
+}
+
+// A token of a message pattern.
+enum NoiseToken {
+    E
+    S
+    Ee
+    Es
+    Se
+    Ss
+    Psk
+}
+
+// Noise's handshake patterns, from revision 34 of the spec: section 7.2's one-way patterns, 7.5's
+// interactive ones and 7.6's deferred ones. Each is its name, whether the initiator's static key
+// is known to the responder before the first message, whether the responder's is to the
+// initiator, then its messages, the initiator's first and each side in turn, with `|` between
+// them.
+const NOISE_PATTERNS: [(str, bool, bool, str); 38] = [
+    ("N", false, true, "e es"),
+    ("K", true, true, "e es ss"),
+    ("X", false, true, "e es s ss"),
+    ("NN", false, false, "e|e ee"),
+    ("NK", false, true, "e es|e ee"),
+    ("NX", false, false, "e|e ee s es"),
+    ("KN", true, false, "e|e ee se"),
+    ("KK", true, true, "e es ss|e ee se"),
+    ("KX", true, false, "e|e ee se s es"),
+    ("XN", false, false, "e|e ee|s se"),
+    ("XK", false, true, "e es|e ee|s se"),
+    ("XX", false, false, "e|e ee s es|s se"),
+    ("IN", false, false, "e s|e ee se"),
+    ("IK", false, true, "e es s ss|e ee se"),
+    ("IX", false, false, "e s|e ee se s es"),
+    ("NK1", false, true, "e|e ee es"),
+    ("NX1", false, false, "e|e ee s|es"),
+    ("X1N", false, false, "e|e ee|s|se"),
+    ("X1K", false, true, "e es|e ee|s|se"),
+    ("XK1", false, true, "e|e ee es|s se"),
+    ("X1K1", false, true, "e|e ee es|s|se"),
+    ("X1X", false, false, "e|e ee s es|s|se"),
+    ("XX1", false, false, "e|e ee s|es s se"),
+    ("X1X1", false, false, "e|e ee s|es s|se"),
+    ("K1N", true, false, "e|e ee|se"),
+    ("K1K", true, true, "e es|e ee|se"),
+    ("KK1", true, true, "e|e ee se es"),
+    ("K1K1", true, true, "e|e ee es|se"),
+    ("K1X", true, false, "e|e ee s es|se"),
+    ("KX1", true, false, "e|e ee se s|es"),
+    ("K1X1", true, false, "e|e ee s|se es"),
+    ("I1N", false, false, "e s|e ee|se"),
+    ("I1K", false, true, "e es s|e ee|se"),
+    ("IK1", false, true, "e s|e ee se es"),
+    ("I1K1", false, true, "e s|e ee es|se"),
+    ("I1X", false, false, "e s|e ee s es|se"),
+    ("IX1", false, false, "e s|e ee se s|es"),
+    ("I1X1", false, false, "e s|e ee s|se es"),
+]
+
+// A protocol, from its name.
+struct NoiseProtocol {
+    hash: NoiseHash,
+    cipher: NoiseCipher,
+    initiator_known: bool,
+    responder_known: bool,
+    messages: List<List<NoiseToken>>,
+    psks: usize,
+}
+
+// The protocol a name gives, as `Noise_XXpsk3_25519_ChaChaPoly_SHA256`, or none. `pskN` puts a
+// `psk` token at the start of the first message for 0, or at the end of message N.
+fn noise_protocol(name: String) -> NoiseProtocol? {
+    let parts = name.split("_")
+    if parts.len() != 5 or parts[0] != "Noise" or parts[2] != "25519" {
+        return none
+    }
+    var cipher = NoiseCipher.ChaChaPoly
+    if parts[3] == "AESGCM" {
+        cipher = NoiseCipher.AesGcm
+    } else if parts[3] != "ChaChaPoly" {
+        return none
+    }
+    var hash = NoiseHash.Sha256
+    if parts[4] == "SHA512" {
+        hash = NoiseHash.Sha512
+    } else if parts[4] == "BLAKE2s" {
+        hash = NoiseHash.Blake2s
+    } else if parts[4] == "BLAKE2b" {
+        hash = NoiseHash.Blake2b
+    } else if parts[4] != "SHA256" {
+        return none
+    }
+    var base = parts[1].copy()
+    var modifiers = List<String>()
+    if let at = parts[1].find("psk") {
+        base = parts[1][..at]
+        modifiers = parts[1][at..].split("+")
+    }
+    for pattern in NOISE_PATTERNS {
+        if pattern.0 != base {
+            continue
+        }
+        var messages = List<List<NoiseToken>>()
+        for text in pattern.3.split("|") {
+            var tokens = List<NoiseToken>()
+            for token in text.split(" ") {
+                tokens.push(noise_token(token))
+            }
+            messages.push(tokens)
+        }
+        // Each modifier once, in order, as the spec names them.
+        var last: usize? = none
+        for modifier in modifiers {
+            var place: usize? = none
+            for k in 0..messages.len() + 1 {
+                if modifier == "psk{k}" and (last == none or k > last!) {
+                    place = some(k)
+                }
+            }
+            let k = place else return none
+            if k == 0 {
+                messages[0].insert(0, NoiseToken.Psk)
+            } else {
+                messages[k - 1].push(NoiseToken.Psk)
+            }
+            last = some(k)
+        }
+        return some(NoiseProtocol {
+            hash: hash,
+            cipher: cipher,
+            initiator_known: pattern.1,
+            responder_known: pattern.2,
+            messages: messages,
+            psks: modifiers.len(),
+        })
+    }
+    return none
+}
+
+fn noise_token(text: String) -> NoiseToken {
+    if text == "e" {
+        return NoiseToken.E
+    } else if text == "s" {
+        return NoiseToken.S
+    } else if text == "ee" {
+        return NoiseToken.Ee
+    } else if text == "es" {
+        return NoiseToken.Es
+    } else if text == "se" {
+        return NoiseToken.Se
+    } else if text == "ss" {
+        return NoiseToken.Ss
+    }
+    panic("not a Noise token: {text}")
+}
+
+fn noise_hash_len(hash: NoiseHash) -> usize {
+    return match hash {
+        NoiseHash.Sha256 => 32,
+        NoiseHash.Sha512 => 64,
+        NoiseHash.Blake2s => 32,
+        NoiseHash.Blake2b => 64,
+    }
+}
+
+// HASH(data), and the block length HMAC pads its key to.
+fn noise_hash(hash: NoiseHash, data: List<u8>) -> List<u8> {
+    return match hash {
+        NoiseHash.Sha256 => sha256(data),
+        NoiseHash.Sha512 => sha512(data),
+        NoiseHash.Blake2s => blake2s(data),
+        NoiseHash.Blake2b => blake2b(data),
+    }
+}
+
+fn noise_block_len(hash: NoiseHash) -> usize {
+    return match hash {
+        NoiseHash.Sha256 => 64,
+        NoiseHash.Sha512 => 128,
+        NoiseHash.Blake2s => 64,
+        NoiseHash.Blake2b => 128,
+    }
+}
+
+// RFC 2104's HMAC with the hash, which Noise uses with BLAKE2 too, rather than BLAKE2's own key.
+fn noise_hmac(hash: NoiseHash, key: List<u8>, data: List<u8>) -> List<u8> {
+    let block = noise_block_len(hash)
+    var k = if key.len() > block { noise_hash(hash, key) } else { key.copy() }
+    while k.len() < block {
+        k.push(0)
+    }
+    var inner = List<u8>()
+    var outer = List<u8>()
+    for b in k {
+        inner.push(b ^ 0x36)
+        outer.push(b ^ 0x5C)
+    }
+    inner.extend(data)
+    outer.extend(noise_hash(hash, inner))
+    return noise_hash(hash, outer)
+}
+
+// HKDF(ck, ikm, n), for n of 2 or 3, the third empty for 2.
+fn noise_hkdf(hash: NoiseHash, ck: List<u8>, ikm: List<u8>, n: usize) -> (List<u8>, List<u8>, List<u8>) {
+    let temp = noise_hmac(hash, ck, ikm)
+    let first = noise_hmac(hash, temp, [1])
+    var then = first.copy()
+    then.push(2)
+    let second = noise_hmac(hash, temp, then)
+    if n == 2 {
+        return (first, second, [])
+    }
+    var last = second.copy()
+    last.push(3)
+    let third = noise_hmac(hash, temp, last)
+    return (first, second, third)
+}
+
+// A SymmetricState of the spec: the chaining key, the hash of everything so far, and the cipher
+// they key.
+struct NoiseSymmetric {
+    hash: NoiseHash,
+    ck: List<u8>,
+    h: List<u8>,
+    cipher: NoiseCipherState,
+}
+
+impl NoiseSymmetric {
+    // The name, padded with zeros to the hash's length, or hashed if it's longer, is both h and ck.
+    fn new(name: String, hash: NoiseHash, cipher: NoiseCipher) -> NoiseSymmetric {
+        var h = name.to_bytes()
+        if h.len() > noise_hash_len(hash) {
+            h = noise_hash(hash, h)
+        }
+        while h.len() < noise_hash_len(hash) {
+            h.push(0)
+        }
+        return NoiseSymmetric { hash: hash, ck: h.copy(), h: h, cipher: NoiseCipherState.new(cipher) }
+    }
+
+    fn mix_hash(mut self, data: List<u8>) {
+        var all = self.h.copy()
+        all.extend(data)
+        self.h = noise_hash(self.hash, all)
+    }
+
+    fn mix_key(mut self, ikm: List<u8>) {
+        let (ck, key, _) = noise_hkdf(self.hash, self.ck, ikm, 2)
+        self.ck = ck
+        self.cipher.set_key(key)
+    }
+
+    fn mix_key_and_hash(mut self, ikm: List<u8>) {
+        let (ck, temp, key) = noise_hkdf(self.hash, self.ck, ikm, 3)
+        self.ck = ck
+        self.mix_hash(temp)
+        self.cipher.set_key(key)
+    }
+
+    @track_caller
+    fn encrypt_and_hash(mut self, plaintext: List<u8>) -> List<u8> {
+        let sealed = self.cipher.encrypt(self.h, plaintext)
+        self.mix_hash(sealed)
+        return sealed
+    }
+
+    fn decrypt_and_hash(mut self, sealed: List<u8>) -> List<u8>? {
+        let plaintext = self.cipher.decrypt(self.h, sealed) else return none
+        self.mix_hash(sealed)
+        return some(plaintext)
+    }
+
+    // The two transport ciphers: the initiator's to the responder, then the responder's back.
+    fn split(self) -> (NoiseCipherState, NoiseCipherState) {
+        let (one, two, _) = noise_hkdf(self.hash, self.ck, [], 2)
+        var first = NoiseCipherState.new(self.cipher.cipher)
+        first.set_key(one)
+        var second = NoiseCipherState.new(self.cipher.cipher)
+        second.set_key(two)
+        return (first, second)
+    }
+}
+
+// A CipherState of the spec: a key, or none yet, and the nonce of the next message under it.
+struct NoiseCipherState {
+    cipher: NoiseCipher,
+    key: List<u8>,
+    gcm: AesGcm?,
+    nonce: u64,
+}
+
+impl NoiseCipherState {
+    fn new(cipher: NoiseCipher) -> NoiseCipherState {
+        return NoiseCipherState { cipher: cipher, key: [], gcm: none, nonce: 0 }
+    }
+
+    fn has_key(self) -> bool {
+        return not self.key.is_empty()
+    }
+
+    // Keys it with the first 32 bytes of `key`, from nonce 0.
+    fn set_key(mut self, key: List<u8>) {
+        self.key = key[..32]
+        self.nonce = 0
+        if self.cipher == NoiseCipher.AesGcm {
+            self.gcm = some(AesGcm.new(self.key.copy()))
+        }
+    }
+
+    // ENCRYPT(k, n, ad, plaintext) and DECRYPT: the nonce is 4 zero bytes, then the counter,
+    // little-endian for ChaChaPoly and big-endian for AESGCM.
+    fn seal(self, n: u64, ad: List<u8>, plaintext: List<u8>) -> List<u8> {
+        let nonce = noise_nonce(self.cipher, n)
+        if let gcm = self.gcm {
+            return gcm.encrypt(nonce, plaintext, ad)
+        }
+        return chacha_seal(self.key, nonce, plaintext, ad)
+    }
+
+    fn open(self, n: u64, ad: List<u8>, sealed: List<u8>) -> List<u8>? {
+        let nonce = noise_nonce(self.cipher, n)
+        if let gcm = self.gcm {
+            return gcm.decrypt(nonce, sealed, ad)
+        }
+        return chacha_open(self.key, nonce, sealed, ad)
+    }
+
+    // EncryptWithAd: the plaintext as it is until there's a key.
+    @track_caller
+    fn encrypt(mut self, ad: List<u8>, plaintext: List<u8>) -> List<u8> {
+        if not self.has_key() {
+            return plaintext.copy()
+        }
+        if self.nonce == NOISE_NONCE_MAX {
+            panic("this Noise key has sealed as many messages as it can, 2^64 - 1")
+        }
+        let sealed = self.seal(self.nonce, ad, plaintext)
+        self.nonce += 1
+        return sealed
+    }
+
+    // DecryptWithAd, which leaves the nonce as it was when the tag doesn't match.
+    fn decrypt(mut self, ad: List<u8>, sealed: List<u8>) -> List<u8>? {
+        if not self.has_key() {
+            return some(sealed.copy())
+        }
+        if self.nonce == NOISE_NONCE_MAX {
+            return none
+        }
+        let plaintext = self.open(self.nonce, ad, sealed) else return none
+        self.nonce += 1
+        return some(plaintext)
+    }
+
+    // REKEY: the key becomes the first 32 bytes of 32 zeros sealed under nonce 2^64 - 1, and the
+    // nonce goes on.
+    fn rekey(mut self) {
+        let nonce = self.nonce
+        let key = self.seal(NOISE_NONCE_MAX, [], [0; 32])
+        self.set_key(key)
+        self.nonce = nonce
+    }
+}
+
+fn noise_nonce(cipher: NoiseCipher, n: u64) -> List<u8> {
+    var out: List<u8> = [0; 12]
+    var rest = n
+    for i in 0..8usize {
+        let at = if cipher == NoiseCipher.ChaChaPoly { 4 + i } else { 11 - i }
+        out[at] = u8.wrap(rest)
+        rest >>= 8
+    }
+    return out
+}
 
 // What PKCS#1 v1.5 signs, EMSA-PKCS1-v1_5: 0, 1, 0xFF bytes, 0, then the digest's DigestInfo, the
 // hash's identifier and the digest, `size` bytes in all; `none` if that's too long for the key.

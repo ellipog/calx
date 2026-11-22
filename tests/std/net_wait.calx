@@ -36,6 +36,7 @@ fn main() {
                 Event.Closed(c) => closed = c == client,
                 Event.Accepted(_) => {},
                 Event.Woken => {},
+                Event.Datagram(_) => {},
             }
         }
     }

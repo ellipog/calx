@@ -222,7 +222,7 @@ Serving HTTP on 127.0.0.1 port 8000 (http://127.0.0.1:8000/) ...
 ```
 
 - A folder's `index.html` or `index.htm` is served for it, and a folder without one gets a page listing what's in it. The rest is as [std.http.server](../std/http-server.md#serving-a-folder)'s `serve_dir` serves it, which is what `calx serve` runs.
-- It listens on `127.0.0.1` unless `--bind` (`-b`) gives another address, so only this machine reaches it, and Windows' firewall doesn't ask about it. Python listens on every address unless it's told otherwise.
+- It listens on `127.0.0.1` unless `--bind` (`-b`) gives another address, so only this machine reaches it, and Windows' firewall doesn't ask about it. Python listens on every address unless it's told otherwise. On every address, the firewall asks once, not again after each Calx update, since the program that serves always starts from the same path, `calx-serve.exe` in the cache ([Windows Firewall](#windows-firewall)).
 - `--port` (`-p`) gives the port. Without it, `calx serve` takes 8000, or the next free one up to 8010 if 8000 is taken, and says which on its first line. A port that's given and taken is an error.
 - Each request is logged to standard error, as Python logs it.
 - The program that serves is built the first time, optimized, and reused after that, so it starts at once.
@@ -337,6 +337,45 @@ Every calx builds for the machine it runs on, and a Mac builds for iOS too, an i
 
 What's built for another system runs there, so with another target `run`, `test` and `eval` are errors, and `build`, `check` and `emit-c` work. iOS lets an app open no library it didn't come with, so `--lib` is an error for it, and an app links Calx as a [static library](embedding.md#ios-and-swift), which `--xcframework` builds for both. A build for iOS runs on iOS 18 and later, which runs on the iPhone XS and XR and every iPhone since, and the runtime there leaves out what iOS doesn't let an app do, such as starting programs. The target is part of every key in the [object cache](#fast-builds), with the SDK's path for iOS, so builds for two targets, or against two Xcodes, never share a compiled file, and `--verbose` shows the `--target` and `-isysroot` clang gets.
 
+## Windows programs
+
+On Windows, every program and library calx builds is laid out as Visual Studio's are, so Windows and its antivirus treat it as they treat theirs ([CLX-414](https://acta.aaenz.no/aaen-studios/clx#CLX-414)):
+
+- **A version resource**, which Explorer shows in the file's Properties, under Details: the package's name as its product, its version, and the `description`, `company` and `copyright` its [calx.toml](../guide/packages.md#calxtoml) gives, or its name for the first two. A program with no calx.toml is named for its file, at version 0.0.0. Its original file name is its name with `.exe` or `.dll`, whatever `-o` calls the copy.
+- **A manifest.** A program's says it runs with the rights of whoever starts it, so Windows never guesses it's an installer and asks to elevate it, as it can for one whose name holds `setup`, `install` or `update`, and that it's made for Windows 10 and 11, so it gets their behavior rather than Windows 8's. A library's says only that it's one.
+- **The usual protections**: ASLR with high entropy, DEP, and no section both writable and executable, as `/DYNAMICBASE`, `/HIGHENTROPYVA` and `/NXCOMPAT` give Visual Studio's, for the console of Windows 6.0 and later.
+- **Debug info in the PDB alone.** With the toolchain a release carries, mingw-w64's start-up code and libraries hold DWARF, which lld kept in each program, in sections named like `/4`, with a symbol table for their names. No program of Visual Studio's has either, and [stack traces](printing.md#panics) read the PDB, so they're left out. Hello went from 80 KB to 34 KB in a debug build, and from 84 KB to 38 KB in a release one.
+
+The resources are a `.res` file calx writes itself, the same bytes llvm-rc would, which the object cache keeps and lld links as it does an object. Nothing in it is a time, so a program built again from the same code has the same resources, and the code and data in a program are the same bytes as before they were added: in a 4 MB server, the `.text`, `.rdata`, `.data`, `.pdata`, `.tls` and `.reloc` sections are the same in debug and release.
+
+### Microsoft Defender
+
+Without them, Microsoft Defender's machine-learning models took some programs calx built for malware, as `Trojan:Win32/Bearfoos.A!ml` or `Trojan:Win32/Commando.C!ml`, and quarantined them from the cache, so `calx run` said only that it couldn't run them. Programs that Rust and Go build get the same false positives, which a version resource and a manifest make rarer, but the models are Microsoft's, so nothing rules them out. When an antivirus stops a program, or takes it from the cache, `calx run` says so, and [`calx doctor`](#checking-the-toolchain) lists what Defender took from the cache in the last 30 days, with what to do:
+
+- Change the program and build it again. It's new to Defender then, and usually runs. The same code builds to the same bytes, which it would take again.
+- Report the program at [microsoft.com/wdsi/filesubmission](https://www.microsoft.com/wdsi/filesubmission) as "Incorrectly detected as malware/malicious", so the models learn.
+- Turning Defender off, or leaving the cache out of its scans, isn't needed, and makes the PC less safe.
+
+### Signing
+
+A program signed with a code-signing certificate says who made it, which Windows, Defender and SmartScreen all take into account. calx doesn't sign what it builds, since a certificate belongs to whoever owns it; sign a release once it's built, with `signtool` from the Windows SDK:
+
+```
+calx build --release app.calx -o app.exe
+signtool sign /fd sha256 /td sha256 /tr http://timestamp.digicert.com /f cert.pfx /p PASSWORD app.exe
+```
+
+A `calx build -o app.exe` after that writes the program over the signed one, since they differ, so sign after the last build. Calx's own releases are signed this way when CI has a certificate: [tools/release/package.calx](../../tools/release/package.calx) signs `calx` and `calx-update` before it packages them when `CALX_SIGN_CERT` names a `.pfx`, with its password in `CALX_SIGN_PASSWORD`, which CI sets from the repository's `WINDOWS_SIGNING_CERT` and `WINDOWS_SIGNING_PASSWORD` secrets. Without them, nothing is signed.
+
+### Windows Firewall
+
+On Windows, `calx run`, `calx file.calx`, `calx test` and `calx serve` don't start the program from its place in the cache, whose name is a hash of what it holds and so changes with each edit. Each script's program starts from a path of its own, `run\HASH\NAME.exe` in the cache, where `HASH` is a hash of the script's full path, whether it's a test build, and the build mode, and `NAME` is the script's name, or its folder's and its own for a `main.calx`, as `app-main.exe`. Windows Defender Firewall keeps its answer for each program's path, so a script that listens on every address, such as a server given `--bind ""` or one that uses [std.net.mdns](../std/net-mdns.md), is asked about once, as `python server.py` is, and not again each time it's built anew. `--verbose` says which path a program starts from.
+
+- The program there is a hard link to the one in the cache, which takes no room, no time, and no new scan from Defender, or a copy of it where the cache's file system has no hard links. With nothing changed, finding it there takes two files opened and nothing written.
+- It's the one file under the cache that's replaced, when the script's program has changed. A program still running from there, such as a server started before the edit, is renamed aside, since Windows can't replace a program that's running, and it runs on as it was; what was renamed aside goes the next time the program changes after it has ended. From the moment calx finds the program there until it has started, the file is held, so a run beside it can't put another program there in between. Where it can't be put there, such as while another run holds it, the program starts from its place in the cache, as before.
+- The cache keeps the folders of the 256 scripts that ran most recently, but for any that ran in the last 10 minutes, and deletes the rest. A script whose folder went, or one moved to another folder or another worktree, is a program the firewall asks about once more.
+- On Linux and macOS the program starts from its place in the cache, as before.
+
 ## Fast builds
 
 Building should take moments, so the command avoids every step it can:
@@ -396,6 +435,8 @@ Windows Defender scans every new executable the first time it starts, which cost
 
 The cache keeps the 64 programs and 1024 compiled files used most recently, and at most 256 MB of each, or as many megabytes of each as `CALX_CACHE_MB` says, and deletes the rest after each build. It keeps the code attributes generated for the 256 programs that used it most recently, and the [records](#fast-builds) of the last 1024 builds. Anything used in the last 10 minutes stays, past those limits, since a build running beside this one may need it. lld keeps at most 512 MB of release builds' machine code in its `lto` folder. Deleting the cache is always safe.
 
+Builds can share a cache at the same time, as a test suite's do. Each writes a file under a name of its own and then puts it in the cache whole, so no build sees half a file. A file in the cache is never replaced: when two builds make the same object, library or program at once, the first to finish keeps its file there and the other throws its own away. So a build that's archiving or copying a file never finds a different one there partway through (CLX-419).
+
 `calx build` copies what it built out of the cache. On Windows, the program's line tables are in a PDB, which goes beside it with the same name, as `hello.pdb`, so stack traces and debuggers still find them after the cache lets the program go. On Linux they're in the executable itself. A file that already holds what it would get isn't written again, only given the time now. So a build that changed nothing writes nothing, a program that's running doesn't stop it, and Windows doesn't scan the program again, which took 20 ms of each build. A cached `calx build` of a small program that uses std.regex took 84 ms before these changes and takes 46 ms. The two are compared file to file, a block at a time, rather than read into memory whole, so a cached build of a program that embeds 16 MB takes 17 ms, against 10 ms for hello; reading them whole took it 40 ms.
 
 ## Checking the toolchain
@@ -414,12 +455,13 @@ calx doctor
   ok    builds and runs a program in a release build (190 ms)
   ok    calx on PATH is this one
   ok    build cache in C:\Users\you\AppData\Local\calx\cache, 412 MB
+  ok    Microsoft Defender: nothing in the build cache taken in the last 30 days
   ok    updates: `calx update` installs new releases, and a daily check says when there's one
 
 Everything works.
 ```
 
-The target is the system and processor it builds programs for, which is the one it runs on, and the processor a release build counts on: x86-64-v3, with AVX2, on x86; the M1's, which every Apple Silicon Mac has, on macOS; and ARMv8.2 on Arm Linux and Windows. With `CALX_CPU` set, it says that level, and fails if it isn't one the target has. On a Mac with Xcode, it says it builds for iOS too, and names the SDKs; without Xcode it says nothing of iOS, since nothing's wrong. It finds clang as a build does: `CALX_CC`, then the toolchain the installation carries, then `PATH`, and says if the toolchain the release builds with isn't the one installed, which `calx update --toolchain` mends. The real test is building a program, in debug and release, which is what everything else is for. When that fails, it shows what clang said and names what's missing: on Windows, mingw-w64's headers and libraries beside the toolchain's clang, or with another clang, the C runtime and SDK from Visual Studio's Build Tools; on Linux, the C library's headers. It exits with 1 if something needs fixing, and 0 if not. A failed build points at it too.
+The target is the system and processor it builds programs for, which is the one it runs on, and the processor a release build counts on: x86-64-v3, with AVX2, on x86; the M1's, which every Apple Silicon Mac has, on macOS; and ARMv8.2 on Arm Linux and Windows. With `CALX_CPU` set, it says that level, and fails if it isn't one the target has. On a Mac with Xcode, it says it builds for iOS too, and names the SDKs; without Xcode it says nothing of iOS, since nothing's wrong. It finds clang as a build does: `CALX_CC`, then the toolchain the installation carries, then `PATH`, and says if the toolchain the release builds with isn't the one installed, which `calx update --toolchain` mends. The real test is building a program, in debug and release, which is what everything else is for. When that fails, it shows what clang said and names what's missing: on Windows, mingw-w64's headers and libraries beside the toolchain's clang, or with another clang, the C runtime and SDK from Visual Studio's Build Tools; on Linux, the C library's headers. On Windows, it asks Microsoft Defender, with its own `Get-MpThreatDetection`, which needs no administrator, what it found in the last 30 days, and warns of any program it took from the build cache, by name, with what to do ([Microsoft Defender](#microsoft-defender)); where another antivirus has taken Defender's place, it says nothing. It exits with 1 if something needs fixing, and 0 if not. A failed build points at it too.
 
 ## Updating
 

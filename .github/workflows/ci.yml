@@ -156,9 +156,68 @@ jobs:
           dir=$(dirname "$CALX_BIN")
           cmake -S compiler -B "$dir" -G Ninja -DCMAKE_CXX_COMPILER=clang++ > /dev/null
           ninja -C "$dir"
+      # The iOS simulator the tests that need one run on (CLX-408), started here, so a first boot's
+      # setup is done before the tests start and its time shows on its own (CLX-424). The tests find
+      # it running and leave it so.
+      - name: Start the iOS simulator
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          id=$(xcrun simctl list devices available | grep -m1 -E '^ +iPhone' | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}')
+          if [ -z "$id" ]; then echo "this runner's Xcode has no iPhone simulator"; exit 1; fi
+          xcrun simctl list devices available | grep "$id"
+          time xcrun simctl bootstatus "$id" -b
       - name: Tests
         shell: bash
         run: '"$CALX_BIN" run --release tests/run.calx -- --modes debug,release'
+      # std.net.mdns beside the system's own responder (CLX-412): it finds a service avahi or
+      # Bonjour announces, and avahi-browse or dns-sd finds and resolves one it announces, with
+      # its TXT record. On Windows the tests run beside Windows' own responder already. On macOS
+      # it runs as root, since the runner's programs haven't the permission for the local network
+      # that macOS asks for (TN3179), and root needs none.
+      - name: mDNS with avahi and Bonjour
+        if: (runner.os == 'Linux' && runner.arch == 'X64') || runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -eu
+          out="$RUNNER_TEMP/mdns-interop"
+          "$CALX_BIN" build tools/mdns/interop.calx -o "$out"
+          interop() {
+            if [ "$RUNNER_OS" = macOS ]; then sudo "$out" "$@"; else "$out" "$@"; fi
+          }
+          kind=_calxci._tcp
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get install -y -qq avahi-daemon avahi-utils > /dev/null
+            sudo systemctl start avahi-daemon
+            avahi-publish -s "Avahi Side" "$kind" 4322 id=av &
+          else
+            dns-sd -R "Bonjour Side" "$kind" local 4322 id=bj &
+          fi
+          other=$!
+          if [ "$RUNNER_OS" = Linux ]; then
+            interop find "$kind" "Avahi Side" id=av
+          else
+            interop find "$kind" "Bonjour Side" id=bj
+          fi
+          kill "$other"
+          interop announce "$kind" "Calx Side" 25 id=ca &
+          calx=$!
+          sleep 3
+          if [ "$RUNNER_OS" = Linux ]; then
+            avahi-browse -rpt "$kind" | tee "$RUNNER_TEMP/browse.txt"
+            grep -q '"id=ca"' "$RUNNER_TEMP/browse.txt"
+          else
+            dns-sd -B "$kind" local > "$RUNNER_TEMP/browse.txt" &
+            browse=$!
+            dns-sd -L "Calx Side" "$kind" local > "$RUNNER_TEMP/lookup.txt" &
+            lookup=$!
+            sleep 6
+            kill "$browse" "$lookup"
+            cat "$RUNNER_TEMP/browse.txt" "$RUNNER_TEMP/lookup.txt"
+            grep -q 'Calx Side' "$RUNNER_TEMP/browse.txt"
+            grep -q 'id=ca' "$RUNNER_TEMP/lookup.txt"
+          fi
+          wait "$calx"
       # A handoff between threads that's missing its ordering fails only now and then, so on Arm
       # the parallel and thread tests run 20 more times (CLX-274).
       - name: Threads, again and again
@@ -167,7 +226,7 @@ jobs:
         run: for i in $(seq 1 20); do "$CALX_BIN" run --release tests/run.calx -- --modes release tests/parallel tests/thread || exit 1; done
       - name: Check the release tools and the art script
         shell: bash
-        run: for f in tools/update/update.calx tools/release/package.calx tools/release/toolchain.calx assets/logo/banner.calx; do "$CALX_BIN" check "$f"; done
+        run: for f in tools/update/update.calx tools/release/package.calx tools/release/toolchain.calx tools/mdns/interop.calx assets/logo/banner.calx; do "$CALX_BIN" check "$f"; done
       # Calx's own code in its one format (CLX-160). The suite checks the tests' files.
       - name: Formatting
         shell: bash
@@ -435,6 +494,11 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           COMMIT: ${{ steps.version.outputs.commit }}
           DATE: ${{ steps.version.outputs.date }}
+          # A code-signing certificate, as a base64 .pfx, and its password: with them, calx and
+          # calx-update are signed on Windows before they're packaged (CLX-414). Without them, as
+          # in a fork, nothing is signed.
+          SIGNING_CERT: ${{ secrets.WINDOWS_SIGNING_CERT }}
+          SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
         run: |
           exe=""
           link=()
@@ -461,8 +525,14 @@ jobs:
           # calx-update built with the toolchain, as a user's programs are.
           export CALX_CC="$PWD/build/toolchain/bin/clang$exe"
           build/release/calx$exe build --release tools/update/update.calx -o build/release/calx-update$exe
+          # package.calx signs with signtool, which the MSVC environment put on PATH.
+          if [[ "$RUNNER_OS" == Windows && -n "$SIGNING_CERT" ]]; then
+            printf '%s' "$SIGNING_CERT" | base64 -d > "$RUNNER_TEMP/signing.pfx"
+            export CALX_SIGN_CERT="$RUNNER_TEMP/signing.pfx" CALX_SIGN_PASSWORD="$SIGNING_PASSWORD"
+          fi
           build/release/calx$exe run tools/release/package.calx -- "$VERSION" ${{ matrix.platform }} \
             build/release/calx$exe build/release/calx-update$exe build/dist build/toolchain
+          rm -f "$RUNNER_TEMP/signing.pfx"
       - name: Try the release
         shell: bash
         run: |

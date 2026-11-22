@@ -4,6 +4,7 @@
 /// temporary directories, and the room on a disk.
 module std.fs
 
+import std.io
 import std.path.{join, normalize, glob_matches_name, root as path_root, parts as path_parts}
 import std.time.{Timestamp}
 
@@ -376,6 +377,17 @@ pub fn open_read(path: String) -> File ! FsError {
     return File { handle: h, named: path.copy() }
 }
 
+/// Opens the file at `path` only to write, empty, as Python's `open(path, "wb")`: made if nothing's
+/// there, and emptied if it is. For writing a big file a piece at a time, through `Writer`, such
+/// as an archive as it's made.
+pub fn create(path: String) -> File ! FsError {
+    let h = unsafe { cx_fs_open(path.as_ptr(), path.len(), 1) }
+    if h < 0 {
+        fail last_error()
+    }
+    return File { handle: h, named: path.copy() }
+}
+
 impl File {
     /// The path it was opened at.
     pub fn path(self) -> String {
@@ -457,6 +469,33 @@ impl File {
     pub fn close(own self) ! FsError {
         if unsafe { cx_fs_close(self.handle) } == 0 {
             fail last_error()
+        }
+    }
+}
+
+/// A file read in order, from its start, as Python reads a file opened `"rb"`: each `read` goes on
+/// where the last one stopped. `read_part` and `write_parts` move that place too.
+impl io.Reader for File {
+    fn read(mut self, buf: mut List<u8>, n: usize) -> usize ! String {
+        buf.reserve(n)
+        unsafe {
+            let at = buf.len()
+            let got = cx_fs_read(self.handle, buf.as_mut_ptr().add(at), n)
+            if got < 0 {
+                fail "can't read {self.named}: {last_error()}"
+            }
+            buf.set_len(at + usize.wrap(got))
+            return usize.wrap(got)
+        }
+    }
+}
+
+/// A file written in order, from its start, as Python writes a file opened `"wb"`: each `write`
+/// goes on where the last one stopped. `create` opens one empty to write this way.
+impl io.Writer for File {
+    fn write(mut self, bytes: List<u8>) ! String {
+        if unsafe { cx_fs_write(self.handle, bytes.as_ptr(), bytes.len()) } == 0 {
+            fail "can't write {self.named}: {last_error()}"
         }
     }
 }

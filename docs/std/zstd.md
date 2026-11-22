@@ -1,11 +1,11 @@
 ---
 title: std.zstd
-description: Zstandard files decompressed as Python's compression.zstd reads them, with checksums, skippable frames and dictionaries, compressed at zstd's levels, with or without a dictionary, on all the processors for big ones, and dictionaries trained from samples.
+description: Zstandard files decompressed as Python's compression.zstd reads them, with checksums, skippable frames and dictionaries, compressed at zstd's levels, with or without a dictionary, on all the processors for big ones, dictionaries trained from samples, and both a piece at a time between std.io Readers and Writers.
 ---
 
 # `std.zstd`
 
-`std.zstd` decompresses Zstandard files, such as release archives in `.tar.zst` and what `zstd` and Python's `compression.zstd` write. It gives the same bytes as Python 3.14's `compression.zstd.decompress`, and on broken files it fails where Python fails, with the same kind of error but for one case, below. It also compresses, at `zstd`'s levels, into frames that `zstd` and Python read: see [Compressing](#compressing). Big frames are decoded, and big inputs compressed, on all the processors. [`std.tar`](tar.md) opens and writes a `.tar.zst` with it.
+`std.zstd` decompresses Zstandard files, such as release archives in `.tar.zst` and what `zstd` and Python's `compression.zstd` write. It gives the same bytes as Python 3.14's `compression.zstd.decompress`, and on broken files it fails where Python fails, with the same kind of error but for one case, below. It also compresses, at `zstd`'s levels, into frames that `zstd` and Python read: see [Compressing](#compressing). Big frames are decoded, and big inputs compressed, on all the processors. Both also go [a piece at a time](#a-piece-at-a-time), in as much memory as a level's window takes, for files bigger than memory and bytes over a socket. [`std.tar`](tar.md) opens and writes a `.tar.zst` with it, whole or as it comes.
 
 ```calx
 import std.bytes.{from_hex}
@@ -36,6 +36,10 @@ fn main() {
 | `decompress_into(bytes: List<u8>, from: usize, to: usize, limit: u64, out: mut List<u8>) ! Error` | Decompresses `bytes[from..to]` onto the end of `out`, at most `limit` bytes. On an error, `out` is as it was. Panics unless the range is in `bytes` |
 | `compress(bytes: List<u8>, level: i32 = 3, checksum: bool = false) -> List<u8>` | The bytes compressed into one frame, as `compression.zstd.compress(bytes, level)` writes one, with a checksum if `checksum` is set. Panics for a level outside -131072 to 22. See [Compressing](#compressing) |
 | `compress_into(bytes: List<u8>, from: usize, to: usize, level: i32, checksum: bool, out: mut List<u8>)` | Compresses `bytes[from..to]` onto the end of `out`, as `compress` does. Panics unless the range is in `bytes` |
+| `Compressor.new(level: i32 = 3, checksum: bool = false) -> Compressor` | A compressor that takes the text a piece at a time, as Python's `ZstdCompressor` does, into one frame. See [A piece at a time](#a-piece-at-a-time) |
+| `Decompressor.new(limit: u64 = u64.MAX) -> Decompressor` | A decompressor that takes the bytes a piece at a time, as Python's `ZstdDecompressor` does, every frame in them |
+| `Writer.new(out: own W, level: i32 = 3, checksum: bool = false) -> Writer<W>` | A [`std.io`](io.md) `Writer` that compresses what's written to it onto `out`, any `Writer`, as zstandard's `stream_writer` does |
+| `Reader.new(input: own R, limit: u64 = u64.MAX) -> Reader<R>` | A `std.io` `Reader` that decompresses what it reads from `input`, any `Reader`, as zstandard's `stream_reader` does |
 | `is_zstd(bytes: List<u8>) -> bool` | Whether the bytes start as a Zstandard frame does: `28 b5 2f fd` |
 | `xxh64(bytes: List<u8>, seed: u64 = 0) -> u64` | The XXH64 hash, as the `xxhash` package's `xxh64_intdigest` gives it. A frame's checksum is its low 32 bits |
 | `Dictionary.new(bytes: own List<u8>) -> Dictionary ! Error` | A dictionary that `zstd --train` or `train_dict` made, as `ZstdDict(bytes)` takes it. See [Dictionaries](#dictionaries) |
@@ -118,6 +122,65 @@ Python writes 8,865 bytes for that text at level 1, and 6,770 at 19 without the 
 - **The same bytes make the same frame**, on any machine with any number of processors, with AVX2, with SSE2 alone or with neither: the jobs are cut by size and level alone, and the encoder works in integers. So a `.tar.zst` built twice is the same file.
 - Each thread compressing a job needs the level's tables, from 32 KiB at the negative levels to 640 MiB at 22, or less for an input smaller than the window, and room for what its job compresses to. `compress` puts no more threads on the jobs than a quarter of the machine's memory has room for, and writes the same bytes with fewer.
 - `compress` panics for a level outside -131072 to 22, where Python raises a `ValueError`. To compress with a dictionary, it's `d.compress`: see [Dictionaries](#dictionaries).
+
+## A piece at a time
+
+`Compressor` and `Decompressor` take their bytes a piece at a time, for a file bigger than memory or bytes to and from a pipe or a socket, as Python's `ZstdCompressor` and `ZstdDecompressor` do, and zstandard's `compressobj` and `decompressobj`. `Writer` and `Reader` put them between [`std.io`](io.md) `Writer`s and `Reader`s, as zstandard's `stream_writer` and `stream_reader` do: a [`std.tar`](tar.md#a-piece-at-a-time) archive into a `.tar.zst` file or over a connection, a piece at a time.
+
+```calx
+import std.io.{ByteReader}
+import std.zstd.{Compressor, Decompressor, decompress}
+import std.zstd
+
+fn main() {
+    // Pieces in, the frame out as it's made, and a flush to make what's out readable now.
+    var c = Compressor.new()
+    var sent = c.add("first part;".to_bytes())
+    sent.extend(c.flush())
+    var d = Decompressor.new()
+    println(String.from_utf8(d.add(sent.copy())!)!)    // out: first part;
+    var rest = c.add("second part".to_bytes())
+    rest.extend(c.finish())
+    println(String.from_utf8(d.add(rest.copy())!)!)    // out: second part
+    println("{d.finish()!.len()} left")    // out: 0 left
+    sent.extend(rest)
+    println(String.from_utf8(decompress(sent)!)!)    // out: first part;second part
+
+    // A Writer onto a list, and a Reader of what it wrote.
+    var w = zstd.Writer.new(List<u8>(), 19, true)
+    for i in 0..1000 {
+        w.write("line {i}\n".to_bytes())!
+    }
+    let packed = w.finish()!
+    var r = zstd.Reader.new(ByteReader.new(packed))
+    var text = List<u8>()
+    while r.read(mut text, 4096)! > 0 {
+    }
+    println("{text.len()} {String.from_utf8(text[..6])!}")    // out: 8890 line 0
+}
+```
+
+| Item | Does |
+| --- | --- |
+| `c.add(bytes: List<u8>) -> List<u8>` | Takes the next piece of text, and gives what's compressed that it hasn't given: the frame's header the first time, then a job's blocks each time one fills |
+| `c.add_into(bytes: List<u8>, from: usize, to: usize, out: mut List<u8>)` | Takes `bytes[from..to]`, and puts what it gives onto the end of `out` |
+| `c.flush() -> List<u8>`, `c.flush_into(out: mut List<u8>)` | Compresses the text it holds and gives it, so that what's come out decompresses to all the text so far, as `ZSTD_e_flush` and Python's `FLUSH_BLOCK` do. The frame goes on |
+| `c.finish() -> List<u8>`, `c.finish_into(out: mut List<u8>)` | Compresses the rest, and gives it with the frame's end, and its checksum if it has one |
+| `d.add(bytes: List<u8>, most: u64 = u64.MAX) -> List<u8> ! Error` | Takes the next piece, and gives what it and the pieces before decompress to that it hasn't given, at most `most` bytes. Fails as `decompress` fails, but for `Truncated`, which only `finish` can tell, and the same way again after that |
+| `d.add_into(bytes: List<u8>, from: usize, to: usize, most: u64, out: mut List<u8>) ! Error` | Takes `bytes[from..to]`, and puts what it gives onto the end of `out` |
+| `d.needs_input() -> bool` | Whether the last `add` gave all it could, so it wants the next piece; `false` when it stopped at `most`, and `add` with no bytes gives more |
+| `d.finish() -> List<u8> ! Error`, `d.finish_into(out: mut List<u8>) ! Error` | Ends the data, giving the rest, and fails with `Truncated` if it ended inside a frame, or had none |
+| `w.write(bytes: List<u8>) ! String` | Compresses the bytes, and writes what comes out to `out` |
+| `w.flush() ! String` | Flushes the compressor into `out`, then flushes `out` |
+| `w.finish() -> W ! String` | Ends the frame, writes it, flushes `out`, and gives `out` back |
+| `r.read(buf: mut List<u8>, n: usize) -> usize ! String` | Up to `n` decompressed bytes onto the end of `buf`, reading `input` 128 KiB at a time as it needs to; 0 at the end. Fails at the end if the data was cut short inside a frame, so a cut-off `.tar.zst` doesn't read as one that ended |
+| `r.into_inner() -> R` | Gives `input` back |
+
+- **One frame without a size.** A compressor can't know the size until the end, so its frame gives the window it needs instead, as `zstd` writes one from a pipe. `decompress`, `zstd -d`, Python's `compression.zstd` and zstandard's `stream_reader` all read it. The blocks are what `compress` makes of a big input.
+- **Memory.** `Compressor` compresses the text in jobs, as `compress` does a big input's, one at a time, on one thread, as soon as each job's text is in. It holds a job's text and the end of the one before, which its matches reach into: 2 MiB at level 1, 8.25 MiB at 3, 18 MiB at 9, 40 MiB at 19 and 640 MiB at 22, and the level's match tables besides. `Decompressor` holds what a frame's window says, 2 MiB for a frame from level 3 and up to 128 MiB, as Python allows, twice over at most, a block of the input, and what it hasn't given out. `std.tar`'s archive of 5 GiB, written to a file through `Writer` at level 3 and read back through `Reader`, never had more than 24 MiB of memory.
+- **Every frame.** A `Decompressor` reads frames one after another to the end of its data, and passes skippable frames over, as `decompress` does, where Python's `ZstdDecompressor` stops at the end of the first frame. Frames with a dictionary aren't read a piece at a time.
+- **A flush costs a little.** Each flush ends a job, and the next starts with tables of its own, so a frame flushed after every few bytes comes out bigger. `Writer` flushes only when it's asked to: `std.tar`'s `StreamWriter` doesn't, but at its end.
+- **Speed.** A `Compressor` works on one thread, where `compress` puts a big input's jobs on every processor: on an 83 MB tar of text and random bytes at level 3 it took 263 ms to `compress`'s 71 ms on the reference machine. A `Decompressor` decodes a block at a time on one thread, where `decompress` decodes a big frame on every processor: 62 ms to 64 on that tar, whose random bytes are stored blocks, and 38 ms to 14 on 23 MB of text from level 3.
 
 ## Dictionaries
 
@@ -370,6 +433,8 @@ Decompressing is [runtime/calx_zstd.c](../../runtime/calx_zstd.c), linked only i
 | All the processors | For a frame of 1 MiB or more, or without a size: the next run of blocks' headers and tables are read in order while the run before has its literals and sequences decoded on every processor, and the one before that has its matches carried out in order, with the offsets worked out 8 sequences ahead so their bytes are fetched first, while the checksum is worked on over what's done |
 
 Compressing is [runtime/calx_zstdenc.c](../../runtime/calx_zstdenc.c), linked only into programs that compress, written from RFC 8878. It has no libzstd code, but it has libzstd's table of each level's settings, whose BSD notice is in the file.
+
+A piece at a time, `Decompressor` calls the decoder for one block at a time, which writes it after the end of the frame so far and checks its size and checksum as it goes; the window it keeps moves on, the frame's window back from its end and whatever hasn't been given out, and is moved to the front of its buffer once that frees half of it. `Compressor` calls the encoder for one job at a time, the same jobs `compress` cuts a big input into, with the end of the text before it, and writes the frame's header itself.
 
 | Part | How |
 | --- | --- |

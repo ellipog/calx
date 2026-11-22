@@ -12,6 +12,7 @@ struct EmitOptions {
     bool line_directives = true;  // `#line`, so debuggers and profilers show Calx lines (P3.10)
     bool library = false;         // a library, which takes the program's runtime and lists its exports (D123)
     bool tests = false;           // `calx test`: a `main` that runs the test it's asked for (CLX-87)
+    bool staticlib = false;       // a static library, whose `@export_c` functions catch its panics (CLX-407)
 };
 
 // One C file of a program: a module's functions and what they need (D75).

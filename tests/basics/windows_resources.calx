@@ -1,0 +1,129 @@
+// On Windows, a program or library Calx builds is laid out as Visual Studio's are (CLX-414): a
+// version resource made from calx.toml, or from the file's name without one, and a manifest that
+// runs it as whoever starts it; ASLR with high entropy, DEP, no section both writable and
+// executable, and no symbol table or DWARF of mingw-w64's left in it. Without them, Windows
+// Defender's machine-learning models took some programs for malware. Elsewhere it prints what
+// Windows gives, so the test passes there too.
+import std.env.{os, variable}
+import std.fs.{read, remove_dir_all, temp_dir, write_text, separator}
+import std.process.{Command}
+
+// What calx printed, run in `dir`, and how it ended.
+fn run(exe: String, args: List<String>, dir: String) -> String {
+    match Command.new(exe).args(args).dir(dir).output() {
+        ok(o) => {
+            let text = "{o.text()}{o.error_text()}".trim_end()
+            if text.len() == 0 {
+                return "[{o.status}]"
+            }
+            return "{text} [{o.status}]"
+        },
+        err(e) => return "{e}",
+    }
+}
+
+fn u16_at(b: List<u8>, at: usize) -> u32 {
+    return u32(b[at]) | u32(b[at + 1]) << 8
+}
+
+fn u32_at(b: List<u8>, at: usize) -> u32 {
+    return u16_at(b.copy(), at) | u16_at(b.copy(), at + 2) << 16
+}
+
+// Whether `want` is somewhere in `bytes`.
+fn holds(bytes: List<u8>, want: List<u8>) -> bool {
+    var i: usize = 0
+    while i + want.len() <= bytes.len() {
+        var j: usize = 0
+        while j < want.len() and bytes[i + j] == want[j] {
+            j += 1
+        }
+        if j == want.len() {
+            return true
+        }
+        i += 1
+    }
+    return false
+}
+
+// `text` as UTF-16, as a version resource holds it.
+fn utf16(text: String) -> List<u8> {
+    var out = List<u8>()
+    for b in text.to_bytes() {
+        out.push(b)
+        out.push(0)
+    }
+    return out
+}
+
+// What the PE file at `path` says about itself: its flags, its sections, and the text it holds.
+fn describe(path: String, texts: List<String>) -> String {
+    let b = read(path)!
+    let pe = usize(u32_at(b.copy(), 0x3C))
+    let sections = usize(u16_at(b.copy(), pe + 6))
+    let symbols = u32_at(b.copy(), pe + 12)
+    let optional = pe + 24
+    let traits = u16_at(b.copy(), optional + 70)
+    // ASLR with high entropy, DEP.
+    let flags = traits & 0x20 != 0 and traits & 0x40 != 0 and traits & 0x100 != 0
+    var names = List<String>()
+    var wx = false
+    let table = optional + usize(u16_at(b.copy(), pe + 20))
+    for i in 0..sections {
+        let at = table + i * 40
+        var name = String()
+        for k in 0..8usize {
+            if b[at + k] != 0 {
+                name.push(rune(b[at + k]))
+            }
+        }
+        let c = u32_at(b.copy(), at + 36)
+        // A long name, as `/4`, is one of DWARF's sections.
+        if name == ".rsrc" or name.starts_with("/") {
+            names.push(name)
+        }
+        wx = wx or (c & 0x20000000 != 0 and c & 0x80000000 != 0)
+    }
+    var found = String()
+    for t in texts {
+        let here = holds(b.copy(), utf16(t.copy())) or holds(b.copy(), t.to_bytes())
+        found.push_str(" {t}={here}")
+    }
+    return "flags {flags}, writable code {wx}, symbols {symbols}, sections {names}, holds{found}"
+}
+
+fn main() {
+    let calx = variable("CALX") ?? String("calx")
+    let dir = temp_dir()!
+    let s = separator()
+    let windows = os() == "windows"
+    write_text("{dir}{s}calx.toml", "[package]\nname = \"shapes\"\nversion = \"1.2.3\"\ndescription = \"Draws shapes\"\ncompany = \"Example Co\"\ncopyright = \"Copyright 2026 Example Co\"\n")!
+    write_text("{dir}{s}app.calx", "fn main() \{\n    println(\"built\")\n\}\n")!
+    write_text("{dir}{s}lib.calx", "@export\nfn area(w: i64, h: i64) -> i64 \{\n    return w * h\n\}\n")!
+    // A folder of its own, so the calx.toml above isn't its.
+    let plain = temp_dir()!
+    write_text("{plain}{s}tool.calx", "fn main() \{\n    println(\"built\")\n\}\n")!
+
+    println(run(calx.copy(), ["build", "app.calx", "-o", "app.exe"], dir.copy()))    // out: [exited with status 0]
+    println(run(calx.copy(), ["build", "--lib", "lib.calx", "-o", "shapes.dll"], dir.copy()))    // out: [exited with status 0]
+    println(run(calx.copy(), ["build", "tool.calx", "-o", "tool.exe"], plain.copy()))    // out: [exited with status 0]
+    if windows {
+        // The program: the package's name, version, description, company and copyright, and the
+        // manifest, which asks for no more rights than its caller's.
+        println(describe("{dir}{s}app.exe", ["shapes", "1.2.3", "Draws shapes", "Example Co", "Copyright 2026 Example Co", "shapes.exe", "asInvoker"]))
+        // A library says it's one, by its name.
+        println(describe("{dir}{s}shapes.dll", ["shapes.dll", "Draws shapes", "asInvoker"]))
+        // A program with no calx.toml is named for its file, at version 0.0.0.
+        println(describe("{plain}{s}tool.exe", ["tool.exe", "0.0.0", "asInvoker"]))
+    } else {
+        println("flags true, writable code false, symbols 0, sections [.rsrc], holds shapes=true 1.2.3=true Draws shapes=true Example Co=true Copyright 2026 Example Co=true shapes.exe=true asInvoker=true")
+        println("flags true, writable code false, symbols 0, sections [.rsrc], holds shapes.dll=true Draws shapes=true asInvoker=false")
+        println("flags true, writable code false, symbols 0, sections [.rsrc], holds tool.exe=true 0.0.0=true asInvoker=true")
+    }
+    // out: flags true, writable code false, symbols 0, sections [.rsrc], holds shapes=true 1.2.3=true Draws shapes=true Example Co=true Copyright 2026 Example Co=true shapes.exe=true asInvoker=true
+    // out: flags true, writable code false, symbols 0, sections [.rsrc], holds shapes.dll=true Draws shapes=true asInvoker=false
+    // out: flags true, writable code false, symbols 0, sections [.rsrc], holds tool.exe=true 0.0.0=true asInvoker=true
+    println(run("{dir}{s}app.exe", [], dir.copy()))    // out: built [exited with status 0]
+    remove_dir_all(dir)!
+    remove_dir_all(plain)!
+}

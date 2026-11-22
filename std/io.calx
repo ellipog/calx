@@ -1,5 +1,7 @@
 /// Standard input and output as bytes, for programs that speak a binary protocol, and standard
-/// input as lines of text.
+/// input as lines of text. And `Reader` and `Writer`, what streams of bytes read from and write to,
+/// which files, connections, the compressors and standard input and output implement, so a tar
+/// archive can be written into a zstd stream into a file, or read the same way.
 ///
 /// What `write` writes and what `print` prints share one buffer, so they come out in the order
 /// they were written. The buffer is written out when it fills, at `flush()`, before `read` waits
@@ -12,6 +14,8 @@ extern "C" {
     fn cx_in_read(to: *u8, n: usize) -> usize
     fn cx_out_write(from: *const u8, n: usize)
     fn cx_out_flush()
+    fn cx_out_flush_checked() -> i32
+    fn cx_out_gone() -> u32
     fn cx_out_is_terminal() -> u32
     fn cx_term_read(to: *u8, n: usize) -> usize
     fn memmove(to: *u8, from: *const u8, n: usize) -> *u8
@@ -144,9 +148,120 @@ pub fn flush() {
     }
 }
 
+/// Whether standard output's reader has gone, as a pipe's has once `head` has read its lines and
+/// ended. From then on what's printed and written there is dropped, so a program that prints
+/// without end, as a generator piped into `head` does, checks this to stop. It's seen when the
+/// buffer is written out, at `flush()` or once it fills, not at each `print`.
+pub fn reader_gone() -> bool {
+    return unsafe { cx_out_gone() } == 1
+}
+
 /// Whether standard output is a terminal, not a file or a pipe, so a program can color what it
 /// prints there with ANSI escape codes. A Windows console reads them only once a program turns
 /// that on, which this does, and one that can't counts as no terminal.
 pub fn is_terminal() -> bool {
     return unsafe { cx_out_is_terminal() } == 1
+}
+
+/// Something bytes are read from in order, a piece at a time, as Python reads a file object
+/// opened `"rb"`: a file, a connection, a decompressor reading another `Reader`, or standard
+/// input. Code that reads, such as `std.tar`'s `StreamReader`, takes any type with it.
+pub interface Reader {
+    /// Reads up to `n` bytes onto the end of `buf`, and returns how many it read, waiting until
+    /// there's at least one. That's 0 only at the end, or when `n` is 0. Fails with what went
+    /// wrong, in words.
+    fn read(mut self, buf: mut List<u8>, n: usize) -> usize ! String
+}
+
+/// Something bytes are written to in order, as Python writes to a file object opened `"wb"`: a
+/// file, a connection, a compressor writing to another `Writer`, a `List<u8>`, or standard output.
+/// Code that writes, such as `std.tar`'s `StreamWriter`, takes any type with it.
+pub interface Writer {
+    /// Writes all the bytes, or fails with what went wrong, in words.
+    fn write(mut self, bytes: List<u8>) ! String
+
+    /// Writes out what it holds back, so a reader at the other end gets everything written so
+    /// far, as a compressor's flush or a connection's does. Does nothing by default.
+    fn flush(mut self) ! String {
+    }
+}
+
+/// A list of bytes grows by what's written to it, as Python's `io.BytesIO` does.
+impl Writer for List<u8> {
+    fn write(mut self, bytes: List<u8>) ! String {
+        self.extend(bytes)
+    }
+}
+
+/// Bytes in memory, read from the start, as Python's `io.BytesIO(data)` is: an archive held in
+/// memory read by code that takes a `Reader`.
+pub struct ByteReader {
+    bytes: List<u8>
+    at: usize = 0
+}
+
+impl ByteReader {
+    /// A reader of the bytes, from the first.
+    pub fn new(bytes: own List<u8>) -> ByteReader {
+        return ByteReader { bytes: bytes }
+    }
+
+    /// How many bytes are left to read.
+    pub fn left(self) -> usize {
+        return self.bytes.len() - self.at
+    }
+}
+
+impl Reader for ByteReader {
+    fn read(mut self, buf: mut List<u8>, n: usize) -> usize ! String {
+        let k = if n < self.bytes.len() - self.at { n } else { self.bytes.len() - self.at }
+        buf.extend(self.bytes[self.at..self.at + k])
+        self.at += k
+        return k
+    }
+}
+
+/// Standard input as a `Reader`, which reads as `read` does, as Python's `sys.stdin.buffer`.
+pub struct Stdin {
+}
+
+impl Reader for Stdin {
+    fn read(mut self, buf: mut List<u8>, n: usize) -> usize ! String {
+        return read(mut buf, n)
+    }
+}
+
+/// Standard output as a `Writer`, which writes as `write` does, into the buffer `print` shares,
+/// and flushes as `flush` does, as Python's `sys.stdout.buffer`. Where `write` and `flush` drop
+/// what's written once the reader has gone, these fail, as Python's raise `BrokenPipeError`.
+pub struct Stdout {
+}
+
+/// What a failed write to standard output says: -1 is the reader gone, and any other number the
+/// C library's errno.
+fn out_error(e: i32) -> String {
+    if e == -1 {
+        return String("standard output's reader has gone (broken pipe)")
+    }
+    return "couldn't write to standard output (errno {e})"
+}
+
+impl Writer for Stdout {
+    fn write(mut self, bytes: List<u8>) ! String {
+        if reader_gone() {
+            fail out_error(-1)
+        }
+        write(bytes)
+        // Written straight out when it's larger than the buffer, or when it filled it.
+        if reader_gone() {
+            fail out_error(-1)
+        }
+    }
+
+    fn flush(mut self) ! String {
+        let e = unsafe { cx_out_flush_checked() }
+        if e != 0 {
+            fail out_error(e)
+        }
+    }
 }

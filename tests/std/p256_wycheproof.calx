@@ -1,0 +1,61 @@
+// Wycheproof's ECDSA P-256 SHA-256 vectors (CLX-406), in p256/wycheproof.txt: 484 signatures in
+// DER for `verify_der` and 262 as r then s for `verify`, under 225 public keys, each valid one
+// taken and each invalid one refused, as Wycheproof says. They're signatures at the edges of the
+// arithmetic, of the encodings and of the curve: r or s of 0, n or more, BER and broken DER,
+// points whose sums pass through the neutral point, and keys at the curve's extremes. Each valid
+// one is refused again for a message with a byte added.
+
+import std.bytes.{from_hex}
+import std.crypto.{P256PublicKey}
+
+const VECTORS: [u8; 166201] = embed("p256/wycheproof.txt")
+
+fn unhex(text: String) -> List<u8> {
+    if text == "-" {
+        return []
+    }
+    return from_hex(text) ?? panic("hex: {text}")
+}
+
+fn main() {
+    let text = String.from_utf8(VECTORS[..]) ?? panic("UTF-8")
+    var key: P256PublicKey? = none
+    var keys: usize = 0
+    // DER valid, DER invalid, raw valid, raw invalid: those that came out as Wycheproof says.
+    var counts: List<usize> = [0; 4]
+    var wrong: usize = 0
+    for line in text.lines() {
+        if line.is_empty() or line.starts_with("#") {
+            continue
+        }
+        let parts = line.split(" ")
+        if parts[0] == "key" {
+            key = P256PublicKey.from_sec1(unhex(parts[1].copy()))
+            if key == none {
+                println("key {keys} isn't read")
+            }
+            keys += 1
+            continue
+        }
+        let k = key.copy() ?? panic("a test before any key")
+        let der = parts[0] == "der"
+        let valid = parts[2] == "valid"
+        let message = unhex(parts[3].copy())
+        let signature = unhex(parts[4].copy())
+        let taken = if der { k.verify_der(message.copy(), signature.copy()) } else { k.verify(message.copy(), signature.copy()) }
+        var longer = message.copy()
+        longer.push(0)
+        let other = if der { k.verify_der(longer, signature) } else { k.verify(longer, signature) }
+        if taken != valid or other {
+            println("{parts[0]} {parts[1]}: {if taken { "taken" } else { "refused" }}, but it's {parts[2]}")
+            wrong += 1
+            continue
+        }
+        let slot = (if der { 0usize } else { 2usize }) + (if valid { 0usize } else { 1usize })
+        counts[slot] += 1
+    }
+    println("{keys} keys")    // out: 225 keys
+    println("DER: {counts[0]} valid taken, {counts[1]} invalid refused")    // out: DER: 174 valid taken, 310 invalid refused
+    println("raw: {counts[2]} valid taken, {counts[3]} invalid refused")    // out: raw: 173 valid taken, 89 invalid refused
+    println("{wrong} wrong")    // out: 0 wrong
+}

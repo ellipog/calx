@@ -1,0 +1,107 @@
+// std.net's UDP sockets on loopback (CLX-412): datagrams both ways in the loop TCP uses, each with
+// where it came from, several to a poll and in order, an empty one and a big one, IPv6, the
+// system's ports, sharing a port, closing, and the errors.
+import std.net.{Address, Event, Ip, Net, NetError, Udp}
+
+// Takes every datagram the sockets get until `want` have come, each as `text<from port>`.
+fn gather(net: Net, want: usize) -> List<String> {
+    var got = List<String>()
+    var events = List<Event>()
+    while got.len() < want {
+        net.poll(5000, mut events)
+        assert(not events.is_empty(), "the datagrams came in time")
+        for e in events {
+            match e {
+                Datagram(u) => {
+                    while let d = u.receive_from() {
+                        let text = if d.bytes.len() > 100 { "{d.bytes.len()} bytes" } else { String.from_utf8(d.bytes.copy()) ?? String("?") }
+                        got.push("{text}<{d.from.port}>")
+                    }
+                },
+                _ => panic("only datagrams come"),
+            }
+        }
+    }
+    return got
+}
+
+fn main() {
+    let net = Net.new()!
+    let a = net.bind_udp("127.0.0.1", 0)!
+    let b = net.bind_udp("127.0.0.1", 0)!
+    println("{a.port() != 0} {a.port() != b.port()} {a == a} {a == b}")    // out: true true true false
+    let to_b = Address { ip: Ip.V4([127, 0, 0, 1]), port: b.port() }
+    for i in 0..4 {
+        a.send_to("n{i}".to_bytes(), to_b)!
+    }
+    a.send_to(List<u8>(), to_b)!
+    a.send_to([7u8; 60000], to_b)!
+    let got = gather(net, 6)
+    let from_a = "<{a.port()}>"
+    println("{got.map(|g| g.replace(from_a, "<a>"))}")    // out: [n0<a>, n1<a>, n2<a>, n3<a>, <a>, 60000 bytes<a>]
+
+    // An answer goes back to where the datagram came from, as a server's does.
+    b.send_to("pong".to_bytes(), Address { ip: Ip.parse("127.0.0.1")!, port: a.port() })!
+    println("{gather(net, 1)[0] == "pong<{b.port()}>"}")    // out: true
+
+    // IPv6.
+    let c = net.bind_udp("::1", 0)!
+    let d = net.bind_udp("::1", 0)!
+    c.send_to("six".to_bytes(), Address { ip: Ip.parse("::1")!, port: d.port() })!
+    var events = List<Event>()
+    var seen = false
+    while not seen {
+        net.poll(5000, mut events)
+        assert(not events.is_empty(), "the IPv6 datagram came")
+        for e in events {
+            if let Event.Datagram(u) = e {
+                if let dg = u.receive_from() {
+                    println("{u == d} {dg.from.ip.to_string()} {dg.from.port == c.port()}")    // out: true ::1 true
+                    seen = true
+                }
+            }
+        }
+    }
+
+    // Two sockets can share a port only when both ask for it.
+    let shared = net.bind_udp("127.0.0.1", 0, reuse: true)!
+    match net.bind_udp("127.0.0.1", shared.port()) {
+        ok(_) => println("bound twice"),
+        err(e) => println("{e}"),    // out: address already in use
+    }
+    match net.bind_udp("127.0.0.1", a.port()) {
+        ok(_) => println("bound twice"),
+        err(e) => println("{e}"),    // out: address already in use
+    }
+
+    // An IPv6 address from an IPv4 socket, and a group of the other family, are errors.
+    match a.send_to("x".to_bytes(), Address { ip: Ip.parse("::1")!, port: 9 }) {
+        ok => println("sent"),
+        err(e) => println("{e}"),    // out: not an address, or no name server knows the host
+    }
+    match a.join_multicast(Ip.parse("ff02::fb")!) {
+        ok => println("joined"),
+        err(NetError.BadAddress) => println("no IPv6 group on IPv4"),    // out: no IPv6 group on IPv4
+        err(e) => println("{e}"),
+    }
+    match net.bind_udp("not an address", 0) {
+        ok(_) => println("bound"),
+        err(e) => println("{e}"),    // out: not an address, or no name server knows the host
+    }
+
+    // Closed: what arrived after is dropped, and a send fails.
+    b.close()
+    a.send_to("late".to_bytes(), to_b)!
+    println("{b.port()} {b.receive_from() == none}")    // out: 0 true
+    match b.send_to("x".to_bytes(), Address { ip: Ip.V4([127, 0, 0, 1]), port: a.port() }) {
+        ok => println("sent"),
+        err(_) => println("closed"),    // out: closed
+    }
+    // The options work on an open socket.
+    a.set_ttl(32)!
+    a.set_multicast_ttl(4)!
+    a.set_multicast_loopback(false)!
+    a.set_broadcast(true)!
+    let udp: Udp = a
+    println("{udp.id() == a.id()}")    // out: true
+}

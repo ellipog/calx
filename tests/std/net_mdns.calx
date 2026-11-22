@@ -1,0 +1,126 @@
+// std.net.mdns on this machine's network (CLX-412): a responder on a thread of its own announces
+// a service, as a desktop app would, and a second one on the main thread browses for it, finds it
+// with its port, properties, host and addresses, sees it change and go, and registers the same
+// name itself, which the first defends, so it's renamed, or refused. The service type is new each
+// run, so this test's other build, running at once, and anything else on the network, aren't seen.
+// firewall: listens for mDNS on every address
+import std.net.mdns.{Mdns, MdnsError, MdnsEvent, ServiceInfo}
+import std.random.{Random}
+import std.thread.{Task}
+
+// Announces "Test Service" and answers for it, until it's told to stop.
+struct Responder {
+    kind: String
+    commands: Receiver<String>
+    said: Sender<String>
+}
+
+impl Task for Responder {
+    fn run(own self) {
+        var commands = self.commands
+        var said = self.said
+        var m = Mdns.new()!
+        let info = ServiceInfo.new(self.kind, "Test Service", 7777).with_property("id", "7f3a")
+        said.send(m.register(info)!)
+        loop {
+            _ = m.next_event(20)!
+            while let c = commands.next() {
+                if c == "update" {
+                    let changed = ServiceInfo.new(self.kind, "Test Service", 7777).with_property("id", "8b4c")
+                    assert(m.update(changed), "the service is there to update")
+                } else if c == "unregister" {
+                    assert(m.unregister(self.kind, "Test Service"), "the service is there to unregister")
+                } else {
+                    m.close()
+                    return
+                }
+            }
+        }
+    }
+}
+
+// The next event of the kind `what` about the service named `name`, skipping the rest.
+fn wait_for(m: mut Mdns, what: str, name: str) -> ServiceInfo {
+    loop {
+        let got = m.next_event(15000)!
+        let e = got else panic("no {what} event for {name} in 15 seconds")
+        let (kind, info) = match e {
+            MdnsEvent.Added(s) => ("added", some(s)),
+            MdnsEvent.Updated(s) => ("updated", some(s)),
+            MdnsEvent.Removed(s) => ("removed", some(s)),
+            MdnsEvent.Renamed(_, _, _) => ("renamed", none),
+        }
+        if kind == what {
+            if let s = info {
+                if s.name == name {
+                    return s
+                }
+            }
+        }
+    }
+}
+
+fn main() {
+    var r = Random.system()
+    let kind = "_t{r.below(1000000)}._tcp"
+    let commands = Receiver<String>()
+    var said = Receiver<String>()
+    var to_responder = commands.sender()
+    let t = unsafe { Thread.spawn(Responder { kind: kind.copy(), commands: commands, said: said.sender() }) }
+    var b = Mdns.new()!
+    b.browse(kind)!
+    println("registered {said.wait() ?? String()}")    // out: registered Test Service
+
+    let found = wait_for(mut b, "added", "Test Service")
+    println("added {found.name} {found.port} {found.property("id")} {found.property("ID")} {found.kind == kind}")    // out: added Test Service 7777 some(7f3a) some(7f3a) true
+    println("{found.host.ends_with("-calx.local")} {not found.addresses.is_empty()} {b.services().len()}")    // out: true true 1
+    println("{found.full_name().ends_with("._tcp.local.")}")    // out: true
+
+    // Its addresses can change too, so the update wanted is the one with the new value.
+    to_responder.send("update")
+    var changed = wait_for(mut b, "updated", "Test Service")
+    while changed.property("id") != some(String("8b4c")) {
+        changed = wait_for(mut b, "updated", "Test Service")
+    }
+    println("updated {changed.property("id")}")    // out: updated some(8b4c)
+
+    // The name is the responder's: probing finds it, so this one's is renamed, or refused.
+    println(b.register(ServiceInfo.new(kind, "Test Service", 8888))!)    // out: Test Service (2)
+    match b.register(ServiceInfo.new(kind, "Test Service", 9999), allow_name_change: false) {
+        ok(name) => println("registered {name}"),
+        err(MdnsError.NameTaken(_)) => println("taken"),    // out: taken
+        err(e) => println("{e}"),
+    }
+    let mine = wait_for(mut b, "added", "Test Service (2)")
+    println("added {mine.name} {mine.port}")    // out: added Test Service (2) 8888
+
+    // A goodbye: it's gone at once, rather than when its records run out in 75 minutes.
+    to_responder.send("unregister")
+    let gone = wait_for(mut b, "removed", "Test Service")
+    println("removed {gone.name} {gone.property("id")}")    // out: removed Test Service some(8b4c)
+
+    // Names and types DNS-SD can't carry.
+    for bad in ["loom", "_loom._sctp", "_x.y._tcp", "_has space._tcp", "_much-too-long-a-name._tcp"] {
+        match b.register(ServiceInfo.new(bad, "x", 1)) {
+            ok(_) => println("registered"),
+            err(e) => println("{e}"),
+        }
+    }
+    // out: a service type is two labels, such as `_loom._tcp`, not `loom`
+    // out: a service type ends in `_tcp` or `_udp`, not `_sctp`
+    // out: a service type is two labels, such as `_loom._tcp`, not `_x.y._tcp`
+    // out: a service type has only letters, digits and hyphens after `_`, not `_has space`
+    // out: a service type starts with `_` and 1 to 15 letters, digits and hyphens, not `_much-too-long-a-name`
+    match b.register(ServiceInfo.new(kind, "x".repeat(64), 1)) {
+        ok(_) => println("registered"),
+        err(e) => println("{e}"),    // out: an instance name is 1 to 63 bytes, not 64
+    }
+    match b.browse("tcp") {
+        ok => println("browsing"),
+        err(e) => println("{e}"),    // out: a service type is two labels, such as `_loom._tcp`, not `tcp`
+    }
+
+    to_responder.send("stop")
+    t.join()
+    b.close()
+}

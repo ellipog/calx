@@ -1,0 +1,40 @@
+// Wycheproof's X25519 vectors (CLX-411), in x25519/wycheproof.txt: 518 private and public keys
+// with the secret they share, each as Wycheproof says. They're keys at the edges of the
+// arithmetic, points on the curve's twist, u's of p or more, and the 31 public keys of small
+// order, whose shared secret is all zeros, which `exchange` gives as none.
+
+import std.bytes.{from_hex}
+import std.crypto.{X25519Key, X25519PublicKey}
+
+const VECTORS: [u8; 107766] = embed("x25519/wycheproof.txt")
+
+fn main() {
+    let text = String.from_utf8(VECTORS[..]) ?? panic("UTF-8")
+    var right: usize = 0
+    var zeros: usize = 0
+    var wrong: usize = 0
+    for line in text.lines() {
+        if line.is_empty() or line.starts_with("#") {
+            continue
+        }
+        let parts = line.split(" ")
+        let key = X25519Key.from_bytes(from_hex(parts[2].copy())!)!
+        let public = X25519PublicKey.from_bytes(from_hex(parts[3].copy())!)!
+        let want = from_hex(parts[4].copy())!
+        let got = key.exchange(public)
+        if want == [0; 32] {
+            if got == none {
+                zeros += 1
+            } else {
+                println("{parts[0]}: a shared secret of zeros wasn't refused")
+                wrong += 1
+            }
+        } else if got == some(want) {
+            right += 1
+        } else {
+            println("{parts[0]}: the shared secret is different")
+            wrong += 1
+        }
+    }
+    println("{right} shared, {zeros} of zeros refused, {wrong} wrong")    // out: 487 shared, 31 of zeros refused, 0 wrong
+}

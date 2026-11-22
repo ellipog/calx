@@ -1423,6 +1423,11 @@ cx_i32 cx_fs_copy(const cx_u8* from, size_t from_len, const cx_u8* to, size_t to
     } else {
         ok = 1;
         int kernel = 1;
+        /* The reads' and writes' buffer, on the heap: in a _Thread_local its 64 KB were in every
+         * thread's static TLS, which glibc carves out of each thread's stack, so the 64 KB stack
+         * of std.signal's thread had no room left and the thread couldn't start (CLX-417). */
+        enum { CHUNK = 1 << 16 };
+        char* chunk = NULL;
         for (;;) {
             ssize_t n;
             if (kernel) {
@@ -1441,9 +1446,11 @@ cx_i32 cx_fs_copy(const cx_u8* from, size_t from_len, const cx_u8* to, size_t to
                     continue;
                 }
 #endif
+            } else if (!chunk && !(chunk = malloc(CHUNK))) {
+                errno = ENOMEM;
+                n = -1;
             } else {
-                static _Thread_local char chunk[1 << 16];
-                n = read(in, chunk, sizeof chunk);
+                n = read(in, chunk, CHUNK);
                 for (ssize_t done = 0; n > 0 && done < n;) {
                     ssize_t w = write(out, chunk + done, (size_t)(n - done));
                     if (w < 0) {
@@ -1462,6 +1469,7 @@ cx_i32 cx_fs_copy(const cx_u8* from, size_t from_len, const cx_u8* to, size_t to
                 break;
             }
         }
+        free(chunk);
         if (ok) {
             struct timespec t[2] = {st.st_atim, st.st_mtim};
             if (fchmod(out, st.st_mode & 07777) != 0 || futimens(out, t) != 0) {

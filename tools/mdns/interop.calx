@@ -1,0 +1,71 @@
+// std.net.mdns against the system's own responder, which CI runs on Linux with avahi and on macOS
+// with Bonjour (CLX-412):
+//
+//     calx run tools/mdns/interop.calx -- announce TYPE NAME SECONDS [KEY=VALUE...]
+//     calx run tools/mdns/interop.calx -- find TYPE NAME [KEY=VALUE...]
+//
+// `announce` registers NAME of type TYPE on port 4321 with the properties given, answers for it
+// for SECONDS, then says goodbye, so `avahi-browse` or `dns-sd -B` and `-L` can find it meanwhile.
+// `find` looks for a service named NAME, which `avahi-publish` or `dns-sd -R` announced, and fails
+// unless it's found with each property given and an address.
+import std.env.{args}
+import std.net.mdns.{Mdns, MdnsError, ServiceInfo, find}
+import std.process.{exit}
+import std.time.{Instant}
+
+fn main() ! MdnsError {
+    let a = args()
+    if a.len() < 3 {
+        println("usage: interop.calx announce TYPE NAME SECONDS [KEY=VALUE...] | find TYPE NAME [KEY=VALUE...]")
+        exit(2)
+    }
+    let kind = a[1].copy()
+    let name = a[2].copy()
+    if a[0] == "announce" {
+        let seconds = i64.parse(if a.len() > 3 { a[3].copy() } else { String("30") }) ?? 30
+        var info = ServiceInfo.new(kind.copy(), name, 4321)
+        for p in a[4..] {
+            let (k, v) = p.split_once("=") ?? (p.copy(), String())
+            info = info.with_property(k, v)
+        }
+        var m = try Mdns.new()
+        let got = try m.register(info)
+        println("announced {got} on {m.host()} {m.addresses().map(|x| x.to_string())}")
+        let start = unsafe { Instant.now() }
+        loop {
+            let left = seconds * 1000 - i64.wrap(unsafe { Instant.now() }.nanos_since(start) / 1000000)
+            if left <= 0 {
+                break
+            }
+            if let e = try m.next_event(left) {
+                println("{e}")
+            }
+        }
+        m.close()
+        println("said goodbye")
+        return
+    }
+    if a[0] != "find" {
+        println("no mode {a[0]}: announce or find")
+        exit(2)
+    }
+    // Several looks, since the other responder may still be probing when the first is made.
+    for _ in 0..5 {
+        for s in try find(kind.copy(), 3000) {
+            println("found {s.name} on {s.host}:{s.port} {s.properties} {s.addresses.map(|x| x.to_string())}")
+            if s.name == name and not s.addresses.is_empty() {
+                var all = true
+                for p in a[3..] {
+                    let (k, v) = p.split_once("=") ?? (p.copy(), String())
+                    all = all and s.property(k) == some(v)
+                }
+                if all {
+                    println("ok")
+                    return
+                }
+            }
+        }
+    }
+    println("no {name} of type {kind} with its properties and an address")
+    exit(1)
+}

@@ -47,6 +47,9 @@
 //   Windows' firewall ask the person at the desktop whether to allow it, each time the program is
 //   new, as every build's is. On Windows such a test runs only in CI, whose runners don't ask, and
 //   is skipped elsewhere, saying so.
+// - `// needs: PROGRAM` marks a test that runs PROGRAM, a tool Calx doesn't need, such as `rustc`
+//   for a Rust host of a static library. Where `PROGRAM --version` doesn't run, it's skipped, saying
+//   so.
 // - `// simulator: TEXT` marks a test that runs something on the iOS simulator, which takes a Mac
 //   with Xcode. It finds the simulator in CALX_SIMULATOR, the UDID `xcrun simctl` takes, of one
 //   that this started for the run, or found running. Elsewhere, or without one, such a test is skipped,
@@ -61,7 +64,9 @@
 // use, which must report the same errors at the same places. Each other test that's one file must
 // be formatted as `calx fmt` formats it.
 //
-// A test that runs longer than two minutes (RUN_SECONDS) fails, and its program is stopped.
+// A test that runs longer than two minutes (RUN_SECONDS) fails, and its program is stopped. One that
+// runs on the iOS simulator has ten (SIMULATOR_SECONDS), as it builds for iOS, installs an app and
+// launches it, which a busy CI runner can take minutes over (CLX-424).
 //
 // Each program's temporary folder, TMP and TEMP on Windows and TMPDIR elsewhere, is one of its own
 // in its test's folder. A test that leaves anything there fails, as a folder `fs.temp_dir()`
@@ -80,6 +85,7 @@ import std.process.{Command, Output, output_all}
 import std.regex.{Regex}
 
 const RUN_SECONDS: u64 = 120
+const SIMULATOR_SECONDS: u64 = 600
 
 /// Runs the compiler's tests: the files under tests/ and the examples in the docs.
 @cli(name: "tests/run.calx")
@@ -111,7 +117,7 @@ struct Patterns {
 
 fn patterns() -> Patterns {
     return Patterns {
-        expect: Regex.new("//\\s*(out|error|panic|trace|stderr|stdin|args|status|lib|kind|firewall|simulator):(.*)$")!,
+        expect: Regex.new("//\\s*(out|error|panic|trace|stderr|stdin|args|status|lib|kind|firewall|needs|simulator):(.*)$")!,
         file: Regex.new("^// file: (\\S+)\\s*$")!,
         diag: Regex.new("^(.*?):(\\d+):(\\d+): error: (.*)$")!,
         panic_line: Regex.new("^panic at (.*?):(\\d+):(\\d+): (.*)$")!,
@@ -139,6 +145,7 @@ struct Test {
     libs: List<String>            // files to build as libraries first
     kind: String                  // what it's checked as: "library", "staticlib" or empty for a program
     firewall: String?             // why it listens on every address
+    needs: List<String>           // programs it runs that Calx doesn't need, such as `rustc`
     simulator: String?            // what it runs on the iOS simulator
     files: List<(String, String)> // (name, text) for a test of several modules, the main one first
 }
@@ -146,7 +153,7 @@ struct Test {
 fn parse_test(name: own String, source: String, file_path: own String?, p: mut Patterns) -> Test {
     var t = Test {
         name: name, source: source.copy(), file_path: file_path, out: [], errors: [], panics: none, trace: [], stderr: [],
-        stdin: [], args: [], status: 0, libs: [], kind: String(), firewall: none, simulator: none, files: [],
+        stdin: [], args: [], status: 0, libs: [], kind: String(), firewall: none, needs: [], simulator: none, files: [],
     }
     let lines = source.lines()
     var starts: List<(usize, String)> = []
@@ -191,6 +198,8 @@ fn parse_test(name: own String, source: String, file_path: own String?, p: mut P
                 t.simulator = some(text.trim())
             } else if kind == "firewall" {
                 t.firewall = some(text.trim())
+            } else if kind == "needs" {
+                t.needs.push(text.trim())
             } else if kind == "trace" {
                 t.trace.push(text.trim())
             } else if kind == "error" {
@@ -201,6 +210,16 @@ fn parse_test(name: own String, source: String, file_path: own String?, p: mut P
         }
     }
     return t
+}
+
+// The first program a test runs that isn't installed, of those it `needs`.
+fn lacks(t: Test, missing: List<String>) -> String? {
+    for program in t.needs {
+        if missing.contains(program) {
+            return some(program.copy())
+        }
+    }
+    return none
 }
 
 // Paths with `/` only, which every system's calls take.
@@ -352,6 +371,31 @@ fn main() {
         }
     }
     tests.retain(|t| t.firewall == none or not asks)
+    // Tools a test runs that Calx doesn't need, such as a Rust host's `rustc`, each looked for once.
+    var missing: List<String> = []
+    var found: List<String> = []
+    for t in tests {
+        for program in t.needs {
+            if not found.contains(program) and not missing.contains(program) {
+                let runs = match Command.new(program.copy()).arg("--version").output() {
+                    ok(o) => o.status.success(),
+                    err(_) => false,
+                }
+                if runs {
+                    found.push(program.copy())
+                } else {
+                    missing.push(program.copy())
+                }
+            }
+        }
+    }
+    for t in tests {
+        if let program = lacks(t, missing) {
+            println("skipped {t.name}: it runs `{program}`, which isn't installed")
+            skipped += 1
+        }
+    }
+    tests.retain(|t| lacks(t, missing) == none)
     // The iOS simulator, for the tests that run there: one for them all, found on a Mac with Xcode,
     // and started if none is running. Elsewhere, or without one, they're skipped, saying so, but in
     // CI on macOS, whose runners have Xcode, a missing simulator is a failure.
@@ -458,7 +502,7 @@ fn main() {
                 }
                 // The system's temporary folder, for the program, is one of its own in its test's
                 // folder, so what it leaves there is seen, and removed with the test's folder.
-                var run = calx_cmd(calx.copy(), root.copy(), words).env("CALX", calx.copy()).input_text(input).timeout(RUN_SECONDS * 1000)
+                var run = calx_cmd(calx.copy(), root.copy(), words).env("CALX", calx.copy()).input_text(input).timeout(limit(t) * 1000)
                 if t.simulator != none {
                     run = run.env("CALX_SIMULATOR", sim_id.copy())
                 }
@@ -604,6 +648,11 @@ fn main() {
     }
 }
 
+// How many seconds a test's program may run before it's stopped.
+fn limit(t: Test) -> u64 {
+    return if t.simulator != none { SIMULATOR_SECONDS } else { RUN_SECONDS }
+}
+
 // An iOS simulator the tests that need one run on (CLX-408): its UDID, for `xcrun simctl`, and
 // whether this started it.
 struct Simulator {
@@ -703,7 +752,7 @@ fn signal_name(s: i32) -> String {
 
 fn check_run(t: Test, job: Job, o: Output, p: mut Patterns, problems: mut List<String>) {
     if o.status.timed_out {
-        problems.push("still running after {RUN_SECONDS} seconds, so it was stopped")
+        problems.push("still running after {limit(t)} seconds, so it was stopped")
         return
     }
     let code = o.status.code ?? -1

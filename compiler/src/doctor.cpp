@@ -209,6 +209,111 @@ std::string diagnose(const std::string& out, bool mingw) {
     return "What clang said is above. If it's not clear, report it at https://github.com/ellipog/calx/issues.";
 }
 
+#ifdef _WIN32
+// `text` in Base64, for PowerShell's -EncodedCommand.
+std::string base64(const std::string& text) {
+    static const char* const kDigits = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    for (std::size_t i = 0; i < text.size(); i += 3) {
+        std::uint32_t n = static_cast<unsigned char>(text[i]) << 16;
+        if (i + 1 < text.size()) n |= static_cast<unsigned char>(text[i + 1]) << 8;
+        if (i + 2 < text.size()) n |= static_cast<unsigned char>(text[i + 2]);
+        out += kDigits[(n >> 18) & 63];
+        out += kDigits[(n >> 12) & 63];
+        out += i + 1 < text.size() ? kDigits[(n >> 6) & 63] : '=';
+        out += i + 2 < text.size() ? kDigits[n & 63] : '=';
+    }
+    return out;
+}
+
+// The paths and threats Microsoft Defender found in the last 30 days, one a line, as
+// `date<TAB>threat<TAB>path`, from its own PowerShell commands, which need no administrator.
+// Returns false when it can't say, as where another antivirus has taken Defender's place.
+bool defender_detections(const std::string& folder, std::string& out) {
+    const char* root = std::getenv("SystemRoot");
+    fs::path powershell = fs::path(root ? root : "C:\\Windows") / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe";
+    std::error_code ec;
+    if (!fs::is_regular_file(powershell, ec)) return false;
+    const std::string script =
+        "$ErrorActionPreference = 'Stop'\n"
+        "[Console]::OutputEncoding = [Text.Encoding]::UTF8\n"
+        "$names = @{}\n"
+        "Get-MpThreat | ForEach-Object { $names[[string]$_.ThreatID] = $_.ThreatName }\n"
+        "$since = (Get-Date).AddDays(-30)\n"
+        "Get-MpThreatDetection | Where-Object { $_.InitialDetectionTime -gt $since } | ForEach-Object {\n"
+        "  $d = $_\n"
+        "  foreach ($r in $d.Resources) {\n"
+        "    if ($r -match '^(file|containerfile):_(.+)$') {\n"
+        "      \"{0:yyyy-MM-dd}`t{1}`t{2}\" -f $d.InitialDetectionTime, $names[[string]$d.ThreatID], $Matches[2]\n"
+        "    }\n"
+        "  }\n"
+        "}\n";
+    // -EncodedCommand takes the script as UTF-16, which it's all ASCII for.
+    std::string utf16;
+    for (char ch : script) {
+        utf16 += ch;
+        utf16 += '\0';
+    }
+    return capture({powershell.string(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", base64(utf16)},
+                   folder, out) == 0;
+}
+
+// `path` in a form two paths to one file share: no `\\?\`, backslashes and lowercase.
+std::string comparable(std::string path) {
+    if (path.rfind("\\\\?\\", 0) == 0) path = path.substr(4);
+    for (char& ch : path) ch = ch == '/' ? '\\' : static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return path;
+}
+
+// Whether Microsoft Defender has taken programs Calx built from the cache, which its
+// machine-learning models do now and then by mistake (CLX-414).
+void check_defender(const fs::path& cache, const std::string& folder) {
+    std::string out;
+    bool known;
+    {
+        std::optional<term::Status> pending;
+        checking(pending, "Defender");
+        known = defender_detections(folder, out);
+    }
+    if (!known) return;
+    std::string under = comparable(cache.string());
+    if (!under.empty() && under.back() != '\\') under += '\\';
+    std::vector<std::string> paths, threats;
+    std::string last;
+    std::size_t at = 0;
+    while (at < out.size()) {
+        std::size_t end = out.find('\n', at);
+        if (end == std::string::npos) end = out.size();
+        std::string row = trimmed(out.substr(at, end - at));
+        at = end + 1;
+        std::size_t tab1 = row.find('\t'), tab2 = tab1 == std::string::npos ? tab1 : row.find('\t', tab1 + 1);
+        if (tab2 == std::string::npos) continue;
+        std::string date = row.substr(0, tab1), threat = row.substr(tab1 + 1, tab2 - tab1 - 1), path = row.substr(tab2 + 1);
+        if (comparable(path).rfind(under, 0) != 0) continue;
+        if (std::find(paths.begin(), paths.end(), path) == paths.end()) paths.push_back(path);
+        if (!threat.empty() && std::find(threats.begin(), threats.end(), threat) == threats.end()) threats.push_back(threat);
+        last = std::max(last, date);
+    }
+    if (paths.empty()) {
+        ok("Microsoft Defender: nothing in the build cache taken in the last 30 days", "Defender",
+           "nothing in the build cache taken in the last 30 days");
+        return;
+    }
+    std::string named;
+    for (std::size_t i = 0; i < threats.size(); i++) named += (i ? ", " : "") + threats[i];
+    std::string count = std::to_string(paths.size()) + (paths.size() == 1 ? " program" : " programs");
+    std::string found = "took " + count + " from the build cache in the last 30 days, the last on " + last +
+                        (named.empty() ? "" : ", as " + named);
+    warn("Microsoft Defender " + found, "Defender", found, paths.back());
+    fix("Its machine-learning models (names ending in !ml) take a program Calx built for malware now and\n"
+        "then, by mistake. Calx builds programs as Visual Studio does, with a version resource and a\n"
+        "manifest, which makes it rarer. A program changed and built again is new to Defender, and\n"
+        "usually runs. Report the mistake at https://www.microsoft.com/wdsi/filesubmission, as\n"
+        "\"Incorrectly detected as malware/malicious\", so its models learn. Turning Defender off, or\n"
+        "leaving the cache out of its scans, isn't needed and makes the PC less safe.");
+}
+#endif
+
 }  // namespace
 
 int run_doctor() {
@@ -404,7 +509,6 @@ int run_doctor() {
             }
         }
     }
-    fs::remove_all(folder, ec);
 
     // PATH.
     section("setup");
@@ -433,6 +537,10 @@ int run_doctor() {
     if (bytes >= 1024ull * 1024 * 1024) std::snprintf(shown, sizeof shown, "%.1f GB", static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0));
     else std::snprintf(shown, sizeof shown, "%s", size);
     ok("build cache in " + cache.string() + ", " + size, "build cache", shown, cache.string());
+#ifdef _WIN32
+    check_defender(cache, folder);
+#endif
+    fs::remove_all(folder, ec);
 
     // Updates.
     if (!CALX_COMMIT[0]) {

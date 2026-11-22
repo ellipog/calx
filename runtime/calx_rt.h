@@ -102,6 +102,13 @@ CX_FN(cx_i64, cx_test_start, (int argc, char** argv));
  * does as it starts, since C can call them on threads of its own. */
 CX_FN(void, cx_export_enter, (const char* name));
 CX_FN(void, cx_foreign_threads, (void));
+#ifdef CX_STATICLIB
+/* In a static library, what each `@export_c` function calls its Calx function through instead:
+ * `run(args)`, with a panic in it caught and given to the host, rather than ending its process.
+ * 1 if `run` returned, and 0 if it panicked, or if an earlier panic has stopped the library, when
+ * `run` isn't called at all (CLX-407). */
+int cx_staticlib_call(const char* name, void (*run)(void*), void* args);
+#endif
 /* An `@export_c` function's C name is for the linker to find, outside a static library too: a
  * DLL's or a shared library's export when it's built as one (CX_CDYLIB), and otherwise just
  * visible where everything else is hidden. */
@@ -151,6 +158,10 @@ CX_FN(void, cx_print_newline, (void));
 CX_FN(cx_usize, cx_in_read, (cx_u8* p, cx_usize n));
 CX_FN(void, cx_out_write, (const cx_u8* p, cx_usize n));
 CX_FN(void, cx_out_flush, (void));
+/* For std.io's `Stdout` and `reader_gone`: a flush that gives 0, -1 once standard output's reader
+ * has gone, or errno, and whether it has gone, after which what's written there is dropped. */
+CX_FN(cx_i32, cx_out_flush_checked, (void));
+CX_FN(cx_u32, cx_out_gone, (void));
 
 /* `eprint` and `eprintln`: between these, the print functions write to standard error, which
  * isn't buffered. Output waiting for standard output goes first, so the two keep their order.
@@ -964,6 +975,11 @@ CX_FN(void, cx_digest_hmac_sha256, (const cx_u8* key, cx_usize key_len, const cx
 CX_FN(void, cx_digest_blake2b_start, (cx_u8* ctx, cx_usize outlen, const cx_u8* key, cx_usize keylen));
 CX_FN(void, cx_digest_blake2b_add, (cx_u8* ctx, const cx_u8* p, cx_usize n));
 CX_FN(cx_usize, cx_digest_blake2b_finish, (cx_u8* ctx, cx_u8* out));
+/* BLAKE2s, in calx_digest.c too (CLX-411): a digest of `outlen` bytes, 1 to 32, under a key of up
+ * to 32 bytes, in a context of CX_DIGEST_CTX bytes. */
+CX_FN(void, cx_digest_blake2s_start, (cx_u8* ctx, cx_usize outlen, const cx_u8* key, cx_usize keylen));
+CX_FN(void, cx_digest_blake2s_add, (cx_u8* ctx, const cx_u8* p, cx_usize n));
+CX_FN(cx_usize, cx_digest_blake2s_finish, (cx_u8* ctx, cx_u8* out));
 
 /* argon2d, argon2i and argon2id (type 0, 1 and 2), version 0x13, in calx_argon2.c (CLX-384).
  * Writes `outlen` bytes of tag, and returns false if the parameters are out of RFC 9106's range
@@ -979,6 +995,25 @@ CX_FN(void, cx_ed25519_public, (const cx_u8* seed, cx_u8* out));
 CX_FN(void, cx_ed25519_sign, (const cx_u8* seed, const cx_u8* pub, const cx_u8* msg, cx_usize len, cx_u8* out));
 CX_FN(cx_bool, cx_ed25519_check, (const cx_u8* pub));
 CX_FN(cx_bool, cx_ed25519_verify, (const cx_u8* pub, const cx_u8* msg, cx_usize len, const cx_u8* sig));
+
+/* X25519, RFC 7748, in calx_ed25519.c too (CLX-411). Keys and points are 32 bytes. `cx_x25519`
+ * writes the scalar times the point u, the shared secret, and says whether it isn't all zeros, as
+ * it is for a point of small order. `cx_x25519_public` writes the scalar times the base point 9. */
+CX_FN(cx_bool, cx_x25519, (const cx_u8* scalar, const cx_u8* u, cx_u8* out));
+CX_FN(void, cx_x25519_public, (const cx_u8* scalar, cx_u8* out));
+
+/* ECDSA over P-256 with SHA-256, ES256, in calx_p256.c (CLX-406). Numbers are 32 bytes,
+ * big-endian. A private key is its scalar d, which `cx_p256_scalar_check` says is from 1 to
+ * n - 1, a public key x then y, 64 bytes, which `cx_p256_check` says is a point on the curve, and
+ * a signature r then s, 64 bytes. `cx_p256_sign` takes RFC 6979's nonce, so it's the same each
+ * time for the same key and message. `cx_p256_decompress` gives the y with x and y's parity,
+ * false if no point has that x. */
+CX_FN(cx_bool, cx_p256_scalar_check, (const cx_u8* d));
+CX_FN(void, cx_p256_public, (const cx_u8* d, cx_u8* out));
+CX_FN(cx_bool, cx_p256_check, (const cx_u8* xy));
+CX_FN(cx_bool, cx_p256_decompress, (const cx_u8* x, cx_bool odd, cx_u8* y_out));
+CX_FN(void, cx_p256_sign, (const cx_u8* d, const cx_u8* msg, cx_usize len, cx_u8* out));
+CX_FN(cx_bool, cx_p256_verify, (const cx_u8* xy, const cx_u8* msg, cx_usize len, const cx_u8* sig));
 
 /* Authenticated encryption, in calx_aead.c (CLX-397). ChaCha20-Poly1305 takes a 32-byte key and a
  * 12-byte nonce, or a 24-byte one for XChaCha20-Poly1305. AES-GCM's context, CX_GCM_CTX bytes with
@@ -1054,6 +1089,18 @@ CX_FN(cx_bool, cx_net_drain, (cx_u64 h, cx_i64 timeout_ms));
 CX_FN(cx_u32, cx_net_peer, (cx_u64 h, cx_u32 id, cx_u8* out));
 CX_FN(cx_u32, cx_net_error_kind, (void));
 CX_FN(cx_i32, cx_net_error_code, (void));
+/* UDP sockets in the same `Net` (CLX-412), the machine's interfaces and its name. */
+CX_FN(cx_u32, cx_net_udp_open, (cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port, cx_bool reuse));
+CX_FN(cx_u16, cx_net_udp_port, (cx_u64 h, cx_u32 id));
+CX_FN(cx_i32, cx_net_udp_send, (cx_u64 h, cx_u32 id, const cx_u8* p, cx_usize len, const cx_u8* to, cx_u32 family));
+CX_FN(cx_i64, cx_net_udp_size, (cx_u64 h, cx_u32 id));
+CX_FN(cx_u32, cx_net_udp_take, (cx_u64 h, cx_u32 id, cx_u8* to, cx_u8* from));
+CX_FN(cx_bool, cx_net_udp_join, (cx_u64 h, cx_u32 id, const cx_u8* group, cx_u32 family, cx_u32 index, cx_bool leave));
+CX_FN(cx_bool, cx_net_udp_option, (cx_u64 h, cx_u32 id, cx_u32 which, cx_u32 value));
+CX_FN(void, cx_net_udp_close, (cx_u64 h, cx_u32 id));
+CX_FN(cx_i64, cx_net_interfaces, (void));
+CX_FN(void, cx_net_interfaces_copy, (cx_u8* to));
+CX_FN(cx_usize, cx_net_host_name, (cx_u8* to, cx_usize cap));
 
 /* HTTP and HTTPS requests, in calx_http.c (D118): each on a thread of its own on Windows, and
  * together on one on Linux and macOS. A request is a handle that's never 0. `version` is the HTTP
@@ -1250,6 +1297,16 @@ CX_FN(cx_u64, cx_zstd_xxh64, (const cx_u8* p, cx_usize n, cx_u64 seed));
  * bytes (CLX-186). */
 CX_FN(cx_usize, cx_zstd_dict_params_size, (void));
 CX_FN(cx_i32, cx_zstd_dict_params, (const cx_u8* d, cx_usize n, cx_u8* out));
+/* A frame a block at a time, for std.zstd's Decompressor (CLX-413): `cx_zstd_block` decodes the
+ * block at in[at..n) onto out[*pos..), matching back through out[start..*pos), and
+ * `cx_zstd_block_end` checks the frame's size and checksum after its last. XXH64 a piece at a time,
+ * in a state of `cx_zstd_xxh_size()` bytes, for its Compressor's checksum. */
+CX_FN(cx_i32, cx_zstd_block, (cx_u8* ctx, const cx_u8* in, cx_usize n, cx_usize at, cx_u8* out, cx_usize start, cx_usize* pos, cx_usize cap, cx_u64* info));
+CX_FN(cx_i32, cx_zstd_block_end, (cx_u8* ctx, const cx_u8* in, cx_usize n, cx_usize at, cx_u64* info));
+CX_FN(cx_usize, cx_zstd_xxh_size, (void));
+CX_FN(void, cx_zstd_xxh_start, (cx_u8* state));
+CX_FN(void, cx_zstd_xxh_add, (cx_u8* state, const cx_u8* p, cx_usize n));
+CX_FN(cx_u64, cx_zstd_xxh_end, (const cx_u8* state));
 /* Zstandard compression, in calx_zstdenc.c, behind std.zstd's `compress` (CLX-183).
  * `cx_zse_compress` writes the frame for in[0..n) at `level` into out, which has
  * `cx_zse_bound(n)` bytes, and gives its size; flags 1 asks for a checksum, which std.zstd
@@ -1262,6 +1319,12 @@ CX_FN(cx_u64, cx_zse_compress, (const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 le
 CX_FN(cx_u64, cx_zse_compress_dict, (const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags, const cx_u8* content, cx_u64 content_n,
                                      cx_u64 dict_n, cx_u32 dict_id, const cx_u8* params, cx_u32 has_params, cx_u64 key));
 CX_FN(cx_u64, cx_zse_dict_key, (void));
+/* A frame of unknown size a job at a time, for std.zstd's Compressor (CLX-413):
+ * `cx_zse_stream_params` gives a level's job size, reach and window log, and `cx_zse_stream_job`
+ * compresses text[pre..pre + n) after text[0..pre) as the frame's next blocks into out, which has
+ * `cx_zse_bound(n)` bytes, and gives their size. */
+CX_FN(void, cx_zse_stream_params, (cx_i32 level, cx_u64* info));
+CX_FN(cx_u64, cx_zse_stream_job, (cx_i32 level, const cx_u8* text, cx_u64 pre, cx_u64 n, cx_u32 first, cx_u32 last, cx_u8* out));
 /* Trains a dictionary of at most cap bytes from count samples laid one after another, sizes[i]
  * bytes each, as libzstd's ZDICT_trainFromBuffer does (CLX-191): writes it into out and gives its
  * size, or 0 for too few samples or bytes, or a cap under 256. */
@@ -1412,6 +1475,9 @@ CX_FN(cx_u32, cx_signal_wait, (cx_i64 timeout_ms));
 CX_FN(cx_bool, cx_signal_raise, (cx_u32 kind));
 CX_FN(cx_bool, cx_signal_service, (void));
 CX_FN(void, cx_thread_sleep, (cx_u64 ns));
+/* Whether the static library this thread works for has stopped since the thread started: by a
+ * panic, or by its host's `calx_shutdown`. Always false in a program (CLX-407). */
+CX_FN(cx_bool, cx_thread_stopping, (void));
 
 /* Hashing, for `Map` and `Set` (D94). The same value hashes the same on every platform and in
  * every run, so a table's layout, and the order a loop goes over it, depend only on what was

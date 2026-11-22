@@ -50,10 +50,21 @@ const ENTITLEMENTS: str = #"
     "#
 
 // What a command printed, standard output and error together, or with how it ended if it failed.
+// Each is stopped after a minute, and says so, so a step that hangs on a slow runner shows which it
+// was, before the test runner's own limit stops the whole test and what it printed with it (CLX-424).
 fn run(exe: String, args: List<String>, dir: String) -> String {
-    match Command.new(exe).args(args).dir(dir).output() {
+    return run_for(exe, args, dir, 60000)
+}
+
+// The same, stopped once it has run `ms` milliseconds.
+fn run_for(exe: String, args: List<String>, dir: String, ms: u64) -> String {
+    let what = "{exe} {args.join(" ")}"
+    match Command.new(exe).args(args).dir(dir).timeout(ms).output() {
         ok(o) => {
             let text = "{o.text()}{o.error_text()}".trim_end()
+            if o.status.timed_out {
+                return "{text} [{what} still running after {ms / 1000} s, so it was stopped]"
+            }
             return if o.status.success() { text } else { "{text} [{o.status}]" }
         },
         err(e) => return "can't run {exe}: {e}",
@@ -74,7 +85,8 @@ fn main() {
             words.push("--release")
         }
         words.extend(["core.calx", "-o", xcf.copy()])
-        let built = run(calx.copy(), words, dir.copy())
+        // It builds the runtime twice, so it has three minutes.
+        let built = run_for(calx.copy(), words, dir.copy(), 180000)
         if not built.is_empty() {
             println("building the {mode} XCFramework: {built}")
             continue
@@ -110,19 +122,44 @@ fn main() {
             println("building the {mode} app: {swift} {signed}")
             continue
         }
-        let installed = run("xcrun", ["simctl", "install", sim.copy(), app.copy()], dir.copy())
-        if not installed.is_empty() {
-            println("installing the {mode} app: {installed}")
-            continue
-        }
-        // What the app printed, without the line simctl adds with its process's id.
-        let said = run("xcrun", ["simctl", "launch", "--console-pty", sim.copy(), bundle.copy()], dir.copy())
-        for line in said.lines() {
-            if not line.starts_with("{bundle}: ") {
-                println(line)
+        // Installed and launched, and what the app printed, without the line simctl adds with its
+        // process's id. An app still running after 45 seconds has hung: what it printed by then
+        // shows where, and it's stopped, so it doesn't spin on through the rest of the tests.
+        //
+        // On a CI runner, the first app a run puts on a simulator that has just booted can hang
+        // while installing, or launch and print nothing, while the one after it works (CLX-424).
+        // So an install that fails or hangs past 40 seconds, or a launch that prints nothing, is
+        // tried again from the install, three times in all, and if none works, what each try got
+        // is said.
+        var printed: List<String> = []
+        var tries: List<String> = []
+        for _ in 0..3 {
+            let installed = run_for("xcrun", ["simctl", "install", sim.copy(), app.copy()], dir.copy(), 40000)
+            if installed.is_empty() {
+                let said = run_for("xcrun", ["simctl", "launch", "--console-pty", sim.copy(), bundle.copy()], dir.copy(), 45000)
+                for line in said.lines() {
+                    if not line.starts_with("{bundle}: ") {
+                        printed.push(line.copy())
+                    }
+                }
+                _ = run("xcrun", ["simctl", "terminate", sim.copy(), bundle.copy()], dir.copy())
+                if printed.is_empty() {
+                    tries.push("launching printed {if said.is_empty() { String("nothing") } else { said }}")
+                }
+            } else {
+                tries.push("installing: {installed}")
+            }
+            _ = run("xcrun", ["simctl", "uninstall", sim.copy(), bundle.copy()], dir.copy())
+            if not printed.is_empty() {
+                break
             }
         }
-        _ = run("xcrun", ["simctl", "uninstall", sim.copy(), bundle], dir.copy())
+        if printed.is_empty() {
+            println("the {mode} app didn't run: {tries.join("; ")}")
+        }
+        for line in printed {
+            println(line)
+        }
     }
     if exists(join(dir.copy(), "out")) {
         remove_dir_all(join(dir, "out"))!

@@ -494,12 +494,59 @@ private:
     }
 
     std::string export_c_definition(const Item* f) const {
+        bool unit = f->result_type->kind == TypeKind::unit;
+        if (opt_.staticlib) return export_c_caught(f, unit);
         std::string call = std::string(f->c_name) + "(";
         for (std::size_t i = 0; i < f->params.size(); i++) call += (i ? ", cx_a" : "cx_a") + std::to_string(i);
         call += ")";
-        bool unit = f->result_type->kind == TypeKind::unit;
         return export_c_head(f) + " {\n    cx_export_enter(" + c_string_literal(f->export_name) + ");\n    " +
                (unit ? call + ";\n" : "return " + call + ";\n") + "}\n";
+    }
+
+    // CLX-407: in a static library, the Calx function runs inside `cx_staticlib_call`, which
+    // catches a panic in it and gives 0, so the call returns to C with `on_panic`'s value, or the
+    // result type's zero, rather than ending the host's process. The arguments, and the result, go
+    // through a struct of the call's own, since `cx_staticlib_call` takes one pointer. Its name
+    // mustn't start with `cx_lib_`: C that names one of those opens libraries (D123), and the
+    // build links every part of the runtime for it.
+    std::string export_c_caught(const Item* f, bool unit) const {
+        std::string n(f->export_name);
+        std::string args = "cx_xa_" + n, thunk = "cx_xt_" + n;
+        std::string fields, init, call = std::string(f->c_name) + "(";
+        for (std::size_t i = 0; i < f->params.size(); i++) {
+            std::string a = "a" + std::to_string(i);
+            fields += "    " + ctype(f->params[i].local->type) + " " + a + ";\n";
+            init += (i ? ", ." : ".") + a + " = cx_" + a;
+            call += (i ? ", cx_x->" : "cx_x->") + a;
+        }
+        call += ")";
+        if (!unit) fields += "    " + ctype(f->result_type) + " r;\n";
+        std::string s;
+        if (fields.empty()) {
+            s += "static void " + thunk + "(void* cx_p) {\n    (void)cx_p;\n    " + call + ";\n}\n";
+        } else {
+            s += "typedef struct {\n" + fields + "} " + args + ";\n";
+            s += "static void " + thunk + "(void* cx_p) {\n    " + args + "* cx_x = (" + args + "*)cx_p;\n    " +
+                 (unit ? call : "cx_x->r = " + call) + ";\n}\n";
+        }
+        s += export_c_head(f) + " {\n";
+        s += fields.empty() ? "    void* cx_x = 0;\n" : "    " + args + " cx_x = {" + init + "};\n";
+        std::string failed = unit ? "return;" : "return " + export_c_on_panic(f) + ";";
+        s += "    if (!cx_staticlib_call(" + c_string_literal(f->export_name) + ", " + thunk + ", " + (fields.empty() ? "cx_x" : "&cx_x") +
+             ")) " + failed + "\n";
+        if (!unit) s += "    return cx_x.r;\n";
+        return s + "}\n";
+    }
+
+    // What an `@export_c` function gives C when its library panics inside it: `on_panic`'s value,
+    // or its result type's zero.
+    std::string export_c_on_panic(const Item* f) const {
+        std::string t = ctype(f->result_type);
+        const Expr* e = f->export_on_panic;
+        if (!e || !e->has_bits) return "(" + t + ")0";
+        char bits[32];
+        std::snprintf(bits, sizeof bits, "0x%llxull", static_cast<unsigned long long>(e->const_bits));
+        return "(" + t + ")" + bits;
     }
 
     // Written functions are `static` unless another file calls them, which lets clang inline and
@@ -7654,18 +7701,42 @@ std::string c_header(const Program& program, const Names& names, const std::stri
         " * The host calls calx_init() before anything else in the library, and calx_shutdown() after the\n"
         " * last call, once the threads the library started have stopped. In between, any thread can call\n"
         " * these functions, one the library started or one it didn't. A call before calx_init() or after\n"
-        " * calx_shutdown() ends the process, saying so, as a panic in the library does.\n"
+        " * calx_shutdown() ends the process, saying so.\n"
+        " *\n"
+        " * A panic in the library doesn't end the process: the call it happened in returns, with the value\n"
+        " * its `on_panic` gives or else 0, false or NULL, and the host hears of it through calx_on_panic()\n"
+        " * and calx_panicked(). The library has stopped then, and every later call into it returns the\n"
+        " * same way at once, until calx_shutdown() and calx_init() start it again.\n"
         " *\n"
         " * Link it on Windows with Visual Studio's linker, as Rust's MSVC target does, and the DLL C\n"
         " * runtime (/MD); it names the system libraries it needs itself. On Linux, add -lm -lpthread -ldl;\n"
         " * on macOS and iOS, nothing more. */\n"
         "#ifndef " + guard + "\n#define " + guard + "\n\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdint.h>\n\n"
         "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n"
-        "/* Starts the library's runtime. Calling it again while it runs does nothing. */\n"
+        "/* Starts the library's runtime. Calling it again while it runs does nothing; after calx_shutdown(),\n"
+        " * it starts it again. */\n"
         "void calx_init(void);\n\n"
-        "/* Ends it: what the library printed is written out. A debug build of the library then checks\n"
-        " * that everything it allocated was freed, and returns 102 if not, having said so; otherwise 0. */\n"
-        "int calx_shutdown(void);\n";
+        "/* Ends it: what the library printed is written out, and its threads still waiting on a queue are\n"
+        " * woken and told it has stopped. It returns 101 if a panic had stopped the library. Otherwise a\n"
+        " * debug build of the library checks that everything it allocated was freed, and returns 102 if\n"
+        " * not, having said so; and it returns 0. */\n"
+        "int calx_shutdown(void);\n\n"
+        "/* A panic in the library: what went wrong, where, the Calx calls that led there, innermost first,\n"
+        " * a line each, or \"\" if they can't be read, and the @export_c function it happened in, or NULL\n"
+        " * for one on a thread of the library's own. */\n"
+        "typedef struct calx_panic {\n"
+        "    const char* message;  /* \"index 3 is out of bounds for length 2\" */\n"
+        "    const char* location; /* \"core.calx:42:13\", or the part of the runtime, such as \"std.thread\" */\n"
+        "    const char* trace;\n"
+        "    const char* function;\n"
+        "} calx_panic;\n\n"
+        "/* Has `hook` called with `ctx` for each panic in the library from now on, on the thread that\n"
+        " * panicked, before the call it happened in returns; the panic is only valid during the call.\n"
+        " * Without a hook, or after calx_on_panic(NULL, NULL), a panic is written to standard error, as\n"
+        " * a Calx program's is. It can be called before calx_init(), and lasts until it's called again. */\n"
+        "void calx_on_panic(void (*hook)(void* ctx, const calx_panic* panic), void* ctx);\n\n"
+        "/* The panic that stopped the library, or NULL if none has: valid until the next calx_init(). */\n"
+        "const calx_panic* calx_panicked(void);\n";
     for (const Item* f : program.c_exports) {
         s += "\n";
         if (!f->doc.empty()) {

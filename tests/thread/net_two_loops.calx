@@ -87,6 +87,7 @@ impl Task for Burst {
                         }
                     }
                     Woken => {}
+                    Datagram(_) => {}
                 }
             }
         }

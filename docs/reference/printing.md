@@ -98,6 +98,8 @@ The Rust is Rust 1.91's `write!(out, "{:.3},", v)` and the same for the rest, in
 
 Standard output is buffered and written at exit, or when a panic starts. It's the same bytes on every platform: `\n` is never turned into `\r\n`.
 
+Printing never ends the program. Once standard output's reader has gone, as a pipe's has once `head` has read its lines and ended, what `print` and `println` write is dropped, quietly, and the program goes on and ends with its own status. That's the same on every system: a Calx program ignores SIGPIPE from the start, as Python and Rust do, so on Linux and macOS a write to a closed pipe fails, as it always does on Windows, rather than ending the program. A program that prints without end, as a generator piped into `head` does, stops when [`std.io.reader_gone()`](../std/io.md#when-the-reader-has-gone) says so, or writes through `std.io`'s `Stdout`, whose `write` and `flush` fail then, as Python's `print` raises `BrokenPipeError`. What `eprint` and `eprintln` can't write is dropped the same way.
+
 Standard error isn't buffered. `eprint` and `eprintln` first write out whatever standard output has waiting, so when both go to one terminal they appear in the order they were written. A program whose standard output is a protocol, such as the rig's adapter, logs with them. [`std.io`](../std/io.md) reads and writes bytes.
 
 ## Panics

@@ -1,9 +1,22 @@
 /// Zstandard files, decompressed as Python's `compression.zstd.decompress` reads them (CLX-181):
 /// release archives such as `.tar.zst`, and whatever `zstd` or Python wrote. And compressed into
-/// frames that both read, at `zstd`'s levels (CLX-183).
+/// frames that both read, at `zstd`'s levels (CLX-183). And both a piece at a time, in as much
+/// memory as a level's window takes, for files bigger than memory and bytes to and from a socket
+/// (CLX-413).
 module std.zstd
 
+import std.io
+
 extern "C" {
+    fn cx_zstd_block(ctx: *u8, input: *const u8, n: usize, at: usize, out: *u8, start: usize, pos: *usize, cap: usize, info: *u64) -> i32
+    fn cx_zstd_block_end(ctx: *u8, input: *const u8, n: usize, at: usize, info: *u64) -> i32
+    fn cx_zstd_xxh_size() -> usize
+    fn cx_zstd_xxh_start(state: *u8)
+    fn cx_zstd_xxh_add(state: *u8, p: *const u8, n: usize)
+    fn cx_zstd_xxh_end(state: *const u8) -> u64
+    fn cx_zse_stream_params(level: i32, info: *u64)
+    fn cx_zse_stream_job(level: i32, text: *const u8, pre: u64, n: u64, first: u32, last: u32, out: *u8) -> u64
+    fn memmove(to: *u8, from: *const u8, n: usize) -> *u8
     fn cx_zstd_ctx_size() -> usize
     fn cx_zstd_ent_size() -> usize
     fn cx_zstd_init(ctx: *u8)
@@ -430,4 +443,549 @@ fn error_for(code: i32) -> Error {
         return errors[usize.wrap(-code - 1)]
     }
     return Error.Corrupt
+}
+
+// --- a piece at a time -------------------------------------------------------------------------
+
+// The runtime's codes for a block that isn't all there yet, and for room it needs.
+const ROOM: i32 = 2
+const TRUNCATED: i32 = -7
+// Where a Decompressor is: before a frame's header, in its blocks, at its checksum, or in a
+// skippable frame.
+const HEAD: u8 = 0
+const BLOCKS: u8 = 1
+const CHECK: u8 = 2
+const SKIPPING: u8 = 3
+// How much input a Reader reads at a time.
+const CHUNK: usize = 131072
+
+/// Text compressed as it comes, a piece at a time, into one Zstandard frame, as Python's
+/// `ZstdCompressor` and zstandard's `compressobj` take it: a file bigger than memory, or bytes
+/// for a pipe or a socket. The frame has no size, which isn't known until the end, so it says
+/// what window it needs instead, as `zstd` writes one from a pipe. Whatever reads Zstandard reads
+/// it, as `decompress` does.
+///
+/// It compresses the text in jobs, as `compress` does a big input's, each matching into the end of
+/// the text before it, so it holds one job's text at a time and that end: 2 MiB at level 1, 8.25
+/// MiB at 3, 18 MiB at 9, 40 MiB at 19 and 640 MiB at 22, whose window alone is 128 MiB, and the
+/// level's match tables besides. A job goes as soon as its text is in, on one thread.
+pub struct Compressor {
+    level: i32
+    checksum: bool
+    // How much text a job takes, and how far back its matches reach before it, and the window's
+    // log, which the frame's header gives.
+    each: usize
+    reach: usize
+    wlog: u32
+    // text[..pre] is the end of what's been compressed, which the next job's matches reach into,
+    // and text[pre..] what hasn't been.
+    text: List<u8>
+    pre: usize = 0
+    started: bool = false
+    jobs: u64 = 0
+    // The checksum so far, if it has one.
+    hash: List<u8>
+}
+
+impl Compressor {
+    /// A compressor at `level`, as `compress` takes it, which ends the frame with a checksum if
+    /// `checksum` is set. Panics for a level outside -131072 to 22, as `compress` does.
+    @track_caller
+    pub fn new(level: i32 = 3, checksum: bool = false) -> Compressor {
+        if level < -131072 or level > 22 {
+            panic("the level {level} isn't one: levels go from -131072 to 22")
+        }
+        var info: List<u64> = [0; 3]
+        unsafe {
+            cx_zse_stream_params(level, info.as_mut_ptr())
+        }
+        var hash: List<u8> = []
+        if checksum {
+            let n = unsafe { cx_zstd_xxh_size() }
+            hash = [0; n]
+            unsafe {
+                cx_zstd_xxh_start(hash.as_mut_ptr())
+            }
+        }
+        return Compressor { level: level, checksum: checksum, each: usize.wrap(info[0]), reach: usize.wrap(info[1]), wlog: u32.wrap(info[2]), text: [], hash: hash }
+    }
+
+    /// Takes the next piece of text, and gives what's compressed so far that it hasn't given: the
+    /// frame's header the first time, then a job's blocks each time one fills.
+    pub fn add(mut self, bytes: List<u8>) -> List<u8> {
+        var out = List<u8>()
+        self.add_into(bytes, 0, bytes.len(), mut out)
+        return out
+    }
+
+    /// Takes bytes[from..to] as the next piece, as `add` does, and puts what it gives onto the end
+    /// of `out`. Panics unless the range is in `bytes`.
+    @track_caller
+    pub fn add_into(mut self, bytes: List<u8>, from: usize, to: usize, out: mut List<u8>) {
+        if from > to or to > bytes.len() {
+            panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
+        }
+        self.start(mut out)
+        if self.checksum and to > from {
+            unsafe {
+                cx_zstd_xxh_add(self.hash.as_mut_ptr(), bytes.as_ptr().add(from), to - from)
+            }
+        }
+        if to > from and self.text.capacity() < self.reach + self.each {
+            self.text.reserve(self.reach + self.each - self.text.len())
+        }
+        var at = from
+        while at < to {
+            let room = self.pre + self.each - self.text.len()
+            let k = if room < to - at { room } else { to - at }
+            self.text.extend(bytes[at..at + k])
+            at += k
+            if self.text.len() - self.pre == self.each {
+                self.job(false, mut out)
+            }
+        }
+    }
+
+    /// Compresses the text it holds, and gives it, so that what it has given so far decompresses
+    /// to all the text it was given, as zstd's `ZSTD_e_flush` and Python's
+    /// `flush(ZstdCompressor.FLUSH_BLOCK)` do: for a message over a socket that the other end
+    /// should read now. The frame goes on, and a frame flushed often compresses less.
+    pub fn flush(mut self) -> List<u8> {
+        var out = List<u8>()
+        self.flush_into(mut out)
+        return out
+    }
+
+    /// Flushes as `flush` does, onto the end of `out`.
+    pub fn flush_into(mut self, out: mut List<u8>) {
+        self.start(mut out)
+        if self.text.len() > self.pre {
+            self.job(false, mut out)
+        }
+    }
+
+    /// Compresses the rest of the text, and gives it with the end of the frame, and its checksum
+    /// if it has one.
+    pub fn finish(own self) -> List<u8> {
+        var out = List<u8>()
+        self.finish_into(mut out)
+        return out
+    }
+
+    /// Ends the frame as `finish` does, onto the end of `out`.
+    pub fn finish_into(own self, out: mut List<u8>) {
+        var c = self
+        c.start(mut out)
+        c.job(true, mut out)
+        if c.checksum {
+            // The low 32 bits of the text's XXH64.
+            let h = unsafe { cx_zstd_xxh_end(c.hash.as_ptr()) }
+            for k in 0u64..4 {
+                out.push(u8.wrap(h >> (8 * k)))
+            }
+        }
+    }
+
+    // The frame's header, the first time: no size, a checksum or none, and the window.
+    fn start(mut self, out: mut List<u8>) {
+        if self.started {
+            return
+        }
+        self.started = true
+        out.extend([0x28u8, 0xB5, 0x2F, 0xFD])
+        out.push(if self.checksum { 4u8 } else { 0u8 })
+        out.push(u8.wrap((self.wlog - 10) << 3))
+    }
+
+    // Compresses text[pre..] as the frame's next blocks, the last if `last` is set, and keeps the
+    // end of the text for the next job's matches to reach into.
+    fn job(mut self, last: bool, out: mut List<u8>) {
+        let n = self.text.len() - self.pre
+        let room = usize.wrap(unsafe { cx_zse_bound(u64(n)) })
+        out.reserve(room)
+        unsafe {
+            let at = out.len()
+            let made = cx_zse_stream_job(self.level, self.text.as_ptr(), u64(self.pre), u64(n), if self.jobs == 0 { 1u32 } else { 0u32 }, if last { 1u32 } else { 0u32 }, out.as_mut_ptr().add(at))
+            out.set_len(at + usize.wrap(made))
+        }
+        self.jobs += 1
+        let keep = if self.reach < self.text.len() { self.reach } else { self.text.len() }
+        let drop = self.text.len() - keep
+        if drop > 0 {
+            unsafe {
+                _ = memmove(self.text.as_mut_ptr(), self.text.as_ptr().add(drop), keep)
+                self.text.set_len(keep)
+            }
+        }
+        self.pre = keep
+    }
+}
+
+/// Zstandard data decompressed as it comes, a piece at a time, as `decompress` does with all of it
+/// at once: a file bigger than memory read a part at a time, or bytes from a pipe or a socket, as
+/// Python's `ZstdDecompressor` and zstandard's `decompressobj` take them. Every frame in the data is
+/// read, one after another, as `decompress` reads them, and skippable frames give nothing.
+///
+/// It holds the input it hasn't used, at most a block's, and what it has decompressed that it
+/// hasn't given out, and as much of the frame as its window says, which matches reach back into:
+/// a frame that `zstd` or `Compressor` made at level 3 has a window of 2 MiB, and a frame may ask
+/// for up to 128 MiB, as Python allows. Frames with a dictionary aren't read here.
+pub struct Decompressor {
+    limit: u64
+    // What it has decompressed, and whether any frame has started: nothing at all is a frame cut
+    // short, as `decompress` says.
+    made: u64 = 0
+    any: bool = false
+    // The decoder, and the tables a frame without a dictionary starts with.
+    ctx: List<u8>
+    tables: List<u8>
+    // The input, which it has used up to `skip`, and where it is in the data: a skippable frame's
+    // bytes still to skip, or the frame's window.
+    input: List<u8>
+    skip: usize = 0
+    part: u8 = HEAD
+    skip_left: u64 = 0
+    keep: usize = 0
+    // What the frame has made: window[start..] is the frame's, and window[given..] hasn't gone out.
+    window: List<u8>
+    start: usize = 0
+    given: usize = 0
+    // Whether the last call stopped for want of input, and the error it failed with.
+    hungry: bool = true
+    failed: Error? = none
+}
+
+impl Decompressor {
+    /// A decompressor that fails with `TooLong` once more than `limit` bytes have come out, as
+    /// `decompress` does.
+    pub fn new(limit: u64 = u64.MAX) -> Decompressor {
+        let size = unsafe { cx_zstd_ctx_size() }
+        var ctx = List<u8>()
+        ctx.reserve(size)
+        unsafe {
+            ctx.set_len(size)
+            cx_zstd_init(ctx.as_mut_ptr())
+        }
+        return Decompressor { limit: limit, ctx: ctx, tables: Dictionary.empty().tables, input: [], window: [] }
+    }
+
+    /// Takes the next piece, and gives what it and the pieces before decompress to that hasn't
+    /// been given yet, at most `most` bytes. A piece can be any size, even empty. Fails as
+    /// `decompress` fails, but for `Truncated`, which only `finish` can tell, and fails the same
+    /// way again after that.
+    pub fn add(mut self, bytes: List<u8>, most: u64 = u64.MAX) -> List<u8> ! Error {
+        var out = List<u8>()
+        try self.add_into(bytes, 0, bytes.len(), most, mut out)
+        return out
+    }
+
+    /// Takes bytes[from..to] as the next piece, as `add` does, and puts what it gives onto the end
+    /// of `out`, which can be kept from one call to the next. Panics unless the range is in
+    /// `bytes`.
+    @track_caller
+    pub fn add_into(mut self, bytes: List<u8>, from: usize, to: usize, most: u64, out: mut List<u8>) ! Error {
+        if from > to or to > bytes.len() {
+            panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
+        }
+        self.feed(bytes, from, to)
+        try self.run(most)
+        _ = self.take(mut out, most)
+    }
+
+    /// Whether the last `add` gave all it could from what it has, so it wants the next piece.
+    /// It's false when `add` stopped at `most` bytes: then `add` with no bytes gives more.
+    pub fn needs_input(self) -> bool {
+        return self.hungry
+    }
+
+    /// Ends the data: gives all the rest of what it decompresses to, and fails with `Truncated` if
+    /// the data ended inside a frame, or had none, as `decompress` would.
+    pub fn finish(own self) -> List<u8> ! Error {
+        var out = List<u8>()
+        try self.finish_into(mut out)
+        return out
+    }
+
+    /// Ends the data as `finish` does, putting the rest onto the end of `out`. On an error, `out`
+    /// is as it was.
+    pub fn finish_into(own self, out: mut List<u8>) ! Error {
+        var d = self
+        try d.run(u64.MAX)
+        try d.ended()
+        _ = d.take(mut out, u64.MAX)
+    }
+
+    // Fails with Truncated unless the data has ended where a frame did.
+    fn ended(self) ! Error {
+        if let e = self.failed {
+            fail e
+        }
+        if not self.any or self.part != HEAD or self.skip < self.input.len() {
+            fail Error.Truncated
+        }
+    }
+
+    // Adds bytes[from..to] to the input, after what it hasn't used.
+    fn feed(mut self, bytes: List<u8>, from: usize, to: usize) {
+        if self.skip > 0 and (self.skip == self.input.len() or self.skip >= 65536) {
+            let left = self.input.len() - self.skip
+            unsafe {
+                if left > 0 {
+                    _ = memmove(self.input.as_mut_ptr(), self.input.as_ptr().add(self.skip), left)
+                }
+                self.input.set_len(left)
+            }
+            self.skip = 0
+        }
+        self.input.extend(bytes[from..to])
+    }
+
+    // Moves up to `most` bytes that haven't gone out onto the end of `out`, and says how many.
+    fn take(mut self, out: mut List<u8>, most: u64) -> usize {
+        let ready = self.window.len() - self.given
+        let n = if u64(ready) > most { usize.wrap(most) } else { ready }
+        out.extend(self.window[self.given..self.given + n])
+        self.given += n
+        return n
+    }
+
+    // Decompresses what it can until `most` bytes are waiting to go out, failing as `run_on` does,
+    // and the same way after that.
+    fn run(mut self, most: u64) ! Error {
+        if let e = self.failed {
+            fail e
+        }
+        match self.run_on(most) {
+            ok => {},
+            err(e) => {
+                self.failed = some(e)
+                fail e
+            },
+        }
+    }
+
+    fn run_on(mut self, most: u64) ! Error {
+        var info: List<u64> = [0; 4]
+        var pos: List<usize> = [0]
+        loop {
+            if u64(self.window.len() - self.given) >= most {
+                self.hungry = false
+                return
+            }
+            let left = self.input.len() - self.skip
+            if self.part == SKIPPING {
+                let k = if u64(left) < self.skip_left { left } else { usize.wrap(self.skip_left) }
+                self.skip += k
+                self.skip_left -= u64(k)
+                if self.skip_left > 0 {
+                    self.hungry = true
+                    return
+                }
+                self.part = HEAD
+                continue
+            }
+            if self.part == HEAD {
+                if left == 0 {
+                    self.hungry = true
+                    return
+                }
+                let at = self.skip
+                if left >= 4 and self.input[at] & 0xF0 == 0x50 and self.input[at + 1] == 0x2A and self.input[at + 2] == 0x4D and self.input[at + 3] == 0x18 {
+                    if left < 8 {
+                        self.hungry = true
+                        return
+                    }
+                    self.skip_left = u64(self.input[at + 4]) | (u64(self.input[at + 5]) << 8) | (u64(self.input[at + 6]) << 16) | (u64(self.input[at + 7]) << 24)
+                    self.skip += 8
+                    self.part = SKIPPING
+                    self.any = true
+                    continue
+                }
+                let r = unsafe { cx_zstd_frame(self.ctx.as_mut_ptr(), self.input.as_ptr(), self.input.len(), at, self.tables.as_ptr(), 0, WINDOW_MAX, info.as_mut_ptr()) }
+                if r == TRUNCATED {
+                    self.hungry = true
+                    return
+                }
+                if r != 0 {
+                    fail error_for(r)
+                }
+                self.any = true
+                // A frame's window is at most WINDOW_MAX, but for a small one that's all here.
+                self.keep = usize.wrap(if info[1] < WINDOW_MAX { info[1] } else { WINDOW_MAX })
+                self.skip = usize.wrap(info[2])
+                self.part = BLOCKS
+                // Matches can't reach into the frames before, so nothing before this one is kept
+                // but what hasn't gone out.
+                self.start = self.window.len()
+                continue
+            }
+            if self.part == CHECK {
+                let r = unsafe { cx_zstd_block_end(self.ctx.as_mut_ptr(), self.input.as_ptr(), self.input.len(), self.skip, info.as_mut_ptr()) }
+                if r == TRUNCATED {
+                    self.hungry = true
+                    return
+                }
+                if r != 0 {
+                    fail error_for(r)
+                }
+                self.skip = usize.wrap(info[2])
+                self.part = HEAD
+                continue
+            }
+            pos[0] = self.window.len()
+            let r = unsafe { cx_zstd_block(self.ctx.as_mut_ptr(), self.input.as_ptr(), self.input.len(), self.skip, self.window.as_mut_ptr(), self.start, pos.as_mut_ptr(), self.window.capacity(), info.as_mut_ptr()) }
+            if r == ROOM {
+                self.make_room(usize.wrap(info[1]))
+                continue
+            }
+            if r == TRUNCATED {
+                self.hungry = true
+                return
+            }
+            if r != 0 {
+                fail error_for(r)
+            }
+            let grew = pos[0] - self.window.len()
+            unsafe {
+                self.window.set_len(pos[0])
+            }
+            self.made += u64(grew)
+            if self.made > self.limit {
+                fail Error.TooLong
+            }
+            self.skip = usize.wrap(info[2])
+            if info[0] == 1 {
+                self.part = CHECK
+            }
+        }
+    }
+
+    // Makes room for `need` more bytes in the window, first dropping what's gone out and what the
+    // frame's matches can't reach any more, the frame's window back from its end, if that's at
+    // least half of it, so that each byte moves at most once or so.
+    fn make_room(mut self, need: usize) {
+        let len = self.window.len()
+        var reach_from = if len > self.keep { len - self.keep } else { 0 }
+        if reach_from < self.start {
+            reach_from = self.start
+        }
+        let drop = if reach_from < self.given { reach_from } else { self.given }
+        if drop > 0 and drop * 2 >= len {
+            unsafe {
+                _ = memmove(self.window.as_mut_ptr(), self.window.as_ptr().add(drop), len - drop)
+                self.window.set_len(len - drop)
+            }
+            self.given -= drop
+            self.start = if self.start > drop { self.start - drop } else { 0 }
+        }
+        self.window.reserve(need)
+    }
+}
+
+/// A `Writer` that compresses what's written to it, as `Compressor` does, and writes the frame on
+/// to `out` as it's made, as zstandard's `ZstdCompressor().stream_writer(f)` and Python's
+/// `ZstdFile(f, "w")` do: `std.tar`'s `StreamWriter` writing a `.tar.zst` into a file or a socket
+/// in the memory one job takes. `finish` ends the frame and gives `out` back.
+pub struct Writer<W: io.Writer> {
+    out: W
+    c: Compressor
+    buf: List<u8>
+}
+
+impl<W: io.Writer> Writer<W> {
+    /// A writer onto `out`, at `level`, with a checksum if `checksum` is set. Panics for a level
+    /// outside -131072 to 22, as `compress` does.
+    @track_caller
+    pub fn new(out: own W, level: i32 = 3, checksum: bool = false) -> Writer<W> {
+        return Writer { out: out, c: Compressor.new(level, checksum), buf: [] }
+    }
+
+    /// Ends the frame, writes the rest of it to `out` and flushes that, and gives `out` back, or
+    /// fails with what writing to it failed with.
+    pub fn finish(own self) -> W ! String {
+        var w = self
+        var tail = List<u8>()
+        w.c.finish_into(mut tail)
+        try w.out.write(tail)
+        try w.out.flush()
+        return w.out
+    }
+}
+
+impl<W: io.Writer> io.Writer for Writer<W> {
+    fn write(mut self, bytes: List<u8>) ! String {
+        self.buf.clear()
+        self.c.add_into(bytes, 0, bytes.len(), mut self.buf)
+        if not self.buf.is_empty() {
+            try self.out.write(self.buf)
+        }
+    }
+
+    /// Compresses what it holds and writes it, as `Compressor.flush` does, then flushes `out`.
+    fn flush(mut self) ! String {
+        self.buf.clear()
+        self.c.flush_into(mut self.buf)
+        if not self.buf.is_empty() {
+            try self.out.write(self.buf)
+        }
+        try self.out.flush()
+    }
+}
+
+/// A `Reader` that decompresses what it reads from `input`, as `Decompressor` does, a block at a
+/// time, as zstandard's `ZstdDecompressor().stream_reader(f)` and Python's `ZstdFile(f)` do:
+/// `std.tar`'s `StreamReader` reading a `.tar.zst` from a file or a socket in the memory a frame's
+/// window takes. It reads every frame to the end of `input`, and fails at the end if the data was
+/// cut short, so a `.tar.zst` cut off in the middle of a frame doesn't read as one that ended.
+pub struct Reader<R: io.Reader> {
+    input: R
+    d: Decompressor
+    chunk: List<u8>
+    ended: bool = false
+}
+
+impl<R: io.Reader> Reader<R> {
+    /// A reader of `input`, which fails with `TooLong` once more than `limit` bytes have come out.
+    pub fn new(input: own R, limit: u64 = u64.MAX) -> Reader<R> {
+        return Reader { input: input, d: Decompressor.new(limit), chunk: [] }
+    }
+
+    /// Gives `input` back, with whatever it hasn't read yet.
+    pub fn into_inner(own self) -> R {
+        let r = self
+        return r.input
+    }
+}
+
+impl<R: io.Reader> io.Reader for Reader<R> {
+    fn read(mut self, buf: mut List<u8>, n: usize) -> usize ! String {
+        if n == 0 {
+            return 0
+        }
+        loop {
+            let got = self.d.take(mut buf, u64(n))
+            if got > 0 {
+                return got
+            }
+            if self.ended {
+                return 0
+            }
+            if let err(e) = self.d.run(u64(n)) {
+                fail "the zstd stream is broken: {e}"
+            }
+            if not self.d.hungry {
+                continue
+            }
+            self.chunk.clear()
+            let k = try self.input.read(mut self.chunk, CHUNK)
+            if k == 0 {
+                self.ended = true
+                if let err(e) = self.d.ended() {
+                    fail "the zstd stream is broken: {e}"
+                }
+                continue
+            }
+            self.d.feed(self.chunk, 0, k)
+        }
+    }
 }

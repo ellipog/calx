@@ -1,0 +1,155 @@
+// ECDSA over P-256 with SHA-256, ES256 (CLX-406): RFC 6979's test of the curve with SHA-256 (A.2.5),
+// whose key, public key and signatures `sign` must give exactly, then a key OpenSSL 3.5 made,
+// in PKCS#8 and in SEC1, with a signature it made, and keys, points and signatures that aren't,
+// as OpenSSL refuses them too. tests/std/p256_wycheproof.calx has Wycheproof's vectors.
+
+import std.bytes.{from_hex, hex}
+import std.crypto.{P256Key, P256PublicKey}
+
+fn unhex(text: str) -> List<u8> {
+    return from_hex(String(text)) ?? panic("hex")
+}
+
+fn main() {
+    // RFC 6979, A.2.5: the key, its public key, and the signatures of "sample" and "test".
+    let key = P256Key.from_scalar(unhex("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721"))!
+    let public = key.public_key()
+    println(hex(public.x()))    // out: 60fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb6
+    println(hex(public.y()))    // out: 7903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299
+    let sample = key.sign("sample".to_bytes())
+    println(hex(sample[..32]))    // out: efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716
+    println(hex(sample[32..]))    // out: f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8
+    let test = key.sign("test".to_bytes())
+    println(hex(test[..32]))    // out: f1abb023518351cd71d881567b1ea663ed3efcf6c5132b354f28d3b0b7d38367
+    println(hex(test[32..]))    // out: 019f4113742a2b14bd25926b49c649155f267e60d3814b4c0cc84250e46f0083
+    println("{public.verify("sample".to_bytes(), sample.copy())} {public.verify("test".to_bytes(), test.copy())} {public.verify("test".to_bytes(), sample.copy())}")    // out: true true false
+    println("{key.sign("sample".to_bytes()) == sample}")    // out: true
+
+    // The same in DER, both numbers with a 0 in front for their top bit.
+    let der = key.sign_der("sample".to_bytes())
+    println(hex(der.copy())[..16])    // out: 3046022100efd48b
+    println("{der.len()} {public.verify_der("sample".to_bytes(), der.copy())} {public.verify_der("sample".to_bytes(), sample.copy())}")    // out: 72 true false
+    // s = 0x019f..., whose top byte is 1, so "test"'s s is written as 32 bytes with no 0 in front.
+    let test_der = key.sign_der("test".to_bytes())
+    println("{test_der.len()} {hex(test_der[37..40])} {public.verify_der("test".to_bytes(), test_der)}")    // out: 71 022001 true
+
+    // r and n - s are a signature too, as ECDSA has it and OpenSSL and `cryptography` take it.
+    var negated = sample[..32]
+    negated.extend(unhex("0834e36ad29a83bf2bc9385e491d6099c8fdf9d1ed67aa7ea5f51f93782857a9"))
+    println("{public.verify("sample".to_bytes(), negated)}")    // out: true
+
+    // Signatures that aren't: other lengths, a bit flipped in r or s, r or s 0 or n.
+    let n = unhex("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551")
+    var flip_r = sample.copy()
+    flip_r[3] ^= 0x40
+    var flip_s = sample.copy()
+    flip_s[60] ^= 1
+    var long = sample.copy()
+    long.push(0)
+    println("{public.verify("sample".to_bytes(), flip_r)} {public.verify("sample".to_bytes(), flip_s)} {public.verify("sample".to_bytes(), sample[..63])} {public.verify("sample".to_bytes(), long)}")    // out: false false false false
+    var r_zero: List<u8> = [0; 32]
+    r_zero.extend(sample[32..])
+    var s_zero = sample[..32]
+    s_zero.extend([0; 32])
+    var r_n = n.copy()
+    r_n.extend(sample[32..])
+    var s_n = sample[..32]
+    s_n.extend(n.copy())
+    println("{public.verify("sample".to_bytes(), r_zero)} {public.verify("sample".to_bytes(), s_zero)} {public.verify("sample".to_bytes(), r_n)} {public.verify("sample".to_bytes(), s_n)}")    // out: false false false false
+
+    // DER, not BER: a long-form length that the short form would do, a 0 in front of a number
+    // that doesn't need one, and a byte after the end.
+    var ber: List<u8> = [0x30, 0x81]
+    ber.extend(der[1..])
+    var padded: List<u8> = [0x30, 0x47, 0x02, 0x22, 0x00]
+    padded.extend(der[4..])
+    var trailing = der.copy()
+    trailing.push(0)
+    println("{public.verify_der("sample".to_bytes(), ber)} {public.verify_der("sample".to_bytes(), padded)} {public.verify_der("sample".to_bytes(), trailing)} {public.verify_der("sample".to_bytes(), [])}")    // out: false false false false
+
+    // A key OpenSSL 3.5 made with `genpkey`, in PKCS#8, as an Apple `.p8` file holds one, and in
+    // SEC1 from `openssl ec`, with its public key, and its signature of "hello, apns".
+    let p8 = [
+        "-----BEGIN PRIVATE KEY-----",
+        "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg8lII81RsHjtyNXs7",
+        "AkKCMjf7SN74PY8j9FdqZs1yygehRANCAATupd5738oc+V1By/ZfP6WI8G5QnCuA",
+        "vkcoCMf56atYEW1bINrp+SYamNe+1p1P3L3Yb/LFQ2i2ObrjBbHxyi18",
+        "-----END PRIVATE KEY-----",
+        "",
+    ].join("\n")
+    let sec1 = [
+        "-----BEGIN EC PRIVATE KEY-----",
+        "MHcCAQEEIPJSCPNUbB47cjV7OwJCgjI3+0je+D2PI/RXambNcsoHoAoGCCqGSM49",
+        "AwEHoUQDQgAE7qXee9/KHPldQcv2Xz+liPBuUJwrgL5HKAjH+emrWBFtWyDa6fkm",
+        "GpjXvtadT9y92G/yxUNotjm64wWx8cotfA==",
+        "-----END EC PRIVATE KEY-----",
+    ].join("\r\n")
+    let spki = [
+        "-----BEGIN PUBLIC KEY-----",
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7qXee9/KHPldQcv2Xz+liPBuUJwr",
+        "gL5HKAjH+emrWBFtWyDa6fkmGpjXvtadT9y92G/yxUNotjm64wWx8cotfA==",
+        "-----END PUBLIC KEY-----",
+        "",
+    ].join("\n")
+    let apple = P256Key.from_pem(p8.copy())!
+    let same = P256Key.from_pem("Text before the block is skipped.\n{sec1}")!
+    let theirs = P256PublicKey.from_pem(spki.copy())!
+    println(hex(apple.scalar()))    // out: f25208f3546c1e3b72357b3b0242823237fb48def83d8f23f4576a66cd72ca07
+    println("{same.scalar() == apple.scalar()} {apple.pem() == p8} {theirs.pem() == spki} {apple.der().len()} {theirs.der().len()}")    // out: true true true 138 91
+    println("{theirs.sec1() == apple.public_key().sec1()} {P256Key.from_der(apple.der())!.scalar() == apple.scalar()} {P256PublicKey.from_der(theirs.der()) != none}")    // out: true true true
+    let openssl_sig = unhex("30450221008631b0be9f48b95d48b1031dab7afaa17ba0b83799df31c5a3a814fa975e71410220508ccf15a0c6cdb35a727838b30609e62cae95387c881856fe01381fc17265cd")
+    println("{theirs.verify_der("hello, apns".to_bytes(), openssl_sig.copy())} {theirs.verify_der("hello, apns!".to_bytes(), openssl_sig)}")    // out: true false
+    println("{theirs.verify("hello, apns".to_bytes(), apple.sign("hello, apns".to_bytes()))}")    // out: true
+
+    // Private keys that aren't: d of 0 or n, or not 32 bytes, and n - 1, which is.
+    var n_less = n.copy()
+    n_less[31] -= 1
+    println("{P256Key.from_scalar([0; 32]) == none} {P256Key.from_scalar(n.copy()) == none} {P256Key.from_scalar([1; 31]) == none} {P256Key.from_scalar(n_less) != none}")    // out: true true true true
+
+    // PKCS#8 that isn't a P-256 key, or is broken: another curve, version 1, a byte after the end,
+    // and a public key in it that's a point, but another key's.
+    let good = key.der()
+    var curve = good.copy()
+    curve[26] = 0x08
+    var version = good.copy()
+    version[5] = 1
+    var after = good.copy()
+    after.push(0)
+    var mismatched = good[..74]
+    mismatched.extend(apple.public_key().sec1()[1..])
+    println("{P256Key.from_der(good.copy()) != none} {P256Key.from_der(curve) == none} {P256Key.from_der(version) == none} {P256Key.from_der(after) == none} {P256Key.from_der(mismatched) == none}")    // out: true true true true true
+    // SEC1 alone must name its curve, since nothing else says which the number is on. Inside
+    // PKCS#8, the AlgorithmIdentifier does.
+    println("{P256Key.from_der(good[29..]) == none} {P256Key.from_pem(p8.replace("PRIVATE KEY", "ENCRYPTED PRIVATE KEY")) == none} {P256Key.from_pem("") == none}")    // out: true true true
+
+    // Points that aren't: y one more, x of p, another first byte, other lengths. A compressed x
+    // of 1 has no point; 5 has two, one for each parity.
+    let p = unhex("ffffffff00000001000000000000000000000000ffffffffffffffffffffffff")
+    var off = public.sec1()
+    off[64] ^= 1
+    var big_x: List<u8> = [4]
+    big_x.extend(p.copy())
+    big_x.extend(public.y())
+    var prefix = public.sec1()
+    prefix[0] = 5
+    println("{P256PublicKey.from_sec1(off) == none} {P256PublicKey.from_sec1(big_x) == none} {P256PublicKey.from_sec1(prefix) == none} {P256PublicKey.from_sec1(public.sec1()[1..]) == none}")    // out: true true true true
+    var one: List<u8> = [2]
+    one.extend([0; 31])
+    one.push(1)
+    var five_even: List<u8> = [2]
+    five_even.extend([0; 31])
+    five_even.push(5)
+    var five_odd = five_even.copy()
+    five_odd[0] = 3
+    let even = P256PublicKey.from_sec1(five_even.copy())!
+    let odd = P256PublicKey.from_sec1(five_odd.copy())!
+    println("{P256PublicKey.from_sec1(one) == none} {even.y()[31] & 1} {odd.y()[31] & 1} {even.sec1(compressed: true) == five_even} {odd.sec1(compressed: true) == five_odd}")    // out: true 0 1 true true
+    println("{P256PublicKey.from_sec1(public.sec1(compressed: true))!.sec1() == public.sec1()} {public.sec1(compressed: true).len()}")    // out: true 33
+    let spki_der = theirs.der()
+    println("{P256PublicKey.from_der(spki_der[..90]) == none} {P256PublicKey.from_der(good.copy()) == none}")    // out: true true
+
+    // New keys are random, and sign what their public keys take, the same each time.
+    let g = P256Key.generate()
+    println("{g.scalar() != P256Key.generate().scalar()} {g.public_key().verify([1, 2, 3], g.sign([1, 2, 3]))} {g.sign([4]) == g.sign([4])}")    // out: true true true
+    println("{P256Key.from_pem(g.pem())!.scalar() == g.scalar()}")    // out: true
+}

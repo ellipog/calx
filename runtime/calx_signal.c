@@ -32,8 +32,12 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdio.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <link.h>
+#endif
 #endif
 #include <stdint.h>
 #include <string.h>
@@ -276,9 +280,61 @@ static void* listen_thread(void* unused) {
     }
 }
 
+#ifdef __linux__
+/* Adds up the thread-local storage of the program and the libraries loaded with it. */
+static int add_tls(struct dl_phdr_info* info, size_t size, void* total) {
+    (void)size;
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        const ElfW(Phdr)* p = &info->dlpi_phdr[i];
+        if (p->p_type == PT_TLS) *(size_t*)total += (size_t)p->p_memsz + (size_t)p->p_align;
+    }
+    return 0;
+}
+#endif
+
+/* The listening thread's stack. The thread needs little of its own, but glibc carves each
+ * thread's static TLS, the program's and its libraries' thread-local variables, out of its stack
+ * and refuses to start one whose stack can't hold them with 16 KB to spare. So the TLS is added on
+ * top, whatever its size (CLX-417). macOS keeps a thread's TLS apart from its stack. */
+static size_t listen_stack(void) {
+    size_t size = 64 * 1024;
+#ifdef __linux__
+    size_t tls = 0;
+    dl_iterate_phdr(add_tls, &tls);
+    size += tls;
+#endif
+    long page = sysconf(_SC_PAGESIZE);
+    if (page > 0) size = (size + (size_t)page - 1) / (size_t)page * (size_t)page;
+    return size;
+}
+
+/* Starts the listening thread with its signals blocked: with the stack `listen_stack` works out,
+ * or with the system's default stack if that's refused, as on a C library that wants more than
+ * it says. Gives 0 or the error. */
+static int start_thread(void) {
+    sigset_t all, was;
+    sigfillset(&all);
+    pthread_sigmask(SIG_SETMASK, &all, &was);
+    int e = 0;
+    for (int sized = 1; sized >= 0; sized--) {
+        pthread_attr_t attr;
+        e = pthread_attr_init(&attr);
+        if (e) break;
+        if (sized) e = pthread_attr_setstacksize(&attr, listen_stack());
+        if (!e) e = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        pthread_t t;
+        if (!e) e = pthread_create(&t, &attr, listen_thread, NULL);
+        pthread_attr_destroy(&attr);
+        if (!e) break;
+    }
+    pthread_sigmask(SIG_SETMASK, &was, NULL);
+    return e;
+}
+
+/* Gives 0, or the error that stopped it. */
 static int start(void) {
     int fds[2];
-    if (pipe(fds) != 0) return 0;
+    if (pipe(fds) != 0) return errno;
     for (int i = 0; i < 2; i++) fcntl(fds[i], F_SETFD, FD_CLOEXEC);
     fcntl(fds[1], F_SETFL, fcntl(fds[1], F_GETFL) | O_NONBLOCK);
     pipe_r = fds[0];
@@ -290,25 +346,19 @@ static int start(void) {
 #endif
     pthread_cond_init(&wait_cond, &ca);
     pthread_condattr_destroy(&ca);
-    sigset_t all, was;
-    sigfillset(&all);
-    pthread_sigmask(SIG_SETMASK, &all, &was);
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 64 * 1024);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    pthread_t t;
-    int made = pthread_create(&t, &attr, listen_thread, NULL) == 0;
-    pthread_attr_destroy(&attr);
-    pthread_sigmask(SIG_SETMASK, &was, NULL);
-    return made;
+    return start_thread();
 }
 
 void cx_signal_handle(cx_u32 kinds) {
     static int started;
     check_thread();
     if (!started) {
-        if (!start()) cx_panic_text("std.signal", "couldn't start the thread that hears of signals");
+        int e = start();
+        if (e) {
+            char text[160];
+            snprintf(text, sizeof text, "couldn't start the thread that hears of signals: %s", strerror(e));
+            cx_panic_text("std.signal", text);
+        }
         started = 1;
     }
     for (int k = 0; k < K_COUNT; k++) {

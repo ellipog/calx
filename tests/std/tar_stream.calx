@@ -1,0 +1,294 @@
+// std.tar a piece at a time (CLX-413): StreamWriter writes what Writer writes, onto any Writer, a
+// zstd stream into a file too; files and folders from the disk with their modes and times;
+// StreamReader reads entries as they come, part of one and then the next, GNU tar's long names and
+// pax headers, and says where an archive is broken; extracting as it comes, hard links as copies,
+// and refusing paths that climb out or go through a link the archive made.
+import std.fs.{create, is_dir, is_file, make_dir_all, open_read, read, read_text, remove_dir_all, set_modified, temp_dir, write_text}
+import std.io.{ByteReader}
+import std.tar.{StreamReader, StreamWriter, Tar, Writer}
+import std.time.{Timestamp}
+import std.zlib.{Format, decompress}
+import std.zstd
+
+// GNU tar 1.35's `--format=gnu` and `--format=pax` archives of hi.txt and a 117-byte path, gzipped,
+// as tests/std/tar.calx has them.
+fn gnu_tar() -> String {
+    return "1f8b08000000000002ffedd54b0e82401045d15e0a2ba01aa461ea02d8841f3e2d0413c5c4e5db615046278e400df74c2aa969e5d56b7d3cde47332b1be45936cde07d06a9495c5a24ceda6cda17362f4c64cd026ed771778922b352ad3758b15862d996e7a129fdd07d29ff69c8fff3174cf92f7267a292fccf6ea764afe4a0e4a8a452522b6994b44abc9293924e49edfb6afeeac10fdcff73ff67affdbfb1ce39fa7f097d78fda40000000000000000000000fedf0312fedfbc00280000"
+}
+
+fn pax_tar() -> String {
+    return "1f8b08000000000002ffedd53b0ac2401080e1ad3d85277076372f2c3c4cd4bc34a868841cdf4d8a01d3582520f9bf66609b69f667ea66d7f59d99950dd2381e67309d81372ef1994bac8dc7f7ccf9cc6cad59c0fbd5e5cfb0d2ac53dd18ac58aee4a8e4a4e4aca450522aa994d44a1a25975ffd7b177df71fd96ce8bfa7ffd9b968bf7de45d7d58e22328b92a299bb6186ed0861857da7fa87eda7fea12eeff12dafbada20200000000000000000000f87f1f9203fefb00280000"
+}
+
+fn unhex(s: String) -> List<u8> {
+    var out = List<u8>()
+    var i: usize = 0
+    while i < s.len() {
+        out.push(digit(s.byte_at(i)) * 16 + digit(s.byte_at(i + 1)))
+        i += 2
+    }
+    return out
+}
+
+fn digit(c: u8) -> u8 {
+    return if c >= 97 { c - 87 } else { c - 48 }
+}
+
+fn gunzip(b: List<u8>) -> List<u8> {
+    return decompress(b, Format.Gzip, 1 << 20)!
+}
+
+// Every entry from here on, as tests/std/tar.calx shows them.
+fn show(r: mut StreamReader<ByteReader>) {
+    while let e = r.next()! {
+        println("{e.name.len()} {e.kind} {e.size} {e.mode} {e.modified.unix_ms / 1000} link={e.link}")
+    }
+}
+
+// What extracting `archive` into `to` fails with, or "extracted".
+fn extract_error(archive: own List<u8>, to: String) -> String {
+    var r = StreamReader.new(ByteReader.new(archive))
+    return match r.extract(to) {
+        ok => String("extracted"),
+        err(e) => e,
+    }
+}
+
+fn main() {
+    let at = Timestamp { unix_ms: 1793491200999 }
+    var large = List<u8>()
+    for i in 0..5000 {
+        large.push(u8.wrap(i * 31))
+    }
+    var long_name = String("app/")
+    for _ in 0..30 {
+        long_name.push_str("deep/")
+    }
+    long_name.push_str("file.txt")
+
+    // The same entries through Writer and StreamWriter make the same bytes.
+    var w = Writer.new()
+    w.set_time(at)
+    w.add_dir("app/bin")
+    w.add("app/bin/tool", "run me".to_bytes(), mode: 0o755)
+    w.add(long_name.copy(), "deep".to_bytes())
+    w.add_symlink("app/current", "bin/tool")
+    w.add("app/ünïcode.txt", "hé".to_bytes())
+    w.add("app/large.bin", large.copy())
+    let plain = w.finish()
+    var s = StreamWriter.new(List<u8>())
+    s.set_time(at)
+    s.add_dir("app/bin")!
+    s.add("app/bin/tool", "run me".to_bytes(), mode: 0o755)!
+    var deep_reader = ByteReader.new("deep".to_bytes())
+    s.add_from(long_name.copy(), 4, mut deep_reader)!
+    s.add_symlink("app/current", "bin/tool")!
+    s.add("app/ünïcode.txt", "hé".to_bytes())!
+    s.add("app/large.bin", large.copy())!
+    let streamed = s.finish()!
+    println("{streamed.len()} {streamed == plain}")    // out: 11776 true
+
+    // Read back as it comes, skipping what isn't read, reading part of one, or all of it.
+    var r = StreamReader.new(ByteReader.new(plain.copy()))
+    while let e = r.next()! {
+        if e.name == "app/bin/tool" {
+            var part = List<u8>()
+            _ = r.read(mut part, 3)!
+            println("{e.name}: {String.from_utf8(part)!}")
+        } else if e.name == "app/large.bin" {
+            println("{e.name}: {r.read_all()! == large}")
+        } else {
+            println("{e.name.len()} {e.kind} {e.size} {e.mode} {e.modified.unix_ms / 1000} link={e.link}")
+        }
+    }
+    // out: 7 Dir 0 493 1793491200 link=
+    // out: app/bin/tool: run
+    // out: 162 File 4 420 1793491200 link=
+    // out: 11 Symlink 0 511 1793491200 link=bin/tool
+    // out: 17 File 3 420 1793491200 link=
+    // out: app/large.bin: true
+    println("{r.next()! == none}")    // out: true
+    // After the end, the rest is zeros, which finish reads, giving the input back.
+    println("{r.finish()!.left()}")    // out: 0
+
+    // What GNU tar wrote: its long-name entries and pax headers.
+    var gnu = StreamReader.new(ByteReader.new(gunzip(unhex(gnu_tar()))))
+    show(mut gnu)
+    // out: 6 File 2 420 1793491200 link=
+    // out: 129 File 4 420 1793491200 link=
+    var pax = StreamReader.new(ByteReader.new(gunzip(unhex(pax_tar()))))
+    show(mut pax)
+    // out: 6 File 2 420 1793491200 link=
+    // out: 129 File 4 420 1793491200 link=
+
+    // Broken archives say why, as Tar.open does, and an archive may just end, with no empty blocks.
+    var bad = plain.copy()
+    bad[0] = bad[0] ^ 1
+    var br = StreamReader.new(ByteReader.new(bad))
+    match br.next() {
+        ok(_) => println("read"),
+        err(e) => println(e),    // out: bad header checksum at 0
+    }
+    var cut = plain.copy()
+    cut.truncate(2048 + 512 + 100)
+    var cr = StreamReader.new(ByteReader.new(cut))
+    var why = String()
+    loop {
+        match cr.next() {
+            ok(some(_)) => {},
+            ok(none) => break,
+            err(e) => {
+                why = e
+                break
+            },
+        }
+    }
+    println(why)    // out: the archive ends inside the header at 2560
+    // Cut inside app/large.bin's bytes, the last entry's.
+    var inside = StreamReader.new(ByteReader.new(plain[..8752]))
+    loop {
+        let e = inside.next()! else break
+        if e.name == "app/large.bin" {
+            match inside.read_all() {
+                ok(_) => println("read"),
+                err(x) => println(x),    // out: the archive ends inside the entry before 8752
+            }
+            break
+        }
+    }
+    var ends = StreamReader.new(ByteReader.new(plain[..1536]))
+    var n = 0
+    while let _ = ends.next()! {
+        n += 1
+    }
+    println("{n}")    // out: 2
+    var trailing = plain.copy()
+    trailing.push(7)
+    var tr = StreamReader.new(ByteReader.new(trailing))
+    while let _ = tr.next()! {
+    }
+    match tr.finish() {
+        ok(_) => println("finished"),
+        err(e) => println(e),    // out: bytes that aren't zeros after the archive's end
+    }
+    var short_input = ByteReader.new("abc".to_bytes())
+    var sw = StreamWriter.new(List<u8>())
+    match sw.add_from("x", 10, mut short_input) {
+        ok => println("added"),
+        err(e) => println(e),    // out: x ended after 3 of its 10 bytes
+    }
+
+    // Files and folders from the disk, into a .tar.zst file, as they're read.
+    let temp = temp_dir()!
+    let src = "{temp}/src"
+    make_dir_all("{src}/sub/empty")!
+    write_text("{src}/a.txt", "alpha")!
+    write_text("{src}/sub/b.txt", "beta")!
+    set_modified("{src}/a.txt", Timestamp { unix_ms: 1700000000000 })!
+    var tw = StreamWriter.new(zstd.Writer.new(create("{temp}/out.tar.zst")!, 3, true))
+    tw.add_tree("tree", src)!
+    tw.add_file("one.txt", "{src}/a.txt")!
+    tw.finish()!.finish()!.close()!
+    var zr = StreamReader.new(zstd.Reader.new(open_read("{temp}/out.tar.zst")!))
+    while let e = zr.next()! {
+        let time = if e.name.ends_with("a.txt") or e.name == "one.txt" { "{e.modified.unix_ms / 1000}" } else { String("-") }
+        println("{e.name} {e.kind} {e.size} {time}")
+    }
+    // out: tree Dir 0 -
+    // out: tree/a.txt File 5 1700000000
+    // out: tree/sub Dir 0 -
+    // out: tree/sub/b.txt File 4 -
+    // out: tree/sub/empty Dir 0 -
+    // out: one.txt File 5 1700000000
+    zr.finish()!.into_inner().close()!
+    // Tar.open reads it whole the same.
+    println("{Tar.open(read("{temp}/out.tar.zst")!)!.len()}")    // out: 6
+
+    // Extracted as it comes: files, folders, a link, and a hard link as a copy of the file before.
+    var x = Writer.new()
+    x.add("app/bin/tool", "run me".to_bytes(), mode: 0o755)
+    x.add_symlink("app/current", "bin/tool")
+    x.add_dir("app/empty")
+    let hard = x.finish()
+    // A hard link's header, made from a file's: type `1`, no size, and the name it links to.
+    var linked = hard[..512]
+    for k in 0usize..100 {
+        linked[k] = 0
+        linked[157 + k] = 0
+    }
+    for k in 0usize..8 {
+        linked[k] = "app/hard".byte_at(k)
+    }
+    for k in 0usize..12 {
+        linked[157 + k] = "app/bin/tool".byte_at(k)
+    }
+    for k in 124usize..135 {
+        linked[k] = 48
+    }
+    linked[156] = 49
+    for k in 148usize..156 {
+        linked[k] = 32
+    }
+    var sum: u32 = 0
+    for k in 0usize..512 {
+        sum += u32(linked[k])
+    }
+    for k in 0usize..6 {
+        linked[153 - k] = u8.wrap(48 + (sum >> u32.wrap(3 * k)) % 8)
+    }
+    linked[154] = 0
+    var with_hard = hard[..hard.len() - 1024]
+    with_hard.extend(linked)
+    with_hard.extend([0u8; 1024])
+    let dir = "{temp}/x"
+    var xr = StreamReader.new(ByteReader.new(with_hard.copy()))
+    xr.extract(dir)!
+    println("{read_text("{dir}/app/bin/tool")!!} {read_text("{dir}/app/current")!!} {read_text("{dir}/app/hard")!!} {is_dir("{dir}/app/empty")}")    // out: run me run me run me true
+
+    // Paths that climb out stop it there, after the entries before it, which a stream can't see past.
+    for name in ["../escape.txt", "/etc/passwd", "a/../../b", "C:/x"] {
+        var evil = Writer.new()
+        evil.add("fine.txt", [1u8])
+        evil.add(String(name), [2u8])
+        println(extract_error(evil.finish(), "{temp}/evil"))
+    }
+    // out: unsafe path ../escape.txt in the archive
+    // out: unsafe path /etc/passwd in the archive
+    // out: unsafe path a/../../b in the archive
+    // out: unsafe path C:/x in the archive
+    println("{is_file("{temp}/evil/fine.txt")}")    // out: true
+    // A link and then a path through it, or a link that climbs back out of one: the system would
+    // follow the link, and land outside. Tar.extract refuses them too, before writing anything.
+    var through = Writer.new()
+    through.add_symlink("d", "sub")
+    through.add("d/x", [1u8])
+    var climb = Writer.new()
+    climb.add_symlink("up", ".")
+    climb.add_symlink("out", "up/../escaped")
+    for archive in [through.finish(), climb.finish()] {
+        println(extract_error(archive.copy(), "{temp}/evil2"))
+        match Tar.open(archive.copy())!.extract("{temp}/evil3") {
+            ok => println("extracted"),
+            err(e) => println(e),
+        }
+    }
+    // out: unsafe path d/x in the archive, through the link d it made
+    // out: unsafe path d/x in the archive, through the link d it made
+    // out: unsafe link out -> up/../escaped in the archive
+    // out: unsafe link out -> up/../escaped in the archive
+    println("{is_dir("{temp}/evil3")}")    // out: false
+    // A link to a drive or to the root of one points out on Windows, wherever it is.
+    for target in ["C:/Windows", "\\Windows"] {
+        var evil = Writer.new()
+        evil.add_symlink("app/link", String(target))
+        println(extract_error(evil.finish(), "{temp}/evil5"))
+    }
+    // out: unsafe link app/link -> C:/Windows in the archive
+    // out: unsafe link app/link -> \Windows in the archive
+    // A hard link to a file that isn't before it.
+    var orphan = linked.copy()
+    orphan.extend([0u8; 1024])
+    let lost = extract_error(orphan, "{temp}/evil4")
+    println(lost[(lost.find(" to ") ?? 0) + 1..])    // out: to app/bin/tool: no file before it in the archive has that name
+    remove_dir_all(temp)!
+}

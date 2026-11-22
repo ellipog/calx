@@ -1,11 +1,11 @@
 ---
 title: std.net
-description: TCP connections driven by events, on IOCP on Windows and epoll on Linux, with the buffers kept by the runtime.
+description: TCP connections and UDP sockets driven by events, on IOCP on Windows, epoll on Linux and kqueue on macOS, with the buffers kept by the runtime, multicast, IP addresses and the machine's interfaces.
 ---
 
 # `std.net`
 
-TCP servers and clients. A `Net` holds listening sockets and connections, and `poll` reports what happened to them as events. Nothing else waits for the network: `write` queues bytes and returns, and `read` takes bytes that have already arrived. Another thread can wake a poll with a `Waker`, and so can a signal, so a server [stops cleanly](#stopping-at-a-signal) when it's asked to.
+TCP servers and clients, and [UDP sockets](#udp). A `Net` holds listening sockets, connections and UDP sockets, and `poll` reports what happened to them as events. Nothing else waits for the network: `write` queues bytes and returns, and `read` takes bytes that have already arrived. Another thread can wake a poll with a `Waker`, and so can a signal, so a server [stops cleanly](#stopping-at-a-signal) when it's asked to. Services on the local network are announced and found with mDNS by [`std.net.mdns`](net-mdns.md), which runs on a `Net` of its own.
 
 ```calx
 import std.net.{Event, Net}
@@ -44,6 +44,7 @@ fn main() {
                     }
                 }
                 Woken => {}
+                Datagram(_) => {}
             }
         }
     }
@@ -76,12 +77,28 @@ fn main() {
 | `Conn` | A connection. It's `Copy`, and two are equal when their `id`s are. It's the `Net`'s that opened or accepted it, and another `Net` given it panics ([threads](#threads)) |
 | `conn.slot() -> usize` | A small number for the connection, counting from 0, for indexing what the program keeps per connection |
 | `conn.id() -> u32`, `Conn.from_id(id: u32) -> Conn` | The connection's number, its slot and how many connections had the slot before, which no two of a `Net`'s connections share at once, and the connection with a number, in whichever `Net` it's given to, for a log of connections that's replayed. A number no connection has names none: reading it gives nothing, and writing to it or closing it does nothing |
-| `Event` | `Accepted(Conn)`, `Connected(Conn)`, `Received(Conn)`, `Closed(Conn)` or `Woken` |
+| `Event` | `Accepted(Conn)`, `Connected(Conn)`, `Received(Conn)`, `Closed(Conn)`, `Woken`, or `Datagram(Udp)` |
+| `net.bind_udp(host: String, port: u16, reuse: bool = false) -> Udp ! NetError` | A UDP socket bound to `host` and `port`, the system's choice of port for 0 ([UDP](#udp)) |
+| `Udp` | A UDP socket. It's `Copy`, and copies are the same socket |
+| `udp.send_to(bytes: List<u8>, to: Address) ! NetError` | Sends one datagram, at once, or as soon as the system has room |
+| `udp.receive_from() -> Datagram?` | The next datagram that has arrived, or `none` once each has been taken |
+| `udp.port() -> u16`, `udp.id() -> u32` | The port it's bound to, 0 once it's closed, and its number in its `Net` |
+| `udp.join_multicast(group: Ip, index: u32 = 0) ! NetError`, `leave_multicast` | Joins or leaves a multicast group on the interface with that index, or the system's choice for 0 ([multicast](#multicast)) |
+| `udp.set_multicast_ttl(hops: u8)`, `set_multicast_loopback(on: bool)`, `set_multicast_interface(index: u32)` | How far its multicast datagrams go, whether they come back to this machine, and which interface they leave on. Each `! NetError` |
+| `udp.set_ttl(hops: u8)`, `set_broadcast(on: bool)` | How far its other datagrams go, and whether it may send to a broadcast address. Each `! NetError` |
+| `udp.close()` | Closes it. What waited, either way, is dropped |
+| `Datagram` | `bytes: List<u8>`, and `from: Address`, where it came from |
 | `NetError` | `AddressInUse`, `BadAddress`, `Refused`, or `Os(i32)` with the system's error code |
+| `Stream.new(net: Net, conn: Conn) -> Stream` | The connection as a [`std.io`](io.md#reader-and-writer) `Reader` and `Writer` that wait, as a blocking socket does ([a connection as a stream](#a-connection-as-a-stream)) |
 | `Ip` | `V4([u8; 4])`, or `V6([u8; 16], u32)` with its scope, the interface a link-local address is on, or 0 |
+| `Ip.parse(text: String) -> Ip?` | The address `text` writes, as Python's `ipaddress.ip_address` reads it: `192.168.1.20`, `::1`, `fe80::1%3`. `none` for anything else, a host name too |
 | `ip.to_string() -> String` | The address as RFC 5952 writes it: `127.0.0.1`, `::1`, `2001:db8::8:800:200c:417a`, `fe80::1%3` |
+| `ip.is_v4()`, `is_loopback()`, `is_link_local()`, `is_multicast()` | What kind of address it is: `127.0.0.0/8` and `::1` are loopback, `169.254.0.0/16` and `fe80::/10` link-local, `224.0.0.0/4` and `ff00::/8` multicast |
 | `Address` | `ip: Ip` and `port: u16` |
 | `address.to_string() -> String` | `127.0.0.1:25565`, or `[::1]:25565` |
+| `interfaces() -> List<Interface> ! NetError` | The machine's network interfaces ([interfaces](#interfaces)) |
+| `Interface` | `name: String`, `index: u32`, `addresses: List<Ip>`, `prefixes: List<u8>`, and `up`, `loopback` and `multicast`, each a `bool` |
+| `host_name() -> String` | The machine's name, as Python's `socket.gethostname()` gives it |
 
 ## Events
 
@@ -92,6 +109,7 @@ fn main() {
 | `Received(c)` | Bytes arrived on `c`, and `read` takes them. A connection gets at most one `Received` per poll, however many times bytes arrived |
 | `Closed(c)` | `c` ended: the other side closed it, it failed, `connect` couldn't open it, or `close` finished. It's the last event for `c` |
 | `Woken` | A `Waker` woke the poll, or a signal did after `wake_on_signal`. However many wakes came before the poll reported one, it reports one `Woken` |
+| `Datagram(u)` | Datagrams arrived on the UDP socket `u`, and `receive_from` takes them, one at a time. A socket gets at most one `Datagram` per poll, however many came |
 
 What arrived before a `Closed` can still be read until the next poll. After that, `read`, `write` and `close` on the connection do nothing, and a new connection can get its slot. A `Conn` kept past then never names the new connection: the id holds a generation as well as the slot, so the runtime ignores the old one.
 
@@ -155,6 +173,168 @@ fn main() {
 - **Its own handle.** The runtime opens the file again for itself, so the program can close the `File` as soon as `send_file` returns, and can send one `File` to many connections at once.
 - **A short file.** The length is the program's to know. If the file ends before `at + n`, the connection closes where it ends, since the other side would wait for the rest forever.
 - **Never stuck behind a slow client.** Windows for desktops sends only two files at once in the whole system. While both are slow, the runtime reads the others 256 KiB at a time and sends that, so it holds a part per connection but no one waits. See [How it works](#how-it-works).
+
+## A connection as a stream
+
+A `Stream` is a connection read and written in order, waiting as a blocking socket does, so code that takes a [`std.io`](io.md#reader-and-writer) `Reader` or `Writer` takes a connection, as Python's `socket.makefile("rwb")` makes a file of one: [`std.tar`](tar.md#a-piece-at-a-time)'s `StreamWriter` sending folders to another server through a [`std.zstd`](zstd.md#a-piece-at-a-time) `Writer`, and its `StreamReader` taking them at the other end, a piece at a time.
+
+```calx
+import std.net.{Event, Net, Stream}
+
+fn main() {
+    let net = Net.new()!
+    let port = net.listen("127.0.0.1", 0)!
+    let conn = net.connect("127.0.0.1", port)!
+    // The other end, once it's accepted, before a stream polls this Net.
+    var events = List<Event>()
+    var accepted = List<Stream>()
+    while accepted.is_empty() {
+        net.poll(1000, mut events)
+        for e in events {
+            match e {
+                Accepted(c) => accepted.push(Stream.new(net, c)),
+                _ => {},
+            }
+        }
+    }
+    var sent = Stream.new(net, conn)
+    sent.write("over the wire".to_bytes())!
+    sent.flush()!
+    var got = List<u8>()
+    while got.len() < 13 {
+        _ = accepted[0].read(mut got, 100)!
+    }
+    println(String.from_utf8(got)!)    // out: over the wire
+    println("{sent.close(1000)}")    // out: true
+}
+```
+
+| Item | Does |
+| --- | --- |
+| `Stream.new(net: Net, conn: Conn) -> Stream` | The connection, accepted or from `connect`, as a stream. One from `connect` that isn't open yet is waited for |
+| `s.read(buf: mut List<u8>, n: usize) -> usize ! String` | Up to `n` bytes onto the end of `buf`, waiting until some arrive; 0 once the connection has closed and they've all been read |
+| `s.write(bytes: List<u8>) ! String` | Queues the bytes; once more than 4 MiB is queued, waits until it has gone to the system. Fails once the connection has closed |
+| `s.flush() ! String` | Waits until what's queued has gone to the system |
+| `s.close(timeout_ms: i64 = -1) -> bool` | Sends what's queued and closes the connection, then waits up to `timeout_ms` for it to go, as `drain` does |
+| `s.conn() -> Conn` | The connection |
+
+- **Its `Net` is its own while it's used.** A stream polls its `Net` while it waits, and passes over what those polls say of other connections, so a thread makes a `Net` for the transfer, as a blocking socket is one thread's. Its polls, a flush's too, take every event, an `Accepted` among them, so two streams share a `Net` in one thread only once the connections are open, and while neither waits for the other, as above.
+- **Memory stays bounded both ways.** A write waits once 4 MiB is queued, and the runtime reads a connection only while its `Net` is polled, which a stream does only when it has nothing left to give: a slow reader holds the sender back through TCP, rather than the bytes piling up in either.
+
+## UDP
+
+A UDP socket sends and receives datagrams, each whole or not at all, as Python's `socket(AF_INET, SOCK_DGRAM)` does, in the same loop as the `Net`'s connections: `bind_udp` opens one, its poll reports `Datagram` when some arrive, and `receive_from` takes each, with the address it came from, which `send_to` can answer:
+
+```calx
+import std.net.{Address, Event, Ip, Net}
+
+fn main() {
+    let net = Net.new()!
+    let server = net.bind_udp("127.0.0.1", 0)!    // 0: the system picks a free port
+    let client = net.bind_udp("127.0.0.1", 0)!
+    client.send_to("ping".to_bytes(), Address { ip: Ip.V4([127, 0, 0, 1]), port: server.port() })!
+    var events = List<Event>()
+    var done = false
+    while not done {
+        net.poll(1000, mut events)
+        for e in events {
+            match e {
+                Datagram(u) => {
+                    while let d = u.receive_from() {
+                        if u == server {
+                            server.send_to("pong".to_bytes(), d.from)!    // back where it came from
+                        } else {
+                            println(String.from_utf8(d.bytes) ?? String("?"))    // out: pong
+                            done = true
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+```
+
+- **Sent at once.** Each `send_to` is one datagram, so there's nothing to gather for the next poll, as `write` gathers a connection's bytes: it goes to the system there and then. If the system has no room for it, which is rare, it waits in the runtime, up to 1 MiB of them, and goes as soon as there's room, before any sent after it, as asyncio's `DatagramTransport` keeps them.
+- **Lost without a word.** A datagram can be lost on the way, or arrive twice, or out of order, as UDP's are, and nothing tells the sender. What `send_to` fails at is what the system refuses there and then: an address of the other family, `BadAddress`, or a network it has no route to, with the system's code.
+- **Kept until taken.** What arrives waits for `receive_from`, up to 1 MiB of datagrams a socket, past which more are dropped, as a socket's buffer drops them when it's full. A datagram that a datagram sent earlier was refused by, an ICMP "port unreachable", isn't an error on the next receive, as Windows would make it: the runtime turns that off.
+- **Bound where it's told.** An empty host binds every address, IPv4 and IPv6, with one socket that takes both, as `listen` does; `0.0.0.0` binds every IPv4 address, and `::` every IPv6 address alone. A second socket on a port fails with `AddressInUse`, unless both ask for `reuse`, as two programs that each answer multicast on one port do ([below](#multicast)).
+
+### Multicast
+
+A socket that joins a multicast group gets the datagrams sent to it, as Python's `IP_ADD_MEMBERSHIP` and `IPV6_JOIN_GROUP` give them. Several sockets, in one program or many, can bind the same port with `reuse` and each get every datagram sent to the group there, which is how [mDNS](net-mdns.md) shares port 5353 with the system's own responder:
+
+```calx
+// firewall: joins a multicast group on every address
+import std.net.{Address, Event, Ip, Net, interfaces}
+
+fn main() {
+    // This machine's own loopback interface where it carries multicast, as macOS's does, and the
+    // system's choice, 0, where it doesn't.
+    var index: u32 = 0
+    for i in interfaces()! {
+        if i.loopback and i.multicast and i.up {
+            index = i.index
+        }
+    }
+    let net = Net.new()!
+    let group = Ip.parse("239.255.0.1")!
+    let listener = net.bind_udp("0.0.0.0", 0, reuse: true)!
+    listener.join_multicast(group, index)!
+    let sender = net.bind_udp("0.0.0.0", 0)!
+    sender.set_multicast_interface(index)!
+    sender.set_multicast_ttl(1)!    // the local network only, which is where it starts
+    sender.send_to("hello, group".to_bytes(), Address { ip: group, port: listener.port() })!
+    var events = List<Event>()
+    var heard = false
+    while not heard {
+        net.poll(2000, mut events)
+        for e in events {
+            if let Event.Datagram(u) = e {
+                while let d = u.receive_from() {
+                    println(String.from_utf8(d.bytes) ?? String("?"))    // out: hello, group
+                    heard = true
+                }
+            }
+        }
+    }
+}
+```
+
+| Option | Python's | Does |
+| --- | --- | --- |
+| `join_multicast(group, index)`, `leave_multicast(group, index)` | `IP_ADD_MEMBERSHIP`, `IPV6_JOIN_GROUP` and their leaves | Joins or leaves `group` on the interface whose index `index` is, or the system's choice for 0. An IPv4 group needs an IPv4 socket, or one bound to every address, and an IPv6 group an IPv6 one |
+| `set_multicast_ttl(hops)` | `IP_MULTICAST_TTL`, `IPV6_MULTICAST_HOPS` | How many routers its datagrams to a group may cross: 1 to start with, the local network |
+| `set_multicast_loopback(on)` | `IP_MULTICAST_LOOP`, `IPV6_MULTICAST_LOOP` | Whether they come back to the sockets on this machine that joined the group, this one too: they do to start with |
+| `set_multicast_interface(index)` | `IP_MULTICAST_IF`, `IPV6_MULTICAST_IF` | The interface they leave on, by index, or the system's choice for 0. A datagram waiting for room leaves on the one it was sent on |
+| `set_ttl(hops)` | `IP_TTL`, `IPV6_UNICAST_HOPS` | How many routers its other datagrams may cross |
+| `set_broadcast(on)` | `SO_BROADCAST` | Whether it may send to a broadcast address, such as `255.255.255.255` |
+
+An interface is named by its index, which [`interfaces`](#interfaces) gives, as the systems name it in multicast: Windows takes an IPv4 interface's index where an address would go, and Linux and macOS take it as it is.
+
+On macOS a program needs the person's permission to reach the local network, as Apple's TN3179 says, multicast included: without it, a send to the network fails with `system error 65`, "no route to host". A program run from Terminal or over SSH has it, as does one run as root or by launchd as a daemon, and an app asks for it with `NSLocalNetworkUsageDescription` in its `Info.plist`. The loopback interface needs no permission, which is why the example above uses it there, and so do CI's tests, since a runner's programs are none of those.
+
+### Interfaces
+
+`interfaces()` gives the machine's network interfaces, each with its name, its index, its addresses and their prefix lengths, and whether it's up, the loopback, and able to multicast, as Python's `psutil.net_if_addrs()` and `net_if_stats()` give them. They change as networks come and go, so a program that keeps them asks again, as `std.net.mdns` does every 5 seconds:
+
+```calx
+import std.net.{host_name, interfaces}
+
+fn main() {
+    let list = interfaces()!
+    var loopback = false
+    for i in list {
+        if i.loopback {
+            loopback = loopback or i.addresses.any(|a| a.is_loopback())
+        }
+    }
+    println("{loopback} {not host_name().is_empty()}")    // out: true true
+}
+```
+
+On Windows the name is the one the network settings show, `Wi-Fi` or `Ethernet`, and on Linux and macOS the system's, `eth0` or `en0`. An IPv6 link-local address has its interface's index as its scope.
 
 ## Addresses
 
@@ -374,8 +554,9 @@ The runtime keeps each connection's bytes: what arrived and hasn't been read, an
 
 | Platform | Source |
 | --- | --- |
-| Windows | An I/O completion port: `AcceptEx`, `ConnectEx`, `WSARecv`, `WSASend`, `TransmitFile` and `ReadFile`, gathered with `GetQueuedCompletionStatusEx` |
-| Linux | Edge-triggered `epoll`, with `accept4`, and non-blocking `recv`, `send` and `sendfile` |
+| Windows | An I/O completion port: `AcceptEx`, `ConnectEx`, `WSARecv`, `WSASend`, `TransmitFile`, `ReadFile`, `WSARecvFrom` and `WSASendTo`, gathered with `GetQueuedCompletionStatusEx` |
+| Linux | Edge-triggered `epoll`, with `accept4`, and non-blocking `recv`, `send`, `sendfile`, `recvfrom` and `sendto` |
+| macOS | A `kqueue` with `EV_CLEAR`, which is edge-triggered too, with the same calls |
 
 What's written is queued, and handed to the system at the next poll or flush: one `WSASend` or `send` a connection, however many writes there were. A wake is a completion posted to the port with `PostQueuedCompletionStatus` on Windows, and a write to an `eventfd` that epoll watches on Linux, made with the first `waker`. A flag set and cleared atomically makes the wakes before a poll one.
 
@@ -385,6 +566,8 @@ Windows editions for desktops, rather than servers, run two `TransmitFile` calls
 Each `Net` has its own port, epoll or kqueue, and its own slots, buffers and events, and the TransmitFile turns, counted atomically, are all the `Net`s share. Each call of a `Net`'s holds it with a flag that's set and cleared atomically, which is how a second thread in it at once is found and panics, and which also hands what one thread did to the next to hold it. A `Waker`'s wake holds nothing, since any thread may wake a `Net`. A `Conn` holds its `Net`'s number, which std.net checks. The `Net`s a signal wakes are in a list that's locked while one is added, so two threads asking at once each get their place.
 
 Both read up to 16 KB at a time per connection. A listening socket on Windows uses `SO_EXCLUSIVEADDRUSE`, so a second listener on the same port fails with `AddressInUse` on both platforms.
+
+A UDP socket is a slot of the same `Net` as its connections. On Windows it keeps an overlapped `WSARecvFrom` pending into a buffer of 64 KiB, and on Linux and macOS it reads with `recvfrom` until the system has nothing left, each datagram kept with its length and where it came from until `receive_from` takes it. A send is a `sendto` there and then, on a socket that doesn't block; one the system has no room for waits, with where it goes and the multicast interface it was sent on, and goes when epoll or kqueue says there's room, or on Windows by an overlapped `WSASendTo` at a time. On Windows the socket has `SIO_UDP_CONNRESET` and `SIO_UDP_NETRESET` off, so an ICMP error that a send brought back doesn't end the next receive, and `reuse` is `SO_REUSEADDR` where a socket without it has `SO_EXCLUSIVEADDRUSE`. On macOS `reuse` is `SO_REUSEPORT` too, as sharing a port there needs. On Linux a socket has `IP_MULTICAST_ALL` off, so it gets only the groups it joined, as on the other systems, rather than every group any socket on the machine joined. An interface's addresses come from `GetAdaptersAddresses` on Windows and `getifaddrs` elsewhere.
 
 A program that doesn't import `std.net` doesn't link it.
 

@@ -158,27 +158,68 @@ static void out_unlock(int shared) {
 #endif
 }
 
-static void flush_locked(void) {
-    if (out_len) {
-        fwrite(out_buf, 1, out_len, stdout);
-        out_len = 0;
-    }
-    fflush(stdout);
+/* Set once a write to standard output has failed because its reader has gone, as a pipe's has
+ * once `head` has read its lines and ended. What's written from then on is dropped, without
+ * trying, so a program that goes on printing goes on cheaply (CLX-433). SIGPIPE is ignored from
+ * the start (see `cx_start`), so the write fails with EPIPE rather than ending the program. */
+static int out_gone;
+
+/* Whether the write that just failed failed because the reader has gone. On Windows that's a pipe
+ * whose read end was closed, ERROR_NO_DATA, or ERROR_BROKEN_PIPE, which the C library needn't give
+ * as EPIPE, so its own code for the system's error is looked at too. */
+static int out_reader_gone(void) {
+#ifdef _WIN32
+    unsigned long e = _doserrno;
+    return errno == EPIPE || e == ERROR_NO_DATA || e == ERROR_BROKEN_PIPE;
+#else
+    return errno == EPIPE;
+#endif
 }
 
-static void flush_out(void) {
+/* Writes the bytes to standard output through C's buffer, and with `flush` flushes that: 0, -1
+ * once the reader has gone, or the C library's errno for any other failure. */
+static int out_put(const void* p, size_t n, int flush) {
+    if (__atomic_load_n(&out_gone, __ATOMIC_RELAXED)) return -1;
+    errno = 0;
+#ifdef _WIN32
+    _doserrno = 0;
+#endif
+    if ((n == 0 || fwrite(p, 1, n, stdout) == n) && (!flush || fflush(stdout) == 0)) return 0;
+    int e = errno ? errno : EIO;
+    if (out_reader_gone()) {
+        __atomic_store_n(&out_gone, 1, __ATOMIC_RELAXED);
+        e = -1;
+    }
+    clearerr(stdout);
+    return e;
+}
+
+/* 0, -1 once the reader has gone, or errno, as `out_put` gives. */
+static int flush_locked(void) {
+    int e = 0;
+    if (out_len) {
+        e = out_put(out_buf, out_len, 0);
+        out_len = 0;
+    }
+    int f = out_put(NULL, 0, 1);
+    return e ? e : f;
+}
+
+static int flush_out(void) {
     int l = out_lock();
-    flush_locked();
+    int e = flush_locked();
     out_unlock(l);
+    return e;
 }
 
 static void out_bytes(const void* p, size_t n) {
     if (n == 0) return; /* an empty string's pointer can be null, which memcpy can't take */
+    if (__atomic_load_n(&out_gone, __ATOMIC_RELAXED)) return;
     int l = out_lock();
     if (n > sizeof out_buf - out_len) {
         flush_locked();
         if (n > sizeof out_buf) {
-            fwrite(p, 1, n, stdout);
+            out_put(p, n, 0);
             out_unlock(l);
             return;
         }
@@ -195,8 +236,22 @@ static void err_bytes(const void* p, size_t n) {
     out_unlock(l);
 }
 
+#ifdef CX_STATICLIB
+/* A static library's panic, as its text is written (see "panics in a static library" below). */
+typedef struct lib_capture lib_capture;
+static _Thread_local lib_capture* lib_cap;
+static void lib_cap_write(const void* p, size_t n);
+#endif
+
 static void write_bytes(const void* p, size_t n) {
     if (n == 0) return;
+#ifdef CX_STATICLIB
+    /* What a panic says, while it's being written, is kept for the host. */
+    if (lib_cap) {
+        lib_cap_write(p, n);
+        return;
+    }
+#endif
     if (fmt_to) {
         cx_string_push_bytes(fmt_to, (const cx_u8*)p, n);
     } else if (par_buffered) {
@@ -926,8 +981,8 @@ cx_i64 cx_clock_zone_abbreviation(cx_i64 unix_ms, cx_u8* out, cx_usize cap) {
 /* 1 once a program has started here: a Calx library loaded into another program never does. */
 int cx_is_program;
 
-/* 0 before the runtime starts, 1 while it runs, 2 once a static library's host has ended it
- * (see "C calling in" below). */
+/* 0 before the runtime starts, 1 while it runs, 2 once a static library's host has ended it, and
+ * 3 once a panic in a static library has stopped it (see "C calling in" below). */
 static int rt_state;
 
 #ifdef __linux__
@@ -954,6 +1009,12 @@ void cx_start(int argc, char** argv) {
     counter_hz = (cx_u64)hz.QuadPart;
     read_args();
 #else
+    /* A write to a pipe or a socket whose reader has gone fails with EPIPE, rather than ending
+     * the program, as in Python and Rust, and as Windows has it. Whether `println` could end a
+     * program used to depend on whether it had made an HTTP request, as libcurl's loading ignored
+     * it (CLX-433). The programs it starts get the default back (see calx_proc.c). After the
+     * helper above, which starts its child with the default as it was given it. */
+    signal(SIGPIPE, SIG_IGN);
     read_args(argc, argv);
 #endif
     take_script();
@@ -989,10 +1050,33 @@ void cx_foreign_threads(void) { __atomic_store_n(&out_shared, 1, __ATOMIC_RELEAS
 
 static int init_lock;
 
+#ifdef CX_STATICLIB
+/* Each time `calx_init` starts the library counts one more run, from 1, and the last run that
+ * has stopped, by a panic or `calx_shutdown`, is `lib_stopped`. A thread works for the run it
+ * started in, or for the one whose `@export_c` function it's in, and a thread of a run that has
+ * stopped is told so (CLX-407). */
+static cx_u32 lib_runs, lib_stopped;
+static _Thread_local cx_u32 lib_my_run;
+/* Set once the library has panicked, after which the memory the panic left can't be told from a
+ * leak. */
+static int lib_ever_panicked;
+/* Set by calx_thread.c once a thread has waited on a queue: wakes every thread waiting on one,
+ * so a thread of a run that has stopped sees it has. */
+void (*cx_staticlib_wake)(void);
+static void lib_tell_threads(void) {
+    __atomic_store_n(&lib_stopped, __atomic_load_n(&lib_runs, __ATOMIC_ACQUIRE), __ATOMIC_SEQ_CST);
+    /* After the store, so a thread about to wait either sees it or is woken (see calx_thread.c). */
+    void (*wake)(void) = __atomic_load_n(&cx_staticlib_wake, __ATOMIC_SEQ_CST);
+    if (wake) wake();
+}
+static void lib_forget_panic(void);
+#endif
+
 /* A static library's start, which its host calls before anything else in it: what `main`
  * does for a program, but for the command line, which is the host's, so std.env's `args` is
  * empty, and the handlers for a stack that overflows, since the host's own, such as Rust's,
- * are for the process. Calling it again while the runtime runs does nothing. */
+ * are for the process. Calling it again while the runtime runs does nothing; calling it after
+ * `calx_shutdown`, or after a panic stopped the library, starts it again. */
 void calx_init(void) {
     while (__atomic_exchange_n(&init_lock, 1, __ATOMIC_ACQUIRE)) {
 #ifdef _WIN32
@@ -1001,7 +1085,8 @@ void calx_init(void) {
         sched_yield();
 #endif
     }
-    if (__atomic_load_n(&rt_state, __ATOMIC_ACQUIRE) != 1) {
+    int state = __atomic_load_n(&rt_state, __ATOMIC_ACQUIRE);
+    if (state != 1) {
 #ifdef _WIN32
         LARGE_INTEGER hz;
         QueryPerformanceFrequency(&hz);
@@ -1009,22 +1094,38 @@ void calx_init(void) {
 #endif
         /* The host's threads call in whenever they like, so output always takes the lock. */
         __atomic_store_n(&out_shared, 1, __ATOMIC_RELEASE);
+#ifdef CX_STATICLIB
+        /* Stopped by a panic, and not shut down: what it printed goes out first. */
+        if (state == 3) flush_out();
+        lib_forget_panic();
+        __atomic_fetch_add(&lib_runs, 1, __ATOMIC_ACQ_REL);
+#endif
         __atomic_store_n(&rt_state, 1, __ATOMIC_RELEASE);
     }
     __atomic_store_n(&init_lock, 0, __ATOMIC_RELEASE);
 }
 
 /* A static library's end: what it wrote is written out, and the terminal is put back as it was.
- * Threads the library started must have stopped, as its own stop function would see to. A
- * debug build then checks that everything Calx allocated was freed, as a program's end does,
- * and gives 102 if not, having said so; otherwise it gives 0. */
+ * Threads the library started must have stopped, as its own stop function would see to; any
+ * still waiting on a queue are woken, and told the library has stopped. A debug build then
+ * checks that everything Calx allocated was freed, as a program's end does, and gives 102 if not,
+ * having said so; otherwise it gives 0. After a panic it gives 101, as a program that panicked
+ * ends with, and doesn't check (CLX-407). */
 int calx_shutdown(void) {
-    if (__atomic_load_n(&rt_state, __ATOMIC_ACQUIRE) != 1) return 0;
+    int state = __atomic_load_n(&rt_state, __ATOMIC_ACQUIRE);
+    if (state != 1 && state != 3) return 0;
+#ifdef CX_STATICLIB
+    lib_tell_threads();
+#endif
     __atomic_store_n(&rt_state, 2, __ATOMIC_RELEASE);
     flush_out();
     term_end(1);
+    if (state == 3) return 101;
 #ifdef CX_DEBUG
     cx_usize live = cx_alloc_live();
+#ifdef CX_STATICLIB
+    if (__atomic_load_n(&lib_ever_panicked, __ATOMIC_ACQUIRE)) live = 0;
+#endif
     if (live && !__atomic_load_n(&services_live, __ATOMIC_ACQUIRE)) {
         fprintf(stderr, "calx: %llu allocation%s never freed when the library was shut down\n", (unsigned long long)live,
                 live == 1 ? " was" : "s were");
@@ -1083,6 +1184,16 @@ void cx_out_write(const cx_u8* p, cx_usize n) {
 void cx_out_flush(void) {
     if (!par_buffered) flush_out();
 }
+
+/* As `cx_out_flush`, for std.io's `Stdout`: 0, -1 once standard output's reader has gone, or the
+ * C library's errno for any other failure. */
+cx_i32 cx_out_flush_checked(void) {
+    if (par_buffered) return 0;
+    return flush_out();
+}
+
+/* Whether standard output's reader has gone, so what's written to it is dropped (see `out_gone`). */
+cx_u32 cx_out_gone(void) { return __atomic_load_n(&out_gone, __ATOMIC_RELAXED) ? 1 : 0; }
 
 /* Whether standard output is a terminal. A Windows console reads ANSI escape codes only once a
  * program turns that on, which this does, and a console that can't, before Windows 10, counts as
@@ -2426,7 +2537,18 @@ void cx_fmt_end(cx_String* previous) { fmt_to = previous; }
 
 static CX_COLD void par_panicked(void);
 
+#ifdef CX_STATICLIB
+static void lib_panic_begin(const char* at);
+static CX_COLD void lib_finish(void);
+static void lib_trace_begin(void);
+#endif
+
 void cx_panic_begin(const char* at) {
+#ifdef CX_STATICLIB
+    /* A static library's host hears of the panic, and its process goes on. */
+    lib_panic_begin(at);
+    return;
+#endif
     fmt_to = 0;
     /* Outside a chunk, this thread ends the program, unless another is already ending it. */
     if (!par_buffered) {
@@ -2440,6 +2562,12 @@ void cx_panic_begin(const char* at) {
 }
 
 void cx_panic_end(void) {
+#ifdef CX_STATICLIB
+    lib_trace_begin();
+    cx_trace_write(panic_text, par_buffered ? 1 : 0, 0);
+    if (par_buffered) par_panicked();
+    lib_finish();
+#endif
     panic_text("\n");
     cx_trace_write(panic_text, par_buffered ? 1 : 0, 0);
     if (par_buffered) par_panicked();
@@ -2776,6 +2904,13 @@ typedef struct par_job {
     PAR_SHARED cx_u32 word;   /* jobs opened * 2, plus 1 while one is open */
     PAR_SHARED cx_u32 active; /* an inner job: threads in it besides its owner */
     PAR_SHARED cx_u64 panic;  /* the first chunk that panicked */
+#ifdef CX_STATICLIB
+    /* In a static library, what the first chunk that panicked said, for the owner to give the
+     * host: a `lib_capture`, the chunk it's from, and a lock for the two (CLX-407). */
+    void* lib_rec;
+    cx_u64 lib_rec_chunk;
+    int lib_rec_lock;
+#endif
 } par_job;
 
 /* A worker's own cache line: the top job it's in, `word << 32`, plus 1 and the chunks of it the
@@ -2820,6 +2955,9 @@ static _Thread_local cx_u32 par_victim; /* the range it last took chunks from */
 static _Thread_local par_line* par_mine; /* a worker's own line */
 /* The pool of the loop this thread runs alone, outside a chunk. */
 static _Thread_local struct par_pool* par_home;
+/* The program's pool this thread has taken to run a loop on, which a panic in a static library
+ * gives back (CLX-407). */
+static _Thread_local struct par_pool* par_taken;
 
 static void par_pause(void) { CX_SPIN_PAUSE(); }
 
@@ -3117,8 +3255,17 @@ static void par_drain(par_job* j) {
  * message and the frames inside the loop, then the frames outside it, and exits. The job stays
  * open until then, since a range of chunks before the one that panicked may belong to a worker
  * that hasn't come yet. */
+#ifdef CX_STATICLIB
+static CX_COLD void lib_par_end(par_pool* p, cx_u32 w, cx_u64 first);
+static void lib_par_keep(par_job* j, cx_u64 c);
+static void lib_par_take(par_job* j);
+static CX_COLD void lib_jump(void);
+#endif
+
 static CX_COLD void par_end_panic(par_pool* p) {
+#ifndef CX_STATICLIB
     take_exit();
+#endif
     cx_u64 first;
     for (unsigned spins = 0;; spins++) {
         first = __atomic_load_n(&p->top.panic, __ATOMIC_ACQUIRE);
@@ -3128,12 +3275,18 @@ static CX_COLD void par_end_panic(par_pool* p) {
         if (spins < 4096) par_pause();
         else par_yield();
     }
+#ifdef CX_STATICLIB
+    cx_u32 open = __atomic_load_n(&p->top.word, __ATOMIC_ACQUIRE);
+#endif
     par_close(&p->top);
     par_cur = 0;
     par_buffered = 0;
     to_stderr = 0;
     par_replay(&p->top, first + 1);
     flush_out();
+#ifdef CX_STATICLIB
+    lib_par_end(p, open, first);
+#endif
     fmt_to = 0;
     to_stderr = 1;
     cx_trace_write(panic_text, 2, 0);
@@ -3156,6 +3309,10 @@ static CX_COLD void par_end_inner(par_job* j) {
     par_owner = j->up_owner;
     par_buffered = 1;
     par_replay(j, __atomic_load_n(&j->panic, __ATOMIC_ACQUIRE) + 1);
+#ifdef CX_STATICLIB
+    /* The first panic's text, which the frames between the loops go after. */
+    lib_par_take(j);
+#endif
     /* None of these return, so each inner loop this thread has ended a panic in is on its stack. */
     fmt_to = 0;
     to_stderr = 1;
@@ -3168,6 +3325,10 @@ static CX_COLD void par_panicked(void) {
     par_job* j = par_cur;
     par_pool* p = j->pool;
     cx_u64 c = par_chunk;
+#ifdef CX_STATICLIB
+    /* Kept before the job says a chunk panicked, so its owner finds it. */
+    lib_par_keep(j, c);
+#endif
     cx_u64 first = __atomic_load_n(&j->panic, __ATOMIC_ACQUIRE);
     while (c < first && !__atomic_compare_exchange_n(&j->panic, &first, c, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
     }
@@ -3184,6 +3345,11 @@ static CX_COLD void par_panicked(void) {
         while (__atomic_load_n(&p->top.panic, __ATOMIC_ACQUIRE) == PAR_NONE) par_yield();
         par_end_panic(p);
     }
+#ifdef CX_STATICLIB
+    /* A static library's worker goes back to waiting for loops; the top job's owner gives the
+     * panic to the host. */
+    lib_jump();
+#endif
     /* A worker stops for good; the top job's owner ends the program. */
     for (;;) {
 #ifdef _WIN32
@@ -3207,6 +3373,28 @@ static void par_wait(par_pool* p, cx_u32 seen) {
     __atomic_fetch_sub(&p->sleepers, 1, __ATOMIC_RELAXED);
 }
 
+/* A worker's part of the top job `w` of `p`, which it has joined as `in`. */
+typedef struct {
+    par_pool* p;
+    cx_u32 w;
+    cx_u64 in;
+    par_line* mine;
+} par_turn;
+
+static void par_take_turn(void* arg) {
+    par_turn* t = (par_turn*)arg;
+    par_depth = 1;
+    cx_u64 ran = par_claim(&t->p->top, 0, 0);
+    /* Release, so the owner sees what the chunks wrote. */
+    __atomic_store_n(&t->mine->in, t->in + 1 + ran, __ATOMIC_RELEASE);
+    par_help(t->p, t->w);
+    par_depth = 0;
+}
+
+#ifdef CX_STATICLIB
+static int lib_run(const char* name, void (*run)(void*), void* args);
+#endif
+
 static void par_work(par_pool* p, cx_usize id, par_line* mine) {
     par_worker = 1;
     par_slot = (cx_u32)id + 1;
@@ -3222,12 +3410,14 @@ static void par_work(par_pool* p, cx_usize id, par_line* mine) {
         cx_u64 in = (cx_u64)w << 32;
         __atomic_store_n(&mine->in, in, __ATOMIC_SEQ_CST);
         if (__atomic_load_n(&p->top.word, __ATOMIC_SEQ_CST) == w) {
-            par_depth = 1;
-            cx_u64 ran = par_claim(&p->top, 0, 0);
-            /* Release, so the owner sees what the chunks wrote. */
-            __atomic_store_n(&mine->in, in + 1 + ran, __ATOMIC_RELEASE);
-            par_help(p, w);
-            par_depth = 0;
+            par_turn t = {p, w, in, mine};
+#ifdef CX_STATICLIB
+            /* A chunk that panics in a static library comes back here, and the worker waits for
+             * the next loop, as the job's owner gives the panic to the host (CLX-407). */
+            (void)lib_run(0, par_take_turn, &t);
+#else
+            par_take_turn(&t);
+#endif
         }
         __atomic_store_n(&mine->in, 0, __ATOMIC_RELEASE);
     }
@@ -3274,6 +3464,359 @@ void cx_panic_text(const char* at, const char* message) {
     panic_text(message);
     cx_panic_end();
 }
+
+/* Declared by std/thread.calx: whether the static library this thread works for has stopped, by a
+ * panic or by `calx_shutdown`, since the thread started, or since the `@export_c` call it's in
+ * began. Never in a program, which a panic ends (CLX-407). */
+cx_bool cx_thread_stopping(void) {
+    if (par_depth) {
+        cx_panic_text("std.thread.stopping", "`stopping()` can't be asked inside a `parallel for`, since its answer depends on "
+                                             "timing");
+    }
+#ifdef CX_STATICLIB
+    cx_u32 run = lib_my_run ? lib_my_run : __atomic_load_n(&lib_runs, __ATOMIC_ACQUIRE);
+    return run <= __atomic_load_n(&lib_stopped, __ATOMIC_SEQ_CST);
+#else
+    return 0;
+#endif
+}
+
+#ifdef CX_STATICLIB
+/* --- panics in a static library (CLX-407) --------------------------------------------------
+ * A program ends when it panics. A static library is part of its host's process, so a panic in
+ * it comes back to the host instead, as a panic in a Rust library does to a host that catches it:
+ *
+ * - Each `@export_c` function calls its Calx function through `cx_staticlib_call`, which marks the
+ *   place to come back to with `setjmp`. A panic writes its message and trace into a `lib_capture`
+ *   rather than standard error, gives them to the host, and `longjmp`s back there, so the call
+ *   returns to C with its `on_panic` value, or its result type's zero.
+ * - A thread `Thread.spawn` started has such a place where it starts, so a panic on it ends that
+ *   thread, and `join` returns. A `parallel for` worker has one where it takes its part of a loop,
+ *   and goes back to waiting for loops, as the loop's owner gives the panic to the host.
+ * - Nothing is dropped on the way: Calx has no unwinding. What the panicking calls owned stays
+ *   allocated, and what a value was in the middle of may be half done, so the first panic stops
+ *   the library. Later calls into it return at once, without running, until the host shuts it down
+ *   and starts it again, with `calx_shutdown` and `calx_init`. Its threads are told: a queue's
+ *   `wait` gives `none` to a thread of a run that has stopped, and std.thread's `stopping()` says
+ *   so, but each runs until it ends by itself, since nothing can stop a thread safely from
+ *   outside.
+ * - The host hears of each panic through the hook it gave `calx_on_panic`, on the thread that
+ *   panicked, or, without one, it's written to standard error, as a program's is. `calx_panicked`
+ *   gives the first, the one that stopped the library, until the next `calx_init`.
+ * - A stack that overflows isn't a panic here: `calx_init` leaves the handlers for such faults to
+ *   the host, whose own, such as Rust's, are for the whole process. */
+
+#include <setjmp.h>
+
+#ifdef _WIN32
+#define LIB_SETJMP(b) setjmp(b)
+#define LIB_LONGJMP(b) longjmp(b, 1)
+#else
+/* Without saving the signal mask, which would be a call to the system on every call in. */
+#define LIB_SETJMP(b) _setjmp(b)
+#define LIB_LONGJMP(b) _longjmp(b, 1)
+#endif
+
+/* What the header gives the host. */
+typedef struct calx_panic {
+    const char* message;
+    const char* location;
+    const char* trace;
+    const char* function;
+} calx_panic;
+
+#define LIB_AT 256
+#define LIB_MESSAGE 4096
+#define LIB_TRACE 16384
+
+/* A panic's text as it's written: where, what, and the frames, each cut short to fit. */
+struct lib_capture {
+    int in_trace;
+    size_t message_len, trace_len;
+    char at[LIB_AT];
+    char message[LIB_MESSAGE];
+    char trace[LIB_TRACE];
+};
+
+/* Where a panic on this thread comes back to, innermost first, with what the thread's runtime
+ * state was there, which is put back as it does. */
+typedef struct lib_catch {
+    jmp_buf jb;
+    struct lib_catch* outer;
+    const char* name; /* the `@export_c` function's, or null for a thread of the library's */
+    cx_String* fmt_to;
+    int to_stderr, par_buffered, par_depth, par_owner, par_ending;
+    par_job* par_cur;
+    cx_u64 par_chunk;
+    par_pool* par_home;
+    par_pool* par_taken;
+    cx_u32 par_slot;
+    cx_u32 run;
+} lib_catch;
+
+static _Thread_local lib_catch* lib_top;
+
+static void par_give(par_pool* p);
+
+static void lib_text(char* to, size_t cap, size_t* len, const void* p, size_t n) {
+    if (*len + n >= cap) n = cap - 1 - *len;
+    memcpy(to + *len, p, n);
+    *len += n;
+    to[*len] = 0;
+}
+
+static void lib_cap_write(const void* p, size_t n) {
+    lib_capture* c = lib_cap;
+    if (c->in_trace) lib_text(c->trace, LIB_TRACE, &c->trace_len, p, n);
+    else lib_text(c->message, LIB_MESSAGE, &c->message_len, p, n);
+}
+
+/* Ends the process after a panic whose text can't be kept, or one inside another's. */
+static CX_COLD void lib_give_up(const char* at, const char* why) {
+    fprintf(stderr, "panic at %s: %s\n", at, why);
+    fflush(stderr);
+    _Exit(101);
+}
+
+static lib_capture* lib_capture_new(const char* at) {
+    lib_capture* c = (lib_capture*)calloc(1, sizeof *c);
+    if (!c) lib_give_up(at, "out of memory, as the library panicked");
+    size_t n = 0;
+    lib_text(c->at, LIB_AT, &n, at, strlen(at));
+    return c;
+}
+
+static void lib_panic_begin(const char* at) {
+    if (lib_cap) {
+        /* Something the first panic's message called panicked too. */
+        lib_give_up(at, "the library panicked while it was saying why it panicked");
+    }
+    lib_cap = lib_capture_new(at);
+}
+
+static void lib_trace_begin(void) { lib_cap->in_trace = 1; }
+
+/* The host's hook, and the panic that stopped the library, under `lib_lock`. */
+static int lib_lock;
+static void (*lib_hook)(void* ctx, const calx_panic* panic);
+static void* lib_hook_ctx;
+static int lib_has_first;
+static calx_panic lib_first;
+static char lib_first_at[LIB_AT], lib_first_message[LIB_MESSAGE], lib_first_trace[LIB_TRACE], lib_first_function[LIB_AT];
+
+static void lib_lock_take(void) {
+    while (__atomic_exchange_n(&lib_lock, 1, __ATOMIC_ACQUIRE)) CX_SPIN_PAUSE();
+}
+
+static void lib_lock_give(void) { __atomic_store_n(&lib_lock, 0, __ATOMIC_RELEASE); }
+
+static void lib_forget_panic(void) {
+    lib_lock_take();
+    __atomic_store_n(&lib_has_first, 0, __ATOMIC_RELEASE);
+    lib_lock_give();
+}
+
+static void lib_copy(char* to, size_t cap, const char* s) {
+    size_t n = 0;
+    to[0] = 0;
+    if (s) lib_text(to, cap, &n, s, strlen(s));
+}
+
+/* Gives the host a panic: kept as the one that stopped the library if it's the first of the
+ * current run, then to the hook, or to standard error. */
+static void lib_deliver(lib_capture* c, const char* function, int fatal) {
+    calx_panic p = {c->message, c->at, c->trace, function};
+    int first = 0;
+    lib_lock_take();
+    cx_u32 runs = __atomic_load_n(&lib_runs, __ATOMIC_ACQUIRE);
+    cx_u32 mine = lib_my_run ? lib_my_run : runs;
+    if (mine == runs && __atomic_load_n(&rt_state, __ATOMIC_ACQUIRE) == 1) {
+        lib_copy(lib_first_at, LIB_AT, c->at);
+        lib_copy(lib_first_message, LIB_MESSAGE, c->message);
+        lib_copy(lib_first_trace, LIB_TRACE, c->trace);
+        lib_copy(lib_first_function, LIB_AT, function);
+        lib_first.location = lib_first_at;
+        lib_first.message = lib_first_message;
+        lib_first.trace = lib_first_trace;
+        lib_first.function = function ? lib_first_function : NULL;
+        __atomic_store_n(&lib_has_first, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&lib_ever_panicked, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&rt_state, 3, __ATOMIC_RELEASE);
+        first = 1;
+    }
+    void (*hook)(void*, const calx_panic*) = lib_hook;
+    void* ctx = lib_hook_ctx;
+    lib_lock_give();
+    if (first) lib_tell_threads();
+    if (hook) {
+        hook(ctx, &p);
+    } else {
+        flush_out();
+        fprintf(stderr, "panic at %s: %s\n%s", c->at, c->message, c->trace);
+        fflush(stderr);
+    }
+    if (fatal) {
+        flush_out();
+        fflush(stderr);
+        _Exit(101);
+    }
+}
+
+/* Back to the innermost place a panic on this thread comes back to. */
+static CX_COLD void lib_jump(void) {
+    lib_catch* k = lib_top;
+    if (!k) lib_give_up("<library>", "a thread with nowhere to go back to panicked");
+    lib_top = k->outer;
+    LIB_LONGJMP(k->jb);
+    __builtin_unreachable();
+}
+
+/* The end of a panic on this thread: the host hears of it, and the thread goes back to where it
+ * came into the library. */
+static CX_COLD void lib_finish(void) {
+    lib_capture* c = lib_cap;
+    lib_cap = 0;
+    lib_catch* k = lib_top;
+    lib_deliver(c, k ? k->name : NULL, !k);
+    free(c);
+    lib_jump();
+}
+
+/* Runs `run(args)`, coming back here if it panics: 1 if it returned, 0 if it panicked. */
+static int lib_run(const char* name, void (*run)(void*), void* args) {
+    lib_catch k;
+    k.outer = lib_top;
+    k.name = name;
+    k.fmt_to = fmt_to;
+    k.to_stderr = to_stderr;
+    k.par_buffered = par_buffered;
+    k.par_depth = par_depth;
+    k.par_owner = par_owner;
+    k.par_ending = par_ending;
+    k.par_cur = par_cur;
+    k.par_chunk = par_chunk;
+    k.par_home = par_home;
+    k.par_taken = par_taken;
+    k.par_slot = par_slot;
+    k.run = lib_my_run;
+    if (LIB_SETJMP(k.jb)) {
+        /* A program's pool the panicking loop ran on is free again. */
+        if (par_taken && par_taken != k.par_taken) par_give(par_taken);
+        fmt_to = k.fmt_to;
+        to_stderr = k.to_stderr;
+        par_buffered = k.par_buffered;
+        par_depth = k.par_depth;
+        par_owner = k.par_owner;
+        par_ending = k.par_ending;
+        par_cur = k.par_cur;
+        par_chunk = k.par_chunk;
+        par_home = k.par_home;
+        par_taken = k.par_taken;
+        par_slot = k.par_slot;
+        lib_my_run = k.run;
+        return 0;
+    }
+    lib_top = &k;
+    run(args);
+    lib_top = k.outer;
+    return 1;
+}
+
+int cx_staticlib_call(const char* name, void (*run)(void*), void* args) {
+    int state = __atomic_load_n(&rt_state, __ATOMIC_ACQUIRE);
+    if (__builtin_expect(state != 1, 0)) {
+        /* Stopped by a panic: refused, quietly, as the host knows why. */
+        if (state == 3) return 0;
+        refuse_call(name, state);
+    }
+    cx_u32 was = lib_my_run;
+    lib_my_run = __atomic_load_n(&lib_runs, __ATOMIC_ACQUIRE);
+    int ok = lib_run(name, run, args);
+    lib_my_run = was;
+    return ok;
+}
+
+/* For calx_thread.c: the run a thread being started works for, and a thread of the library's,
+ * started on `run(task)` for run `run_of`, with a place to come back to if it panics. */
+cx_u32 cx_staticlib_run_now(void) { return lib_my_run ? lib_my_run : __atomic_load_n(&lib_runs, __ATOMIC_ACQUIRE); }
+
+void cx_staticlib_thread(void (*run)(void*), void* task, cx_u32 run_of) {
+    lib_my_run = run_of;
+    (void)lib_run(NULL, run, task);
+    lib_my_run = 0;
+}
+
+/* For calx_thread.c: whether a thread waiting on a queue should stop waiting. */
+int cx_staticlib_told(void) {
+    cx_u32 run = lib_my_run ? lib_my_run : __atomic_load_n(&lib_runs, __ATOMIC_ACQUIRE);
+    return run <= __atomic_load_n(&lib_stopped, __ATOMIC_SEQ_CST);
+}
+
+/* A chunk of `j`, `c`, panicked on this thread: its text is kept in `j` if it's the first, for
+ * the job's owner, and this thread has none. */
+static void lib_par_keep(par_job* j, cx_u64 c) {
+    lib_capture* mine = lib_cap;
+    lib_cap = 0;
+    while (__atomic_exchange_n(&j->lib_rec_lock, 1, __ATOMIC_ACQUIRE)) CX_SPIN_PAUSE();
+    if (c < j->lib_rec_chunk) {
+        free(j->lib_rec);
+        j->lib_rec = mine;
+        j->lib_rec_chunk = c;
+        mine = 0;
+    }
+    __atomic_store_n(&j->lib_rec_lock, 0, __ATOMIC_RELEASE);
+    free(mine);
+}
+
+/* On `j`'s owner, once it ends a panic in it: the first panicking chunk's text becomes this
+ * thread's, for the frames outside the loop to be added to. */
+static void lib_par_take(par_job* j) {
+    while (__atomic_exchange_n(&j->lib_rec_lock, 1, __ATOMIC_ACQUIRE)) CX_SPIN_PAUSE();
+    lib_capture* c = (lib_capture*)j->lib_rec;
+    j->lib_rec = 0;
+    j->lib_rec_chunk = PAR_NONE;
+    __atomic_store_n(&j->lib_rec_lock, 0, __ATOMIC_RELEASE);
+    free(lib_cap);
+    lib_cap = c ? c : lib_capture_new("<parallel>");
+    lib_cap->in_trace = 1;
+}
+
+/* After a panic in `p`'s top job, whose open word was `w`, on its owner, once the chunks before
+ * the first one that panicked, `first`, have run and their output is written: waits for every
+ * worker to leave the job, so the pool is ready for the next loop, then gives the host the panic,
+ * with the frames outside the loop. */
+static CX_COLD void lib_par_end(par_pool* p, cx_u32 w, cx_u64 first) {
+    par_nudge(p);
+    for (cx_usize k = 0; k < p->started; k++) {
+        for (unsigned spins = 0; __atomic_load_n(&p->lines[k]->in, __ATOMIC_ACQUIRE) >> 32 == w; spins++) {
+            if (spins < 4096) par_pause();
+            else par_yield();
+        }
+    }
+    /* What chunks after the first that panicked printed, which isn't written. */
+    for (cx_u64 c = first + 1; c < p->top.chunks; c++) {
+        par_out* o = p->top.outs[c];
+        if (!o) continue;
+        free(o->p);
+        free(o);
+        p->top.outs[c] = 0;
+    }
+    lib_par_take(&p->top);
+    cx_trace_write(panic_text, 2, 0);
+    lib_finish();
+}
+
+/* The host's: its hook, which may be null, for every panic from now on. */
+void calx_on_panic(void (*hook)(void* ctx, const calx_panic* panic), void* ctx) {
+    lib_lock_take();
+    lib_hook = hook;
+    lib_hook_ctx = ctx;
+    lib_lock_give();
+}
+
+/* The host's: the panic that stopped the library, or null, until the next `calx_init`. */
+const calx_panic* calx_panicked(void) { return __atomic_load_n(&lib_has_first, __ATOMIC_ACQUIRE) ? &lib_first : NULL; }
+#endif
 
 /* Declared by std/pool.calx. */
 cx_usize cx_workers(void) { return par_threads(); }
@@ -3379,6 +3922,9 @@ static void par_setup(par_pool* p, par_job* j, cx_u64 base, cx_u64 n, par_body b
     j->chunk = chunk;
     j->chunks = chunks;
     j->panic = PAR_NONE;
+#ifdef CX_STATICLIB
+    j->lib_rec_chunk = PAR_NONE;
+#endif
 }
 
 /* Iterations `base` to `base + n` of a loop inside a chunk of `p`, on a slot of its own that idle
@@ -3562,7 +4108,9 @@ __attribute__((noinline, disable_tail_calls)) void cx_parallel_on(cx_u64 pool, c
     }
     par_pool* p = (par_pool*)(uintptr_t)pool;
     par_take(p);
+    par_taken = p;
     par_run(p, p->target, n, body, ctx);
+    par_taken = 0;
     par_give(p);
 }
 
