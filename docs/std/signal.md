@@ -64,6 +64,7 @@ A server stops taking requests at a signal, answers the ones it has, and closes 
 - **Signals that come before they're taken** wait in order, `Interrupt`, then `Terminate`, then `Hangup`, and one kind that comes twice before it's taken comes as one, as the system's own pending signals do.
 - **The handler only records the signal.** On POSIX a handler can run on any thread at any moment, in the middle of an allocation even, so it sets a flag and writes a byte to a pipe, which is all that's safe there, and a thread of the runtime's own wakes what waits. On Windows the system runs the handler on a thread of its own, which wakes what waits itself. Either way the program's own code runs only where it asks: at `take`, `wait`, or a poll.
 - **It ends as it means to.** A program that handled a signal ends by returning from `main` or with `exit`, with its own status: 0 after a clean stop, where a program the signal ended would have 130 or 143 from a shell. [`std.term`](term.md)'s `at_exit` text is written then, and standard input put back, as at any end.
+- **Under `calx run`** it's the same: `calx run` doesn't end at these while the program runs, but waits for it and ends with its status, on every system ([`calx run`](../reference/command.md#running-a-file)).
 - **`take`, `pending` and `wait` aren't `unsafe`**, though when a signal comes depends on what's outside the program, as reading standard input and the network aren't. Like those, `wait` can't be called inside a `parallel for`.
 
 ## Which signal is which

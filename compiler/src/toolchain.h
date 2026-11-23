@@ -92,7 +92,9 @@ int run_process(const std::vector<std::string>& argv, const std::string& name = 
 
 // Runs the program `calx run` stands for, as the last thing this process does, and returns its
 // status, or -1 if it couldn't start: on macOS in this process's place, so it doesn't return if it
-// started, and elsewhere as run_process, which ties the program's life to this process's.
+// started, and elsewhere as run_process, which ties the program's life to this process's, but
+// waiting through the signals and console events that ask the program to stop, so it can handle
+// them (CLX-445).
 int run_last(const std::vector<std::string>& argv, const std::string& name, RunPath* started = nullptr);
 
 // Why the last program this thread tried to start couldn't, when there's more to say than that it

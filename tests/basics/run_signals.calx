@@ -1,0 +1,130 @@
+// A program `calx run` runs gets to handle SIGTERM, Ctrl+C and SIGHUP, and end as it means to
+// (CLX-445): `calx run` waits for it rather than ending at the signal, passes on one sent to
+// `calx run` alone, and ends with the program's status. Killed, it still takes the program with
+// it. The test writes a script that handles them, as a server that cleans up does, and runs it
+// with `calx run`: after the signal it waits 300 ms, then writes which signal came to a file.
+import std.env.{variable}
+import std.fs.{metadata, read_text, remove_dir_all, separator, temp_dir, write_text}
+import std.process.{Child, Command, Status, Stdio}
+import std.thread.{sleep}
+
+fn pause(ms: u64) {
+    unsafe {
+        sleep(ms * 1000000)
+    }
+}
+
+// Runs the script with `calx run`, in a group of its own if `grouped`, and waits until it's ready.
+fn start(script: String, what: String, file: String, grouped: bool) -> Child {
+    let calx = variable("CALX") ?? String("calx")
+    let c = Command.new(calx).args(["run", script.copy(), "--", what.copy(), file.copy()]).stdout(Stdio.Pipe)
+    let child = if grouped { c.own_group().spawn()! } else { c.spawn()! }
+    _ = child.wait_for_line("ready", 120000)
+    return child
+}
+
+// How it ended, and what the script wrote once it had cleaned up.
+fn ended(child: mut Child, file: String) -> String {
+    let status = match child.wait_timeout(60000) {
+        some(s) => "{s}",
+        none => {
+            child.kill()
+            String("still running")
+        },
+    }
+    _ = child.wait()
+    let said = match read_text(file) {
+        ok(t) => t ?? String("not UTF-8"),
+        err(_) => String("nothing"),
+    }
+    return "{status}: {said}"
+}
+
+fn size(file: String) -> u64 {
+    return match metadata(file) {
+        ok(m) => m.size,
+        err(_) => 0,
+    }
+}
+
+// Whether the file has stopped growing, as it does once the script has gone, within 10 seconds.
+fn still(file: String) -> bool {
+    for _ in 0..20 {
+        let was = size(file)
+        pause(500)
+        if size(file) == was {
+            return true
+        }
+    }
+    return false
+}
+
+fn main() {
+    let tmp = temp_dir()!
+    let sep = separator()
+    let windows = sep == "\\"
+    let script = "{tmp}{sep}stops.calx"
+    write_text(script, #"
+        import std.env.{args}
+        import std.fs.{append_text, write_text}
+        import std.io.{flush}
+        import std.signal.{handle, wait}
+        import std.thread.{sleep}
+
+        fn main() {
+            let a = args()
+            handle()
+            println("ready")
+            flush()
+            if a[0] == "beat" {
+                while wait(20) == none {
+                    append_text(a[1], "x")!
+                }
+                return
+            }
+            if let s = wait(-1) {
+                unsafe { sleep(300000000) }
+                write_text(a[1], "stopped on {s}")!
+            }
+        }
+        "#)!
+
+    // Asked to stop with its group, as a test runner's `stop` and systemd ask: SIGTERM on Linux and
+    // macOS, and Ctrl+Break on Windows.
+    let f1 = "{tmp}{sep}stop"
+    var a = start(script, "wait", f1, true)
+    a.stop()
+    println(ended(mut a, f1))    // out: exited with status 0: stopped on terminate
+
+    // Ctrl+C and the terminal going away, to the group, and SIGTERM to `calx run` alone, which it
+    // passes on. Windows has no signals to send.
+    for (sig, name, grouped) in [(2, "interrupt", true), (1, "hangup", true), (15, "terminate", false)] {
+        if windows {
+            println("exited with status 0: stopped on {name}")
+            continue
+        }
+        let f = "{tmp}{sep}signal{sig}"
+        var c = start(script, "wait", f, grouped)
+        match c.signal(sig) {
+            ok => println(ended(mut c, f)),
+            err(e) => {
+                c.kill()
+                _ = c.wait()
+                println("{e}")
+            },
+        }
+    }
+    // out: exited with status 0: stopped on interrupt
+    // out: exited with status 0: stopped on hangup
+    // out: exited with status 0: stopped on terminate
+
+    // Killed, `calx run` takes the program with it, which can't clean up: the file it adds to every
+    // 20 ms stops growing.
+    let f2 = "{tmp}{sep}beat"
+    var b = start(script, "beat", f2, false)
+    pause(200)
+    b.kill()
+    let killed: Status = b.wait().status
+    println("killed: {killed.code == none} {size(f2) > 0} {still(f2)}")    // out: killed: true true true
+    remove_dir_all(tmp)!
+}
