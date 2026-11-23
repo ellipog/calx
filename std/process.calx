@@ -224,6 +224,7 @@ pub struct Command {
     fast: bool,
     alone: bool,
     grouped: bool,
+    bound: bool,
 }
 
 impl Command {
@@ -245,6 +246,7 @@ impl Command {
             fast: false,
             alone: false,
             grouped: false,
+            bound: false,
         }
     }
 
@@ -398,6 +400,20 @@ impl Command {
     pub fn own_group(own self) -> Command {
         var c = self
         c.grouped = true
+        return c
+    }
+
+    /// Ends it when this program ends, however this program ends: by returning from `main` or
+    /// with `exit`, by a panic, a crash, or being killed, with `kill -9` or the OOM killer. With
+    /// `own_group` its whole group goes with it, so a browser goes with its renderers. On Windows
+    /// it's a job that kills what's in it as this program ends. On Linux and macOS a small watcher,
+    /// this program's own file run again, kills it with SIGKILL as this program's end closes a
+    /// pipe it holds: Linux's death signal comes when the thread that started a child ends, and
+    /// macOS has none. Starting it fails with `BadArgument` in a Calx library in another program,
+    /// which can't run its own file again, on Linux and macOS.
+    pub fn ends_with_this(own self) -> Command {
+        var c = self
+        c.bound = true
         return c
     }
 
@@ -973,6 +989,7 @@ fn start(c: Command, in_default: Stdio, out_default: Stdio, err_default: Stdio, 
     spec.push(if c.fast { 1 } else { 0 })
     spec.push(if c.alone { 1 } else { 0 })
     spec.push(if c.grouped { 1 } else { 0 })
+    spec.push(if c.bound { 1 } else { 0 })
     let h = unsafe { cx_proc_spawn(spec.as_ptr(), spec.len(), c.given.as_ptr(), c.given.len(), group) }
     if h != 0 {
         return h
@@ -987,6 +1004,8 @@ fn start(c: Command, in_default: Stdio, out_default: Stdio, err_default: Stdio, 
         }),
         4 => ProcessError.BadArgument(if code == 2 {
             "an argument to the batch file {c.program} has a line break in it, which cmd.exe can't be given"
+        } else if code == 7 {
+            String("a Calx library in another program can't start a program that ends with it: ends_with_this() runs this program's own file again")
         } else if code == 5 or code == 6 {
             pin_trouble(c.cpus, code)
         } else {

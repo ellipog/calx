@@ -47,6 +47,7 @@ Each method gives the command back with one more thing said, so they chain. A co
 | `c.full_speed()` | Takes it out of Windows' power throttling, so Windows doesn't move it to the efficiency cores or slow it down to save power. Other systems have none, so it does nothing there |
 | `c.measured()` | Starts it so its peak memory is its own on Linux, not at least this program's: see [What it used](#what-it-used). Elsewhere it's its own already, so it does nothing there |
 | `c.own_group()` | Starts it in a process group of its own, with the programs it starts, so they can be stopped together: see [Stopping it and what it started](#stopping-it-and-what-it-started) |
+| `c.ends_with_this()` | Ends it when this program ends, however this program ends, killed too, and with `own_group` its whole group: see [Ending with this program](#ending-with-this-program) |
 
 `Stdio` is where a stream goes:
 
@@ -381,7 +382,26 @@ A program that ends without meaning to takes the programs it started with it, so
 
 - **On Windows**, every program a Calx program starts goes into a job, with every program those start in turn. If the Calx program panics, crashes or is killed, the job kills all of them, however deep they go. A program they start may still leave the job, as one that starts something in the background does.
 - **On Linux**, a panic kills the programs the Calx program started, and the whole group of each started with [`own_group`](#stopping-it-and-what-it-started). What the others started runs on, since Linux has no job to hold them, but stopping the process group, as a terminal's Ctrl+C or a test runner does, reaches them all.
-- **A program that ends as it means to**, by returning from `main` or calling `exit`, leaves what it started running, as in other languages. A `Child` that's never waited for keeps running until it ends.
+- **A program that ends as it means to**, by returning from `main` or calling `exit`, leaves what it started running, as in other languages, unless it started it with [`ends_with_this`](#ending-with-this-program). A `Child` that's never waited for keeps running until it ends.
+- **On Linux and macOS, a program that's killed**, with `kill -9` or by the OOM killer, can do nothing as it ends, so what it started runs on, unless it was started with `ends_with_this`.
+
+### Ending with this program
+
+`c.ends_with_this()` ends the program it starts when this one ends, however this one ends: by returning from `main` or with `exit`, by a panic or a crash, or killed, by `kill -9`, the OOM killer or Task Manager. With `own_group`, its whole group goes with it, so a browser goes with its renderers, and a launcher's server goes too after the launcher has ended. A program that starts helpers of its own, such as a headless browser or a language server, uses it so that none of them is left running, whatever happens to the program. In Python that's `preexec_fn` calling `prctl(PR_SET_PDEATHSIG, SIGKILL)` through `ctypes`, which works on Linux only and reaches only the child.
+
+```
+var browser = Command.new("chrome").args(["--headless", "--user-data-dir={profile}"]).own_group().ends_with_this().spawn()!
+```
+
+- **On Windows** it goes into a job that kills what's in it as the job closes, which happens as this program ends, however it ends. A program it starts goes too, unless that program leaves the job.
+- **On Linux and macOS** a watcher ends it. The watcher is a small process, this program's own file run again. It holds the read end of a pipe whose write end only this program holds. However this program ends, the system closes the write end, and the watcher kills the child with `SIGKILL`, and with `own_group` its whole group.
+  - Linux's death signal, `PR_SET_PDEATHSIG`, isn't used: it comes when the *thread* that started the child ends, so a child started from a thread that ends first would die with that thread, and it reaches only the child, not its group. macOS has no death signal at all.
+  - On Linux, the helper that starts the child, as for [`measured`](#a-peak-of-its-own-on-linux), forks the watcher before it says the child has started. On macOS the child starts suspended, as under a debugger, and goes on once its watcher is watching. Either way, this program ending in between can't leave it running.
+- **The watcher** is in no group of the child's, and holds nothing else open. So it doesn't keep a pipe from ending, and the terminal's Ctrl+C doesn't reach it. It ends once the child has, or, with `own_group`, once nothing is left in the group, which it checks each second. It's not a child of this program's, so nothing has to wait for it.
+- **Starting it costs** about as much again as starting a program does, as with `measured`: 0.66 ms rather than 0.33 ms to run `true` on the reference machine under WSL. On Windows it's a job assignment while the child is suspended.
+- **Its ID, its streams, `kill`, `stop` and waiting for it** work as for any child: on Linux the helper starts it as this program's child.
+- **`SIGKILL` gives it no chance to clean up.** A program that can stop it gently does so itself before it ends, with `stop()` and `wait_timeout`, as with any child. `ends_with_this` is for when it can't.
+- **In a Calx library** in another program, starting a child with it fails with `BadArgument` on Linux and macOS, since the library can't run its host's file again.
 
 `calx run` stands for the program the same way:
 - **On Windows**, killing `calx run` kills the program and everything it started.
