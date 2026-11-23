@@ -158,7 +158,9 @@ jobs:
           ninja -C "$dir"
       # The iOS simulator the tests that need one run on (CLX-408), started here, so a first boot's
       # setup is done before the tests start and its time shows on its own (CLX-424). The tests find
-      # it running and leave it so.
+      # it running and leave it so. After `bootstatus` returns, the first program started on it can
+      # take over a minute to run, longer than a test on it may take, so programs are started on it
+      # until one runs in under 5 seconds (CLX-442).
       - name: Start the iOS simulator
         if: runner.os == 'macOS'
         shell: bash
@@ -167,6 +169,13 @@ jobs:
           if [ -z "$id" ]; then echo "this runner's Xcode has no iPhone simulator"; exit 1; fi
           xcrun simctl list devices available | grep "$id"
           time xcrun simctl bootstatus "$id" -b
+          for i in $(seq 1 30); do
+            start=$(date +%s)
+            xcrun simctl spawn "$id" /usr/bin/true
+            took=$(( $(date +%s) - start ))
+            echo "a program started and ended on it in $took s"
+            if [ "$took" -lt 5 ]; then break; fi
+          done
       - name: Tests
         shell: bash
         run: '"$CALX_BIN" run --release tests/run.calx -- --modes debug,release'
@@ -533,6 +542,22 @@ jobs:
           build/release/calx$exe run tools/release/package.calx -- "$VERSION" ${{ matrix.platform }} \
             build/release/calx$exe build/release/calx-update$exe build/dist build/toolchain
           rm -f "$RUNNER_TEMP/signing.pfx"
+      # The iOS simulator, started and settled before the tests, as in the test job (CLX-442).
+      - name: Start the iOS simulator
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          id=$(xcrun simctl list devices available | grep -m1 -E '^ +iPhone' | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}')
+          if [ -z "$id" ]; then echo "this runner's Xcode has no iPhone simulator"; exit 1; fi
+          xcrun simctl list devices available | grep "$id"
+          time xcrun simctl bootstatus "$id" -b
+          for i in $(seq 1 30); do
+            start=$(date +%s)
+            xcrun simctl spawn "$id" /usr/bin/true
+            took=$(( $(date +%s) - start ))
+            echo "a program started and ended on it in $took s"
+            if [ "$took" -lt 5 ]; then break; fi
+          done
       - name: Try the release
         shell: bash
         run: |

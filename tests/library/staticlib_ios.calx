@@ -17,6 +17,7 @@ import std.env.{script, variable}
 import std.fs.{exists, make_dir_all, read_text, remove_dir_all, write_text}
 import std.path.{join, parent_dir}
 import std.process.{Command}
+import std.thread.{sleep}
 
 const PLIST: str = #"
     <?xml version="1.0" encoding="UTF-8"?>
@@ -128,24 +129,33 @@ fn main() {
         //
         // On a CI runner, the first app a run puts on a simulator that has just booted can hang
         // while installing, or launch and print nothing, while the one after it works (CLX-424).
-        // So an install that fails or hangs past 40 seconds, or a launch that prints nothing, is
-        // tried again from the install, three times in all, and if none works, what each try got
-        // is said.
+        // Its SpringBoard can also still be starting, and refuse the launch: "Simulator device
+        // failed to launch", "denied by service delegate (SBMainWorkspace)" (CLX-442). So an
+        // install that fails or hangs past 40 seconds, or a launch that prints nothing or is
+        // refused, is tried again from the install, five seconds later, three times in all, and if
+        // none works, what each try got is said.
         var printed: List<String> = []
         var tries: List<String> = []
-        for _ in 0..3 {
+        for attempt in 0..3 {
+            if attempt > 0 {
+                unsafe { sleep(5000000000) }
+            }
             let installed = run_for("xcrun", ["simctl", "install", sim.copy(), app.copy()], dir.copy(), 40000)
             if installed.is_empty() {
                 let said = run_for("xcrun", ["simctl", "launch", "--console-pty", sim.copy(), bundle.copy()], dir.copy(), 45000)
-                for line in said.lines() {
-                    if not line.starts_with("{bundle}: ") {
-                        printed.push(line.copy())
+                if said.contains("Simulator device failed to launch") {
+                    tries.push("launching: {said}")
+                } else {
+                    for line in said.lines() {
+                        if not line.starts_with("{bundle}: ") {
+                            printed.push(line.copy())
+                        }
+                    }
+                    if printed.is_empty() {
+                        tries.push("launching printed {if said.is_empty() { String("nothing") } else { said }}")
                     }
                 }
                 _ = run("xcrun", ["simctl", "terminate", sim.copy(), bundle.copy()], dir.copy())
-                if printed.is_empty() {
-                    tries.push("launching printed {if said.is_empty() { String("nothing") } else { said }}")
-                }
             } else {
                 tries.push("installing: {installed}")
             }
