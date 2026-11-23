@@ -157,6 +157,7 @@ typedef struct {
     bytes b;        /* output: what came and wasn't taken; input: what's still to write */
     size_t scan;    /* output: how far `b` has been searched for a line's end */
     int open;       /* this end is open, so more may come or go */
+    int piped;      /* it's a pipe, open or once open */
     int draining;   /* output: the child has exited, so what's in the pipe is all that's left */
     int broken;     /* input: the child stopped reading before all of it was written */
     int index;
@@ -166,6 +167,10 @@ typedef struct {
     OVERLAPPED ov;
     int pending;    /* a read or a write is in flight, into or out of `b` */
     bytes more;     /* input: what to write once the write in flight is done */
+    /* An auto-reset event each read and write sets as it completes, as well as completing on the
+     * port, and once cx_proc_wake_on has asked, the thread pool's wait on it, which wakes the
+     * poller (CLX-440). */
+    HANDLE ev, ev_wait;
 #else
     int fd;
 #endif
@@ -202,6 +207,12 @@ struct proc {
     stream s[3];
     pwake* wake;        /* once cx_proc_waker has made one */
     cx_u64 wake_h;      /* its handle in `wakes` */
+    /* The poller cx_proc_wake_on asked to be woken as something comes, 0 for none, and the hooks
+     * to wake it with (CLX-440). The program's thread sets them, and on Windows the thread pool's
+     * waits read them, atomically. */
+    cx_usize tell_hooks;
+    cx_u64 tell_net;
+    int reading;        /* a read is running that gives the program what comes, so that needs no wake */
     int close_input;    /* close the input once what's queued is written */
     int exited, killed, timed_out, has_code;
     cx_i32 code, signal;
@@ -226,6 +237,15 @@ struct proc {
 };
 
 static proc* P(cx_i64 h) { return (proc*)(intptr_t)h; }
+
+#ifdef _WIN32
+/* Wakes the poller the program asked to be woken as something comes from the child, if it asked
+ * (CLX-440). Any thread may. Elsewhere the poller's own epoll or kqueue hears of it. */
+static void proc_tell(proc* p) {
+    cx_u64 net = __atomic_load_n(&p->tell_net, __ATOMIC_SEQ_CST);
+    if (net) ((const cx_net_hooks_t*)__atomic_load_n(&p->tell_hooks, __ATOMIC_ACQUIRE))->wake(net);
+}
+#endif
 
 static group* group_new(void) {
     group* g = (group*)calloc(1, sizeof *g);
@@ -830,6 +850,7 @@ static void start_read(stream* s) {
     size_t n = s->b.cap - s->b.len;
     if (n > (1u << 30)) n = 1u << 30;
     memset(&s->ov, 0, sizeof s->ov);
+    s->ov.hEvent = s->ev;
     /* It completes on the port even when it succeeds at once. */
     if (!ReadFile(s->h, s->b.p + s->b.len, (DWORD)n, NULL, &s->ov) && GetLastError() != ERROR_IO_PENDING) {
         close_stream(s);
@@ -853,6 +874,7 @@ static void start_write(stream* s) {
     size_t n = s->b.len - s->b.start;
     if (n > (1u << 30)) n = 1u << 30;
     memset(&s->ov, 0, sizeof s->ov);
+    s->ov.hEvent = s->ev;
     if (!WriteFile(s->h, s->b.p + s->b.start, (DWORD)n, NULL, &s->ov) && GetLastError() != ERROR_IO_PENDING) {
         s->broken = 1;
         close_stream(s);
@@ -945,6 +967,28 @@ static VOID CALLBACK exit_callback(PVOID ctx, BOOLEAN timer) {
     proc* p = (proc*)ctx;
     InterlockedExchange(&p->exit_posted, 1);
     PostQueuedCompletionStatus(p->g->port, 0, (ULONG_PTR)p, NULL);
+    proc_tell(p);
+}
+
+/* A read or a write completed on the stream `s`. */
+static VOID CALLBACK stream_callback(PVOID ctx, BOOLEAN timer) {
+    (void)timer;
+    proc_tell((proc*)ctx);
+}
+
+/* What the pump took that the program, waiting on a poller rather than in a read, should hear of
+ * (CLX-440). The thread pool's waits wake the poller as each completion comes, but one can come
+ * while a wait's callback runs, and the pump take it, and start the next read, which resets the
+ * event, before the wait looks again; so what the pump takes for output, or the exit, wakes the
+ * poller too, unless a read that gives the program what has come is running. */
+static void pump_heard(proc* p) {
+    if (!p->reading) proc_tell(p);
+}
+
+static void saw_exit(proc* p) {
+    if (p->exited) return;
+    child_exited(p);
+    pump_heard(p);
 }
 
 static void kill_proc(proc* p) {
@@ -1013,7 +1057,7 @@ static void pump(proc** ps, size_t n, cx_u64 until) {
     proc* p = ps[0];
     if (n == 1 && !p->exited && !p->s[0].pending && !p->s[1].pending && !p->s[2].pending && !p->s[1].open && !p->s[2].open &&
         !queued(&p->s[0])) {
-        if (WaitForSingleObject(p->process, ms) == WAIT_OBJECT_0) child_exited(p);
+        if (WaitForSingleObject(p->process, ms) == WAIT_OBJECT_0) saw_exit(p);
         return;
     }
     OVERLAPPED_ENTRY e[32];
@@ -1025,10 +1069,17 @@ static void pump(proc** ps, size_t n, cx_u64 until) {
             if (e[k].lpCompletionKey == WAKE_KEY) continue;
             proc* q = (proc*)e[k].lpCompletionKey;
             q->exit_seen = 1;
-            child_exited(q);
+            saw_exit(q);
         } else {
             stream* s = CONTAINING_RECORD(e[k].lpOverlapped, stream, ov);
             io_done(s, e[k].dwNumberOfBytesTransferred);
+            if (s->index == 1) {
+                pump_heard(s->owner);
+            } else if (s->index == 0 && s->ev_wait && !s->pending) {
+                /* What was given at the start has gone in: `write` waits for the rest itself. */
+                UnregisterWaitEx(s->ev_wait, INVALID_HANDLE_VALUE);
+                s->ev_wait = NULL;
+            }
         }
     }
 }
@@ -1227,7 +1278,7 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
         if (!ours[i]) continue;
         s->h = ours[i];
         ours[i] = NULL;
-        s->open = 1;
+        s->open = s->piped = 1;
         CreateIoCompletionPort(s->h, p->g->port, 0, 0);
     }
     if (!RegisterWaitForSingleObject(&p->wait, p->process, exit_callback, p, INFINITE, WT_EXECUTEONLYONCE)) {
@@ -1242,6 +1293,11 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
         if (p->job) CloseHandle(p->job);
         p->job = NULL;
         goto done;
+    }
+    /* Each pipe's event, before anything is in flight on it, so cx_proc_wake_on's waits see every
+     * completion. One the system can't make is none: that stream wakes no poller. */
+    for (int i = 0; i < 3; i++) {
+        if (p->s[i].open) p->s[i].ev = CreateEventW(NULL, FALSE, FALSE, NULL);
     }
     if (p->s[0].open) bytes_add(&p->s[0].more, input, input_n);
     start_write(&p->s[0]);
@@ -1266,15 +1322,25 @@ done:
 }
 
 static void free_os(proc* p) {
+    /* Nothing wakes a poller for it from here on. */
+    __atomic_store_n(&p->tell_net, 0, __ATOMIC_SEQ_CST);
     if (p->wait) {
         UnregisterWaitEx(p->wait, INVALID_HANDLE_VALUE);   /* waits for the callback, if it's running */
         p->wait = NULL;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (p->s[i].ev_wait) UnregisterWaitEx(p->s[i].ev_wait, INVALID_HANDLE_VALUE);
+        p->s[i].ev_wait = NULL;
     }
     p->deadline = 0;
     for (int i = 0; i < 3; i++) close_stream(&p->s[i]);
     /* What's in flight still completes on the port, and an exit that was posted is still there:
      * both point at `p`, so they're taken before it's freed. */
     while (p->s[0].pending || p->s[1].pending || p->s[2].pending || (p->exit_posted && !p->exit_seen)) pump(&p, 1, 0);
+    /* Their events, which nothing sets once nothing is in flight. */
+    for (int i = 0; i < 3; i++) {
+        if (p->s[i].ev) CloseHandle(p->s[i].ev);
+    }
     CloseHandle(p->process);
     /* What's in its job runs on, in the job every child is in. */
     if (p->job) CloseHandle(p->job);
@@ -2042,7 +2108,7 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
     for (int i = 0; i < 3; i++) {
         if (ours[i] < 0) continue;
         p->s[i].fd = ours[i];
-        p->s[i].open = 1;
+        p->s[i].open = p->s[i].piped = 1;
         ours[i] = -1;
     }
     bytes_add(&p->s[0].b, input, input_n);
@@ -2244,8 +2310,7 @@ static int take_wake(proc* p) { return p->wake && __atomic_exchange_n(&p->wake->
  * for no limit). The line's length with its `\n`, or at the end the length of what's left
  * without one; -1 if `until` came first, -2 at the end with nothing left, and with `wake`, -3
  * once a wake has come and no line has. */
-cx_i64 cx_proc_line(cx_i64 h, cx_u64 until, cx_bool wake) {
-    proc* p = P(h);
+static cx_i64 line_of(proc* p, cx_u64 until, cx_bool wake) {
     stream* s = &p->s[1];
     for (;;) {
         bytes* b = &s->b;
@@ -2258,10 +2323,13 @@ cx_i64 cx_proc_line(cx_i64 h, cx_u64 until, cx_bool wake) {
         if (until && cx_clock_ns() >= until) {
             /* Out of time, but what's in the pipe already has come, so it's taken without waiting,
              * as a read of 0 ms needs (CLX-358): again while more comes, as a line may come in
-             * pieces, each read starting once the one before is taken. */
-            size_t had = b->len;
+             * pieces, each read starting once the one before is taken. What's unread is
+             * counted, not where it ends, since making room moves it to the buffer's start: a
+             * line as long as the one just taken ended where that one had, and read as nothing
+             * come (CLX-440). */
+            size_t had = b->len - b->start;
             pump(&p, 1, 1);
-            if (b->len == had && !ended(s)) return -1;
+            if (b->len - b->start == had && !ended(s)) return -1;
             until = 1;
             continue;
         }
@@ -2271,8 +2339,7 @@ cx_i64 cx_proc_line(cx_i64 h, cx_u64 until, cx_bool wake) {
 
 /* Waits until some output has come: how much, -1 if `until` came first, -2 at the end, and with
  * `wake`, -3 once a wake has come and nothing else has. */
-cx_i64 cx_proc_some(cx_i64 h, cx_u64 until, cx_bool wake) {
-    proc* p = P(h);
+static cx_i64 some_of(proc* p, cx_u64 until, cx_bool wake) {
     stream* s = &p->s[1];
     for (;;) {
         if (s->b.len > s->b.start) return (cx_i64)(s->b.len - s->b.start);
@@ -2286,6 +2353,25 @@ cx_i64 cx_proc_some(cx_i64 h, cx_u64 until, cx_bool wake) {
         }
         pump(&p, 1, until);
     }
+}
+
+/* With `wake` they're `read_line` and `read`, which give the program what comes, so what they
+ * take wakes no poller (see pump_heard); without it, `wait_for_line` and `ended`, which may leave
+ * some, and do. */
+cx_i64 cx_proc_line(cx_i64 h, cx_u64 until, cx_bool wake) {
+    proc* p = P(h);
+    p->reading = wake;
+    cx_i64 r = line_of(p, until, wake);
+    p->reading = 0;
+    return r;
+}
+
+cx_i64 cx_proc_some(cx_i64 h, cx_u64 until, cx_bool wake) {
+    proc* p = P(h);
+    p->reading = wake;
+    cx_i64 r = some_of(p, until, wake);
+    p->reading = 0;
+    return r;
 }
 
 /* Waits until the child exits, or until `until` (0 for no limit), reading its streams meanwhile:
@@ -2354,7 +2440,6 @@ void cx_proc_usage(cx_i64 h, cx_u64* out) {
     out[3] = cx_clock_ns() - p->started_ns;
 }
 
-/* Lets the child go: its handles and buffers. One that hasn't exited runs on. */
 /* --- Wakers (CLX-437) ----------------------------------------------------------------------- */
 
 /* Each child's wake, by a handle of its index plus 1 and the slot's generation, so a handle kept
@@ -2439,6 +2524,68 @@ void cx_proc_wake(cx_u64 wh) {
     unlock_wakes();
 }
 
+/* --- Waking a poller (CLX-440) -------------------------------------------------------------- */
+
+/* Has what comes from the child wake the poller `net`, through `hooks`, so a program waiting on a
+ * server hears of it then, rather than at the poll's timeout. On Windows the thread pool waits on
+ * each pipe's event, which its reads and writes set as they complete, and the exit's wait wakes it
+ * too. On Linux and macOS the pipes, and the pidfd or the kqueue that says when it exits, go into
+ * the poller's own epoll or kqueue, edge-triggered, so the poll itself sees them; a Linux too old
+ * for pidfds has its exit heard as its output ends. The input is watched only while what was given
+ * at the start is still going in, since `write` waits until it has gone: room in it is news only
+ * then, as once it has gone the input is closed if `close_input` asked. A later call with another
+ * poller moves them there. 0 if the system wouldn't. */
+cx_bool cx_proc_wake_on(cx_i64 h, cx_usize hooks, cx_u64 net) {
+    proc* p = P(h);
+    const cx_net_hooks_t* k = (const cx_net_hooks_t*)hooks;
+    /* What has come already is taken, so it's seen below, as a read of 0 ms would take it. */
+    p->reading = 1;
+    pump(&p, 1, 1);
+    p->reading = 0;
+#ifndef _WIN32
+    int fds[4], whats[4], n = 0;
+    if (queued(&p->s[0])) fds[n] = p->s[0].fd, whats[n++] = 1;
+    for (int i = 1; i < 3; i++) {
+        if (p->s[i].open) fds[n] = p->s[i].fd, whats[n++] = 0;
+    }
+    if (p->pidfd >= 0) fds[n] = p->pidfd, whats[n++] = 0;
+    cx_u64 old = p->tell_net;
+    if (old && old != net) {
+        const cx_net_hooks_t* was = (const cx_net_hooks_t*)p->tell_hooks;
+        for (int i = 0; i < n; i++) was->watch(old, fds[i], 2);
+    }
+#endif
+    /* Set before anything can wake it, so no wait finds none. */
+    __atomic_store_n(&p->tell_hooks, hooks, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->tell_net, net, __ATOMIC_SEQ_CST);
+#ifdef _WIN32
+    for (int i = 0; i < 3; i++) {
+        stream* s = &p->s[i];
+        if (!s->piped || s->ev_wait || (i == 0 && !s->pending)) continue;
+        /* An event the system couldn't make, for a pipe something may still come on, is a wake
+         * that would never come. */
+        if (!s->ev) {
+            if (s->open || s->pending) return 0;
+            continue;
+        }
+        if (!RegisterWaitForSingleObject(&s->ev_wait, s->ev, stream_callback, p, INFINITE, WT_EXECUTEINWAITTHREAD)) {
+            s->ev_wait = NULL;
+            return 0;
+        }
+    }
+    int exited = p->exited || __atomic_load_n(&p->exit_posted, __ATOMIC_SEQ_CST);
+#else
+    for (int i = 0; i < n; i++) {
+        if (!k->watch(net, fds[i], whats[i])) return 0;
+    }
+    int exited = p->exited;
+#endif
+    /* What came before: output that wasn't read, its end, or the exit. */
+    stream* out = &p->s[1];
+    if (out->b.len > out->b.start || (out->piped && ended(out)) || exited) k->wake(net);
+    return 1;
+}
+
 /* Takes the child's wake out of `wakes`, so no wake finds it, and frees it. */
 static void free_wake(proc* p) {
     if (!p->wake) return;
@@ -2455,6 +2602,7 @@ static void free_wake(proc* p) {
     p->wake = NULL;
 }
 
+/* Lets the child go: its handles and buffers. One that hasn't exited runs on. */
 void cx_proc_free(cx_i64 h) {
     proc* p = P(h);
     if (!p) return;

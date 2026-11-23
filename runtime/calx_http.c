@@ -145,7 +145,19 @@ typedef struct request {
     int redirects;           /* on iOS, how many it has followed */
 #endif
     int started; /* 1 on a thread of its own, 2 on the transfer thread */
+    /* The poller cx_http_wake_on asked to be woken as it finishes, 0 for none, and the hooks to
+     * wake it with, set and read atomically. */
+    cx_usize wake_hooks;
+    cx_u64 wake_net;
 } request;
+
+/* Wakes the poller a program asked to be woken as the request finished, if it asked, from the
+ * thread that finished it, after `state` says so (CLX-440). The program's thread can't free the
+ * request meanwhile: it waits for this thread first, or for `done_lock`, which this holds there. */
+static void request_tell(request* r) {
+    cx_u64 net = __atomic_load_n(&r->wake_net, __ATOMIC_SEQ_CST);
+    if (net) ((const cx_net_hooks_t*)__atomic_load_n(&r->wake_hooks, __ATOMIC_ACQUIRE))->wake(net);
+}
 
 static void request_free(request* r) {
     free(r->url), free(r->host), free(r->target), free(r->head), free(r->body);
@@ -723,7 +735,8 @@ static pthread_cond_t done_cond = PTHREAD_COND_INITIALIZER;
 
 static void transfer_done(request* r) {
     pthread_mutex_lock(&done_lock);
-    __atomic_store_n(&r->state, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&r->state, 1, __ATOMIC_SEQ_CST);
+    request_tell(r);
     pthread_cond_broadcast(&done_cond);
     pthread_mutex_unlock(&done_lock);
 }
@@ -1272,7 +1285,8 @@ static pthread_cond_t done_cond = PTHREAD_COND_INITIALIZER;
 
 static void transfer_done(request* r) {
     pthread_mutex_lock(&done_lock);
-    __atomic_store_n(&r->state, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&r->state, 1, __ATOMIC_SEQ_CST);
+    request_tell(r);
     pthread_cond_broadcast(&done_cond);
     pthread_mutex_unlock(&done_lock);
 }
@@ -1366,7 +1380,8 @@ static int transfer(request* r) {
 
 static void finish(request* r) {
     run(r);
-    __atomic_store_n(&r->state, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&r->state, 1, __ATOMIC_SEQ_CST);
+    request_tell(r);
 }
 
 #ifdef _WIN32
@@ -1489,6 +1504,17 @@ cx_u64 cx_http_expected(cx_u64 h) {
     return r ? __atomic_load_n(&r->expected, __ATOMIC_RELAXED) : 0;
 }
 
+/* Has the request wake the poller `net` as it finishes (CLX-440). The poller is set before
+ * `state` is looked at, and the thread that finishes it sets `state` before it looks for one, so
+ * at least one of the two wakes it, and a finish while this runs is never missed. */
+void cx_http_wake_on(cx_u64 h, cx_usize hooks, cx_u64 net) {
+    request* r = request_of(h);
+    if (!r) return;
+    __atomic_store_n(&r->wake_hooks, hooks, __ATOMIC_RELEASE);
+    __atomic_store_n(&r->wake_net, net, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&r->state, __ATOMIC_SEQ_CST)) ((const cx_net_hooks_t*)hooks)->wake(net);
+}
+
 /* The system's error code, for E_OS. */
 cx_i32 cx_http_code(cx_u64 h) { return request_of(h)->code; }
 cx_u32 cx_http_status(cx_u64 h) { return request_of(h)->status; }
@@ -1585,6 +1611,10 @@ typedef struct {
     bytes my_reason;
     cx_u64 heard_ms;     /* when anything last came from the server, in ws_now_ms's milliseconds, once open */
     int woken;           /* cx_http_ws_wake was called, and no receive has given 0 for it yet */
+    /* The poller cx_http_ws_wake_on asked to be woken as messages come, 0 for none, and the hooks
+     * to wake it with (CLX-440). */
+    cx_usize wake_hooks;
+    cx_u64 wake_net;
 } wsock;
 
 static cx_u64 ws_now_ms(void) {
@@ -1674,6 +1704,12 @@ static void ws_free(wsock* w) {
     free(w);
 }
 
+/* Wakes the poller the program asked to be woken as messages come, if it asked (CLX-440). Holds
+ * `mu`, which keeps the two fields together. */
+static void ws_tell(wsock* w) {
+    if (w->wake_net) ((const cx_net_hooks_t*)w->wake_hooks)->wake(w->wake_net);
+}
+
 /* Ends the connection with `error`, unless it has ended already, and wakes the program. Holds `mu`. */
 static void ws_end_locked(wsock* w, int error, cx_u32 close_code, const cx_u8* reason, size_t reason_len) {
     if (w->state == WS_CLOSED) return;
@@ -1683,6 +1719,7 @@ static void ws_end_locked(wsock* w, int error, cx_u32 close_code, const cx_u8* r
     w->close_reason.len = 0;
     if (reason_len && !add(&w->close_reason, reason, reason_len)) cx_panic_capacity();
     ws_signal(w);
+    ws_tell(w);
 }
 
 static void ws_end(wsock* w, int error, cx_u32 close_code, const cx_u8* reason, size_t reason_len) {
@@ -1709,6 +1746,7 @@ static void ws_deliver(wsock* w, int kind, const cx_u8* p, size_t n) {
     else w->first = m;
     w->last = m;
     ws_signal(w);
+    ws_tell(w);
     ws_unlock(w);
 }
 
@@ -2841,6 +2879,7 @@ static void ws_talk(wsock* w, ws_link* l, cx_u64 deadline) {
                 if (w->state == WS_CONNECTING) w->state = WS_OPEN;
                 w->heard_ms = ws_now_ms();
                 ws_signal(w);
+                ws_tell(w);
                 ws_unlock(w);
             }
         }
@@ -3264,6 +3303,19 @@ void cx_http_ws_wake(cx_u64 h) {
         ws_unlock(w);
     }
     unlock();
+}
+
+/* Has the connection's thread wake the poller `net` each time it queues a message, and as the
+ * connection opens and ends (CLX-440): at once, too, if a message is queued or it has ended, so
+ * what came before is heard. Under `mu`, as the thread's wakes are, so none is missed. */
+void cx_http_ws_wake_on(cx_u64 h, cx_usize hooks, cx_u64 net) {
+    wsock* w = ws_of(h);
+    if (!w) return;
+    ws_lock(w);
+    w->wake_hooks = hooks;
+    w->wake_net = net;
+    if (w->first || w->state == WS_CLOSED) ws_tell(w);
+    ws_unlock(w);
 }
 
 cx_usize cx_http_ws_taken_len(cx_u64 h) { return ws_of(h)->taken.len; }

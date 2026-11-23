@@ -11,6 +11,7 @@
 /// ends it.
 module std.process
 
+import std.net.waker.{Waker as NetWaker}
 import std.text.utf8.{decode_lossy}
 
 extern "C" {
@@ -34,6 +35,7 @@ extern "C" {
     fn cx_proc_some(h: i64, until: u64, wake: bool) -> i64
     fn cx_proc_waker(h: i64) -> u64
     fn cx_proc_wake(wh: u64)
+    fn cx_proc_wake_on(h: i64, hooks: usize, net: u64) -> bool
     fn cx_proc_available(h: i64, stream: u32) -> usize
     fn cx_proc_take(h: i64, stream: u32, to: *u8, n: usize)
     fn cx_proc_kill(h: i64)
@@ -639,6 +641,23 @@ impl Child {
             panic("the system can't make a waker for the child: no pipe")
         }
         return Waker { handle: wh }
+    }
+
+    /// Wakes `waker`'s `Net` each time something comes from the child, so a loop waiting on a
+    /// server's `next_event`, or a `Net`'s `poll`, hears of it then, rather than at the wait's
+    /// timeout, as Python's `selectors` hears of a pipe: output, which `read_line(0)` or `read(0)`
+    /// takes, the output's end, its errors, room in its input, and its exit, which `try_wait`
+    /// says. It wakes it at once if output is waiting, the output has ended or it has exited.
+    /// Wakes that come before a poll are one, so after one the loop reads until there's nothing.
+    /// A later call wakes the `Net` it's given instead. Panics if the system won't watch the
+    /// child's pipes, as when it's out of memory for them.
+    @track_caller
+    pub fn wake_on(self, waker: NetWaker) {
+        let h = self.live()
+        let (net, hooks) = unsafe { waker.parts() }
+        if not unsafe { cx_proc_wake_on(h, hooks, net) } {
+            panic("the system won't watch the child's pipes for the waker")
+        }
     }
 
     /// How it ended, if it has, without waiting.

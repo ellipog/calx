@@ -9,6 +9,7 @@ module std.net
 
 import std.fs.{File}
 import std.io
+import std.net.waker.{Waker as NetWaker}
 
 extern "C" {
     fn cx_net_open() -> u64
@@ -25,7 +26,6 @@ extern "C" {
     fn cx_net_close(net: u64, conn: u32)
     fn cx_net_flush(net: u64)
     fn cx_net_waker(net: u64) -> bool
-    fn cx_net_wake(net: u64)
     fn cx_net_wake_on_signal(net: u64) -> bool
     fn cx_net_signalled(net: u64) -> bool
     fn cx_net_number(net: u64) -> u32
@@ -665,19 +665,10 @@ pub enum Event {
 
 /// Wakes a `Net`'s poll from another thread, so a thread that queued something for the one
 /// polling can say so: the poll reports `Woken`, or the next one does if none is waiting. It's
-/// `Copy` and `Send`, and every copy wakes the same `Net`.
-pub struct Waker {
-    handle: u64,
-}
-
-impl Waker {
-    /// Wakes the poll. Any thread can, except inside a `parallel for`.
-    pub fn wake(self) {
-        unsafe {
-            cx_net_wake(self.handle)
-        }
-    }
-}
+/// `Copy` and `Send`, and every copy wakes the same `Net`. A `WebSocket`, a `std.http` `Request`
+/// and a `std.process` `Child` take one in `wake_on`, and wake it when something comes. It's
+/// declared in `std.net.waker`, which those import rather than all of this module.
+pub type Waker = NetWaker
 
 /// Listening sockets and connections, and the events about them. It's one thread's at a time:
 /// each thread that polls makes its own, and they run at once without waiting on each other
@@ -836,7 +827,7 @@ impl Net {
         if not unsafe { cx_net_waker(self.handle) } {
             fail NetError.Os(0)
         }
-        return Waker { handle: self.handle }
+        return unsafe { NetWaker.of(self.handle) }
     }
 
     /// Waits up to `timeout_ms` milliseconds, or forever if it's negative, until what was

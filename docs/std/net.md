@@ -71,7 +71,7 @@ fn main() {
 | `net.wake_on_signal() ! NetError` | Wakes the poll at each signal the program handles with [`std.signal`](signal.md), which reports `Woken` ([below](#stopping-at-a-signal)) |
 | `net.signalled() -> bool` | Whether a signal has woken the `Net` since `wake_on_signal`, or since `signalled` last said so, which it then forgets. Each `Net` hears of each signal, so loops on several threads each stop at one, though only one thread `take`s it ([below](#stopping-at-a-signal)) |
 | `net.waker() -> Waker ! NetError` | A `Waker` for the `Net`'s polls |
-| `Waker` | Wakes a `Net`'s poll from another thread. It's `Copy` and `Send`, and every copy wakes the same `Net` |
+| `Waker` | Wakes a `Net`'s poll from another thread. It's `Copy` and `Send`, and every copy wakes the same `Net`. A [WebSocket](http-websocket.md#waking-a-servers-loop), a [request](http.md#waking-a-servers-loop) and a [child](process.md#waking-a-servers-loop) wake one with `wake_on` when something comes |
 | `waker.wake()` | Makes the poll waiting report `Woken`, or the next poll if none is waiting. Any thread can call it, except inside a `parallel for` |
 | `net.peer(conn: Conn) -> Address?` | The address at the connection's other end, as it was when it opened. It stays until the poll after the connection's `Closed`, so the `Closed` can be logged with it, and is `none` for a connection that never opened |
 | `Conn` | A connection. It's `Copy`, and two are equal when their `id`s are. It's the `Net`'s that opened or accepted it, and another `Net` given it panics ([threads](#threads)) |

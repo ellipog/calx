@@ -1,0 +1,125 @@
+// std.http.websocket: `ws.wake_on` has a message, and the connection's end, wake a server's
+// `next_event` on another socket's thread, so a loop that waits on its server and reads a client it
+// opened hears each message as it comes rather than at the wait's timeout; one that's waiting when
+// it's asked wakes it at once; and a loop of round trips runs at the network's pace (CLX-440).
+import std.http.server.{Server}
+import std.http.websocket.{Message, connect}
+import std.thread.{Task}
+import std.time.{Instant}
+
+// Answers each text with the same text and " back", and closes the socket at "bye".
+struct Serving {
+    port: Sender<u16>
+}
+
+impl Task for Serving {
+    fn run(own self) {
+        var port = self.port
+        var server = Server.listen(0)!
+        port.send(server.port)
+        loop {
+            match server.next_event(20000) {
+                some(Request(req)) => {
+                    _ = server.upgrade(req)!
+                },
+                some(Message(s, Text(t))) => {
+                    if t == "bye" {
+                        server.close_socket(s, 1000, "bye")
+                    } else {
+                        _ = server.send_text(s, "{t} back")
+                    }
+                },
+                some(Closed(_, _, _)) => break,
+                some(_) => {},
+                none => break,
+            }
+        }
+        server.shutdown()
+    }
+}
+
+fn ms_since(t: Instant) -> u64 {
+    return unsafe { Instant.now() }.nanos_since(t) / 1000000
+}
+
+fn shown(m: own Message?) -> String {
+    return match m {
+        some(Text(t)) => t,
+        some(Binary(_)) => String("<binary>"),
+        none => String("none"),
+    }
+}
+
+fn main() {
+    var ports = Receiver<u16>()
+    let serving = unsafe { Thread.spawn(Serving { port: ports.sender() }) }
+    let port = ports.wait() ?? 0
+    // The loop's own server, which nothing connects to: only the client's messages wake it.
+    var s = Server.listen(0)!
+    let ws = connect("ws://127.0.0.1:{port}/")!
+    ws.wake_on(s.waker()!)
+
+    // The answer wakes `next_event`, long before its second.
+    ws.send_text("hi")!
+    var start = unsafe { Instant.now() }
+    let e = s.next_event(1000)
+    var ms = ms_since(start)
+    println("{e == none}")    // out: true
+    assert(ms < 500, "next_event took {ms} ms for a message")
+    println(shown(ws.receive(0)!))    // out: hi back
+
+    // A message waiting when `wake_on` is asked wakes it at once.
+    ws.send_text("again")!
+    _ = s.next_event(1000)
+    ws.wake_on(s.waker()!)
+    start = unsafe { Instant.now() }
+    _ = s.next_event(1000)
+    ms = ms_since(start)
+    assert(ms < 500, "next_event took {ms} ms with a message waiting")
+    println(shown(ws.receive(0)!))    // out: again back
+
+    // Nothing comes, so the wait is its whole timeout.
+    start = unsafe { Instant.now() }
+    _ = s.next_event(100)
+    println("{ms_since(start) >= 50}")    // out: true
+
+    // A loop of round trips, each waiting up to 10 seconds: without the wakes, one would take that.
+    start = unsafe { Instant.now() }
+    var got = 0
+    for i in 0..200 {
+        ws.send_text("{i}")!
+        loop {
+            _ = s.next_event(10000)
+            if let m = ws.receive(0)! {
+                let text = shown(some(m))
+                assert(text == "{i} back", "round trip {i} gave {text}")
+                got += 1
+                break
+            }
+        }
+    }
+    ms = ms_since(start)
+    assert(ms < 5000, "200 round trips took {ms} ms")
+    println("{got}")    // out: 200
+
+    // The server closing it wakes the loop too, and `receive` says how it ended.
+    ws.send_text("bye")!
+    start = unsafe { Instant.now() }
+    var ended = false
+    while not ended {
+        _ = s.next_event(10000)
+        match ws.receive(0) {
+            ok(_) => {},
+            err(Closed(code, why)) => {
+                println("{code} {why}")    // out: 1000 bye
+                ended = true
+            },
+            err(other) => panic("the connection ended with {other}"),
+        }
+    }
+    ms = ms_since(start)
+    assert(ms < 2000, "the close took {ms} ms to be heard")
+    ws.close()
+    serving.join()
+    s.shutdown()
+}

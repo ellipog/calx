@@ -7,6 +7,7 @@
 module std.http.websocket
 
 import std.http.{Header}
+import std.net.waker.{Waker as NetWaker}
 
 extern "C" {
     fn cx_http_ws_open(url: *const u8, url_len: usize, head: *const u8, head_len: usize, timeout_ms: u32, limit: usize, ping_interval_ms: u32, ping_timeout_ms: u32) -> u64
@@ -22,6 +23,7 @@ extern "C" {
     fn cx_http_ws_text(h: u64, which: u32, out: *u8)
     fn cx_http_ws_close(h: u64, code: u32, reason: *const u8, reason_len: usize)
     fn cx_http_ws_wake(h: u64)
+    fn cx_http_ws_wake_on(h: u64, hooks: usize, net: u64)
 }
 
 /// Wakes a `WebSocket`'s `receive` from another thread, so a thread waiting for messages hears
@@ -296,6 +298,19 @@ impl WebSocket {
     /// rather than it looking every few milliseconds.
     pub fn waker(self) -> Waker {
         return Waker { handle: self.handle }
+    }
+
+    /// Wakes `waker`'s `Net` each time a message comes, and as the connection opens or ends, so a
+    /// loop waiting on a server's `next_event`, or a `Net`'s `poll`, hears of it then and takes it
+    /// with `receive(0)`, rather than at the wait's timeout, as Python's `selectors` hears of
+    /// every socket it's given. It wakes it at once if a message is waiting or the connection
+    /// has ended. Wakes that come before a poll are one, so after one the loop takes every
+    /// message that's waiting. A later call wakes the `Net` it's given instead.
+    pub fn wake_on(self, waker: NetWaker) {
+        let (net, hooks) = unsafe { waker.parts() }
+        unsafe {
+            cx_http_ws_wake_on(self.handle, hooks, net)
+        }
     }
 
     /// The subprotocol the server chose from those the `Sec-WebSocket-Protocol` header offered,

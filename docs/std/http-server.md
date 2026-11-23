@@ -65,7 +65,7 @@ fn main() ! Error {
 | `server.respond(req: Request, res: Response)` | Sends `res` as the answer to `req` |
 | `server.serve(dir: String)` | The folder `dir` served on this server until the program is stopped, as `serve_dir` serves it, with its files opened on worker threads and big ones sent by the system from the file ([below](#serving-a-folder)) |
 | `server.wake_on_signal() ! NetError` | Stops `next`, `next_event` and `serve` at each signal the program handles with [`std.signal`](signal.md): the first two give `none` while one is pending, and once after each, whichever thread takes it, and `serve` returns ([below](#stopping-cleanly)) |
-| `server.waker() -> Waker ! NetError` | A [`std.net.Waker`](net.md) another thread can call `wake()` on, so `next` or `next_event` gives `none` at once, after what's ready, rather than at its timeout ([below](#waking-the-loop-from-another-thread)) |
+| `server.waker() -> Waker ! NetError` | A [`std.net.Waker`](net.md) another thread can call `wake()` on, so `next` or `next_event` gives `none` at once, after what's ready, rather than at its timeout ([below](#waking-the-loop-from-another-thread)). WebSocket clients, requests and programs the loop started wake it with it too ([below](#clients-requests-and-programs-on-the-same-loop)) |
 | `server.shutdown(timeout_ms: i64 = 5000)` | Closes every connection cleanly, for a server that's stopping, waiting up to `timeout_ms` for what each was sent to go, WebSockets to close with 1001 and files to finish ([below](#stopping-cleanly)) |
 | `Request` | `method`, `GET` or `POST` or another, as it was sent. `target`, the path and query still percent-encoded: `/find?q=a%20b`. `path`, decoded, without the query: `/find`. `query`, what's after the `?`, as it was sent. `version`, `HTTP/1.1` or `HTTP/1.0`. `headers: List<Header>`, in the order they came. `body: List<u8>`. And `client`, the address it came from |
 | `req.header(name: String) -> String?` | The first header named `name`, in any case |
@@ -158,6 +158,39 @@ fn main() ! Error {
 ```
 
 A wake makes `next` or `next_event` give `none` once what's ready has been given, or makes the next call give it if none is waiting. Wakes that come before a call are one, and every copy of a `Waker` wakes the same server.
+
+### Clients, requests and programs on the same loop
+
+A loop that serves and also reads WebSocket clients it opened, waits for requests it started, or talks to a program it started, gives each of them the server's `Waker` with `wake_on`. Each then wakes `next_event` when something comes, so the loop needn't look at them every few milliseconds, as Python's `selectors` watches every socket and pipe it's given:
+
+| Item | Wakes the server |
+| --- | --- |
+| [`ws.wake_on(waker)`](http-websocket.md#waking-a-servers-loop) | Each time a message comes, and as the connection opens or ends |
+| [`r.wake_on(waker)`](http.md#waking-a-servers-loop) | As the request finishes |
+| [`child.wake_on(waker)`](process.md#waking-a-servers-loop) | Each time output or errors come, as its output ends, and as it exits |
+
+Here the server answers its own request, on one thread:
+
+```calx
+import std.http.{get}
+import std.http.server.{Response, Server}
+
+fn main() ! Error {
+    var server = try Server.listen(0)
+    server.log = false
+    var r = get("http://127.0.0.1:{server.port}/hello", [], 10000, 1 << 20)
+    r.wake_on(try server.waker())
+    while not r.done() {
+        // Waits for a request, or for `r` to finish.
+        if let Request(req) = server.next_event() {
+            server.respond(req, Response.text("hi"))
+        }
+    }
+    println(String.from_utf8(r.wait()!.body) ?? "")    // out: hi
+}
+```
+
+Each wakes it at once if what it says has already come. Wakes that come before a call are one, so after `next_event` gives `none`, the loop takes everything that's there: every message with `receive(0)`, every line with `read_line(0)`.
 
 ## Pushing to a browser
 

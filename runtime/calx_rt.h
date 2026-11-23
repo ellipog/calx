@@ -1083,6 +1083,18 @@ CX_FN(void, cx_net_flush, (cx_u64 h));
 CX_FN(cx_bool, cx_net_waker, (cx_u64 h));
 CX_FN(void, cx_net_wake, (cx_u64 h));
 CX_FN(cx_bool, cx_net_wake_on_signal, (cx_u64 h));
+/* How the runtime's other parts wake a poller, for a WebSocket, a request or a child that wakes
+ * one when something comes (CLX-440). `cx_net_hooks` gives the address of these, which std hands
+ * to `cx_http_ws_wake_on`, `cx_http_wake_on` and `cx_proc_wake_on` with the poller, so those parts
+ * never call calx_net.c's functions themselves and link without it. `wake` is `cx_net_wake`.
+ * `watch`, on Linux and macOS, adds `fd` to the poller's epoll or kqueue, so the poll reports
+ * `Woken` each time it becomes readable (`what` 0) or writable (1), or takes it out again (2);
+ * 1 if it could. A closed `fd` leaves by itself. */
+typedef struct {
+    void (*wake)(cx_u64 net);
+    cx_bool (*watch)(cx_u64 net, int fd, int what);
+} cx_net_hooks_t;
+CX_FN(cx_usize, cx_net_hooks, (void));
 CX_FN(cx_bool, cx_net_signalled, (cx_u64 h));
 CX_FN(cx_u32, cx_net_number, (cx_u64 h));
 CX_FN(cx_bool, cx_net_drain, (cx_u64 h, cx_i64 timeout_ms));
@@ -1127,6 +1139,9 @@ CX_FN(void, cx_http_free, (cx_u64 h));
  * progress bar. */
 CX_FN(cx_u64, cx_http_received, (cx_u64 h));
 CX_FN(cx_u64, cx_http_expected, (cx_u64 h));
+/* Wakes the poller `net`, through the hooks `cx_net_hooks` gave, once the request has finished, or
+ * at once if it has (CLX-440). A request that was freed is left alone. */
+CX_FN(void, cx_http_wake_on, (cx_u64 h, cx_usize hooks, cx_u64 net));
 /* WebSockets, behind std.http.websocket (CLX-320), in calx_http.c: a connection on a thread of its
  * own, its messages taken from a queue. `cx_http_ws_receive` gives a message's opcode, 1 for text
  * and 2 for binary, with its bytes for `cx_http_ws_taken`; 0 if none came in the time; or what the
@@ -1136,6 +1151,10 @@ CX_FN(cx_u64, cx_http_expected, (cx_u64 h));
  * the receive waiting, or the next, give 0 once the queue is empty (CLX-437); a handle let go is
  * left alone. */
 CX_FN(void, cx_http_ws_wake, (cx_u64 h));
+/* Wakes the poller `net`, through the hooks `cx_net_hooks` gave, each time a message is queued and
+ * as the connection opens or ends, and at once if a message is queued or it has ended (CLX-440). A
+ * handle let go is left alone. */
+CX_FN(void, cx_http_ws_wake_on, (cx_u64 h, cx_usize hooks, cx_u64 net));
 CX_FN(cx_u64, cx_http_ws_open, (const cx_u8* url, cx_usize url_len, const cx_u8* head, cx_usize head_len, cx_u32 timeout_ms, cx_usize limit,
                                 cx_u32 ping_interval_ms, cx_u32 ping_timeout_ms));
 CX_FN(cx_i32, cx_http_ws_state, (cx_u64 h));
@@ -1455,6 +1474,11 @@ CX_FN(void, cx_proc_wait, (cx_i64 h));
  * handle whose child was freed is left alone. */
 CX_FN(cx_u64, cx_proc_waker, (cx_i64 h));
 CX_FN(void, cx_proc_wake, (cx_u64 wh));
+/* Wakes the poller `net`, through the hooks `cx_net_hooks` gave, each time something comes from
+ * the child, its output, its errors, an end or its exit, or room in its input for what's queued,
+ * and at once if output came that wasn't read, its output has ended or it has exited (CLX-440). 0
+ * if the system can't watch it. */
+CX_FN(cx_bool, cx_proc_wake_on, (cx_i64 h, cx_usize hooks, cx_u64 net));
 CX_FN(cx_usize, cx_proc_wait_any, (const cx_i64* hs, cx_usize n));
 CX_FN(cx_i32, cx_proc_wait_exit, (cx_i64 h, cx_u64 until));
 CX_FN(cx_i32, cx_proc_which, (const cx_u8* name, cx_usize n));

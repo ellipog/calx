@@ -11,9 +11,9 @@ import std.fs.{make_dir_all, read_text, remove_dir_all, temp_dir}
 import std.path.{join, parent_dir}
 import std.process.{Command, output_all}
 
-const TESTS: [str; 16] = ["http", "http_version", "http_form", "http_websocket", "http_server", "http_server_shutdown", "http_serve",
-    "http_server_ping", "http_server_push", "net", "net_echo", "net_wake", "net_errors", "net_peer", "net_wait",
-    "net_other_conn"]
+const TESTS: [str; 18] = ["http", "http_version", "http_form", "http_websocket", "http_server", "http_server_shutdown", "http_serve",
+    "http_server_ping", "http_server_push", "http_wake_on", "http_websocket_wake_on", "net", "net_echo", "net_wake", "net_errors",
+    "net_peer", "net_wait", "net_other_conn"]
 
 // The line a test prints on iOS where it prints `want` on the other systems.
 fn on_ios(test: str, want: own String) -> String {
@@ -87,6 +87,8 @@ fn main() {
     // out: http_serve: as on the other systems
     // out: http_server_ping: as on the other systems
     // out: http_server_push: as on the other systems
+    // out: http_wake_on: as on the other systems
+    // out: http_websocket_wake_on: as on the other systems
     // out: net: as on the other systems
     // out: net_echo: as on the other systems
     // out: net_wake: as on the other systems

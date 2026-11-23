@@ -124,6 +124,7 @@ fn main() {
 | `child.ended() -> bool` | Whether its output has ended and all of it has been read |
 | `child.waker() -> Waker` | A `Waker` another thread can call `wake()` on, so the `read_line` or `read` waiting gives `none` or nothing at once ([below](#waking-a-read)). `wait_for_line` doesn't stop for it. Panics if the system can't make one, as when the program is out of file descriptors |
 | `Waker` | Wakes one child's reads, from any thread. It can be copied and sent to other threads, and once the child has been waited for a wake does nothing |
+| `child.wake_on(waker: std.net.Waker)` | Wakes the `Net` of a [`std.net.Waker`](net.md), such as a server's, each time output or errors come, as its output ends and as it exits, and at once if output is waiting, the output has ended or it has exited ([below](#waking-a-servers-loop)). Panics if the system won't watch its pipes |
 | `child.try_wait() -> Status?` | How it ended, if it has, without waiting |
 | `child.wait_timeout(ms: u64) -> Status?` | How it ended, waiting at most `ms` milliseconds for it to, reading its output meanwhile: Python's `p.wait(timeout=...)`. `none` if it's still running |
 | `child.kill()` | Kills it, if it's running, without letting it clean up |
@@ -188,6 +189,32 @@ fn main() {
 ```
 
 A wake makes the `read_line` or `read` that's waiting give way once what has come is taken, or makes the next one give way if none is waiting. Wakes that come before a read are one, `ended` leaves them for the read, and every copy of a `Waker` wakes the same child.
+
+### Waking a server's loop
+
+A server's loop that also reads a program it started would otherwise call `next_event(10)` and then `read_line(0)`, and hear of each line up to 10 ms late, or about 15.6 ms on Windows. Given the server's [`std.net.Waker`](net.md), the child wakes `next_event` when something comes from it, so the loop waits as long as it likes, as Python's `selectors` hears of a pipe:
+
+```
+var child = Command.new("tool").stdout(Stdio.Pipe).spawn()!
+child.wake_on(server.waker()!)
+loop {
+    if let e = server.next_event() {
+        serve(e)
+        continue
+    }
+    // Woken: take every line that has come, then see if it has exited.
+    while let line = child.read_line(0) {
+        handle(line)
+    }
+    if child.try_wait() != none {
+        break
+    }
+}
+```
+
+It wakes it for output, and for errors, which `wait` gives, so neither pipe fills while the loop waits; as the output ends, and as the child exits; and, while the input given with `input` is still going in, for room in it. It wakes it at once if output is waiting, the output has ended or the child has exited. Wakes that come before a call are one, so after one the loop reads until there's nothing. A later `wake_on` wakes the `Net` it's given instead.
+
+On Windows the system's thread pool waits on each pipe's reads and on the exit. On Linux and macOS the pipes, and the pidfd or kqueue that says when the child exits, go into the server's own epoll or kqueue, so its poll sees them with no thread at all. A Linux older than 5.3, which has no pidfds, hears of the exit as the output ends.
 
 ## Stopping it and what it started
 
