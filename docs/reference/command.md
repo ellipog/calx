@@ -98,6 +98,13 @@ chmod +x tool.calx
 
 `calx run` stands for the program it runs. Its exit status is the program's, and on Windows, killing `calx run`, as a test runner stops one that ran too long, kills the program and every program it started, which `taskkill /T` can't reach once their parents have gone. A program that ends by itself leaves what it started running ([std.process](../std/process.md#when-this-program-ends)).
 
+A program that [handles](../std/signal.md) Ctrl+C, SIGTERM or SIGHUP gets to, under `calx run` as when it's run on its own, so a server can close its connections and end what it started first (CLX-445):
+
+- **On Linux**, `calx run` doesn't end at SIGINT, SIGTERM or SIGHUP while the program runs, but waits for it. The program has the terminal's Ctrl+C already, since the terminal sends it to the whole group. One sent with `kill` is passed on, since it may have been sent to `calx run` alone, as `kill <pid>` and `timeout` send it; one sent to the whole group, as `kill -TERM -<pgid>` and systemd send it, then reaches a program that handles it as one, unless it has taken the first in between. A program a signal ended ends `calx run` with the same signal, so a shell sees how the program ended.
+- **On Windows**, `calx run` doesn't end at Ctrl+C or Ctrl+Break, which the program has too, as it's in the same console group. After the console closes, a logoff or a shutdown, it waits for the program until Windows' time is up.
+- **On macOS**, `calx run` is the program, so every signal is the program's already.
+- **`SIGKILL`**, or ending `calx run` any other way it can't handle, still ends the program with it.
+
 ## Testing
 
 `calx test` runs the tests in a file: its functions marked `@test`. Each test runs in a process of its own, as many at once as there are processors, so a panic or a crash fails only that test. They're reported in the order they're written, each as soon as those before it are done:

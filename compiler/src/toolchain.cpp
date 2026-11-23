@@ -21,14 +21,15 @@
 #include <windows.h>
 #else
 #include <cerrno>
+#include <csignal>
 #include <fcntl.h>
+#include <pthread.h>
 #include <spawn.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #ifdef __linux__
-#include <csignal>
 #include <sys/prctl.h>
 #endif
 #ifdef __APPLE__
@@ -275,6 +276,21 @@ void let_go(HANDLE job) {
     CloseHandle(job);
 }
 
+// The program `calx run` is waiting for, while it runs (CLX-445).
+std::atomic<HANDLE> waited_for{nullptr};
+
+// While `calx run` waits for its program, the console's Ctrl+C and Ctrl+Break don't end it, which
+// would end the program with the job before it had handled them: the program has them already,
+// as it's in the same console process group. After the console closes, a logoff or a shutdown, the
+// system ends this process once its handlers return, so this one waits for the program first,
+// until the system's time is up.
+BOOL WINAPI wait_for_program(DWORD event) {
+    if (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT) return TRUE;
+    HANDLE h = waited_for.load();
+    if (h) WaitForSingleObject(h, INFINITE);
+    return FALSE;
+}
+
 int finish(HANDLE h) {
     WaitForSingleObject(h, INFINITE);
     DWORD code = 1;
@@ -318,8 +334,10 @@ pid_t start(const std::vector<std::string>& argv, Redirect r = {}, const std::st
 // it ends, as the job does on Windows: a test runner that stops `calx run` stops the program, which
 // would otherwise keep the runner's pipes open. The death signal follows the thread that forks,
 // which is the main one, there till the end. macOS has no such signal, so there `calx run` takes
-// the program's place instead (run_last).
-pid_t start_bound(const std::vector<std::string>& argv, const std::string& name) {
+// the program's place instead (run_last). The signals in `reset` go back to their default in the
+// child, and its signal mask to `mask`, if given, before it runs the program.
+pid_t start_bound(const std::vector<std::string>& argv, const std::string& name, const std::vector<int>& reset = {},
+                  const sigset_t* mask = nullptr) {
     std::vector<char*> args;
     for (const std::string& a : argv) args.push_back(const_cast<char*>(a.c_str()));
     if (!name.empty()) args[0] = const_cast<char*>(name.c_str());
@@ -329,6 +347,8 @@ pid_t start_bound(const std::vector<std::string>& argv, const std::string& name)
 #endif
     pid_t pid = fork();
     if (pid == 0) {
+        for (int sig : reset) signal(sig, SIG_DFL);
+        if (mask) sigprocmask(SIG_SETMASK, mask, nullptr);
 #ifdef __linux__
         prctl(PR_SET_PDEATHSIG, SIGKILL);
         if (getppid() != parent) _exit(127);  // this process ended before the signal was set
@@ -338,6 +358,99 @@ pid_t start_bound(const std::vector<std::string>& argv, const std::string& name)
     }
     return pid;
 }
+
+#ifdef __linux__
+// While `calx run` waits for its program, SIGINT, SIGTERM and SIGHUP don't end it, which would end
+// the program with the death signal before it had handled them, as a server that cleans up does
+// (CLX-445). The program has one the terminal sent already, since the terminal sends it to its
+// foreground group, which the program is in. One sent with kill(2) may have been sent to
+// `calx run` alone, as a test runner stops what it started, or to the group, and the two can't be
+// told apart, so it's passed on: a program handling it then hears it as one, unless it took the
+// first in between. One that came before the program started is passed on once it has.
+std::atomic<pid_t> forward_to{0};
+std::atomic<unsigned> held{0};  // a bit for each signal that came before the program started
+
+void pass_held(pid_t to) {
+    unsigned bits = held.exchange(0);
+    for (int sig = 1; sig < 32; sig++) {
+        if (bits & (1u << sig)) kill(to, sig);
+    }
+}
+
+void pass_on(int sig, siginfo_t* info, void*) {
+    int saved = errno;
+    if (info->si_code != SI_KERNEL) {
+        pid_t to = forward_to.load();
+        if (to > 0) {
+            kill(to, sig);
+        } else {
+            held.fetch_or(1u << sig);
+            to = forward_to.load();  // started meanwhile: its starter may have looked already
+            if (to > 0) pass_held(to);
+        }
+    }
+    errno = saved;
+}
+
+// Runs the program as run_process does, passing on signals as above. A program a signal ended ends
+// this process with it, so whatever waits for `calx run` sees how the program ended, as on macOS,
+// where `calx run` is the program.
+int run_passing_on(const std::vector<std::string>& argv, const std::string& name, RunPath* started) {
+    static const int kPassed[] = {SIGINT, SIGTERM, SIGHUP};
+    std::vector<int> set;
+    sigset_t block, was_mask;
+    sigemptyset(&block);
+    struct sigaction was[3];
+    for (int i = 0; i < 3; i++) {
+        int sig = kPassed[i];
+        sigaction(sig, nullptr, &was[i]);
+        // One this process was started ignoring, as nohup ignores SIGHUP, stays ignored, and the
+        // program is started ignoring it too.
+        if (!(was[i].sa_flags & SA_SIGINFO) && was[i].sa_handler == SIG_IGN) continue;
+        struct sigaction a {};
+        a.sa_sigaction = pass_on;
+        a.sa_flags = SA_SIGINFO | SA_RESTART;
+        sigemptyset(&a.sa_mask);
+        sigaction(sig, &a, nullptr);
+        set.push_back(sig);
+        sigaddset(&block, sig);
+    }
+    // Held off on this thread until the program's ID is known, and in the child until their
+    // defaults are back.
+    pthread_sigmask(SIG_BLOCK, &block, &was_mask);
+    pid_t pid = start_bound(argv, name, set, &was_mask);
+    if (pid > 0) {
+        forward_to.store(pid);
+        pass_held(pid);
+    }
+    pthread_sigmask(SIG_SETMASK, &was_mask, nullptr);
+    int status = 0;
+    if (pid > 0) {
+        if (started) started->started();
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+        }
+    }
+    forward_to.store(0);
+    for (int i = 0; i < 3; i++) {
+        if (std::find(set.begin(), set.end(), kPassed[i]) != set.end()) sigaction(kPassed[i], &was[i], nullptr);
+    }
+    if (pid < 0) return -1;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (!WIFSIGNALED(status)) return 1;
+    int sig = WTERMSIG(status);
+    if (sig == SIGINT || sig == SIGTERM || sig == SIGHUP) {
+        std::fflush(stdout);
+        std::fflush(stderr);
+        signal(sig, SIG_DFL);
+        sigset_t only;
+        sigemptyset(&only);
+        sigaddset(&only, sig);
+        pthread_sigmask(SIG_UNBLOCK, &only, nullptr);
+        raise(sig);
+    }
+    return 128 + sig;
+}
+#endif
 
 int finish(pid_t pid) {
     int status = 0;
@@ -648,7 +761,23 @@ std::string why_not_started() {
 }
 
 int run_last(const std::vector<std::string>& argv, const std::string& name, RunPath* started) {
-#ifdef __APPLE__
+#ifdef _WIN32
+    HANDLE job = kill_on_close_job();
+    auto h = start(argv, {}, job, name);
+    if (!h) {
+        if (job) CloseHandle(job);
+        return -1;
+    }
+    waited_for.store(h);
+    SetConsoleCtrlHandler(wait_for_program, TRUE);
+    if (started) started->started();
+    WaitForSingleObject(h, INFINITE);
+    SetConsoleCtrlHandler(wait_for_program, FALSE);
+    waited_for.store(nullptr);
+    int status = finish(h);
+    if (job) let_go(job);
+    return status;
+#elif defined(__APPLE__)
     (void)started;  // a RunPath holds nothing there
     // macOS can't end a child with its parent, as Linux's death signal and Windows' job do, so
     // `calx run` becomes the program: whatever kills it, a test runner or the terminal, kills the
@@ -660,6 +789,8 @@ int run_last(const std::vector<std::string>& argv, const std::string& name, RunP
     args.push_back(nullptr);
     execvp(argv[0].c_str(), args.data());
     return -1;
+#elif defined(__linux__)
+    return run_passing_on(argv, name, started);
 #else
     return run_process(argv, name, started);
 #endif

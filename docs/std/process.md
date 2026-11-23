@@ -387,7 +387,7 @@ A program that ends without meaning to takes the programs it started with it, so
 - **On Windows**, killing `calx run` kills the program and everything it started.
 - **On Linux**, killing `calx run` kills the program, which the system sends `SIGKILL` when `calx run` ends, however it ends.
 
-So a test runner that stops a `calx run` that ran too long stops the program too, and it doesn't keep the runner's pipes open.
+So a test runner that stops a `calx run` that ran too long stops the program too, and it doesn't keep the runner's pipes open. Asking it to stop is different: Ctrl+C, SIGTERM, SIGHUP and Ctrl+Break don't end `calx run` while its program runs, so a program that [handles](signal.md) them ends as it means to, and `calx run` ends with its status ([`calx run`](../reference/command.md#running-a-file)).
 
 ## Speed
 
