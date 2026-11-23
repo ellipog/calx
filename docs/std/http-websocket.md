@@ -43,6 +43,8 @@ loop {
 }
 ```
 
+A thread that waits on the socket, and also sends what other threads queue for it, can wait as long as it likes rather than looking every few milliseconds: they wake its `receive` with the connection's `Waker` once they've queued something ([below](#waking-a-receive)).
+
 What fails says why, and the URL needn't be reachable to see that:
 
 ```calx
@@ -63,7 +65,9 @@ fn main() {
 | `connect(url: String, headers: List<Header> = [], timeout_ms: u32 = 30000, limit: usize = 67108864, ping_interval_ms: u32 = 0, ping_timeout_ms: u32 = 20000) -> WebSocket ! Error` | The connection to `url`, `ws://` or `wss://`, once it's open, as Python's `websockets.connect` gives it: `open`, then `wait_open`. The headers go with the handshake |
 | `open(url, headers = [], timeout_ms = 30000, limit = 67108864, ping_interval_ms = 0, ping_timeout_ms = 20000) -> WebSocket` | The connection, at once, while it opens on its own thread. Opening may take `timeout_ms`, and a message from the server may be `limit` bytes long, 64 MiB unless it says. With `ping_interval_ms`, it pings the server once nothing has come for that long, and ends if nothing comes for `ping_timeout_ms` after: see [A dead connection](#a-dead-connection) |
 | `ws.send_text(text: String) ! Error`, `ws.send_binary(bytes: List<u8>) ! Error` | Sends a message, or keeps it to send once the connection is open. Fails with what the connection ended with, if it has |
-| `ws.receive(timeout_ms: u32) -> Message? ! Error` | The next message, waiting up to `timeout_ms` for one, or `none` if none came; with 0 it doesn't wait. Once the connection has ended and every message before the end is taken, it fails with what it ended with |
+| `ws.receive(timeout_ms: u32) -> Message? ! Error` | The next message, waiting up to `timeout_ms` for one, or `none` if none came, or a `Waker` woke it first; with 0 it doesn't wait. Once the connection has ended and every message before the end is taken, it fails with what it ended with |
+| `ws.waker() -> Waker` | A `Waker` another thread can call `wake()` on, so the `receive` waiting gives `none` at once, after the messages that have come ([below](#waking-a-receive)) |
+| `Waker` | Wakes one connection's `receive`, from any thread. It can be copied and sent to other threads, and once the connection is closed a wake does nothing |
 | `ws.wait_open() ! Error` | Waits while the connection opens, and fails with why it didn't |
 | `ws.is_open() -> bool` | Whether the handshake is done and the connection hasn't closed |
 | `ws.idle_ms() -> u64` | The milliseconds since anything last came from the server, a message, a ping, a pong or part of one, or since it opened if nothing has; 0 while it opens |
@@ -99,6 +103,26 @@ loop {
 ```
 
 A program with a rule of its own can keep it with `ws.idle_ms()`, the time since anything last came from the server, as `ws.idle_ms() > 45000`, with or without the pings.
+
+## Waking a receive
+
+A thread that loops on `receive(10)` and then sends what other threads queued for it hears of each only at the timeout, up to 10 ms later, or about 15.6 ms on Windows, whose timer is that coarse, and wakes about 64 times a second while it's idle. With the connection's `Waker`, the others wake it once they've queued something, so it can wait for seconds, as a selector's self-pipe or asyncio's `call_soon_threadsafe` does in Python:
+
+```
+let outbox = Receiver<String>()
+let w = ws.waker()
+// Another thread: outbox.send(text), then w.wake().
+loop {
+    while let text = outbox.next() {
+        try ws.send_text(text)
+    }
+    if let m = try ws.receive(60000) {
+        handle(m)
+    }
+}
+```
+
+A wake makes the `receive` that's waiting give `none` once the messages that have come are taken, or makes the next one give it if none is waiting. Wakes that come before a `receive` are one, and every copy of a `Waker` wakes the same connection.
 
 ## How a connection ends
 

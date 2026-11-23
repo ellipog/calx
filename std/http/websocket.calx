@@ -21,6 +21,24 @@ extern "C" {
     fn cx_http_ws_text_len(h: u64, which: u32) -> usize
     fn cx_http_ws_text(h: u64, which: u32, out: *u8)
     fn cx_http_ws_close(h: u64, code: u32, reason: *const u8, reason_len: usize)
+    fn cx_http_ws_wake(h: u64)
+}
+
+/// Wakes a `WebSocket`'s `receive` from another thread, so a thread waiting for messages hears
+/// that another has queued something for it: the `receive` waiting gives `none` at once, or the
+/// next one does if none is waiting, and wakes that come before it are one. It's `Copy` and
+/// `Send`, every copy wakes the same connection, and once that's closed a wake does nothing.
+pub struct Waker {
+    handle: u64,
+}
+
+impl Waker {
+    /// Wakes the connection's `receive`. Any thread can.
+    pub fn wake(self) {
+        unsafe {
+            cx_http_ws_wake(self.handle)
+        }
+    }
 }
 
 /// A message, as the server sent it whole: its frames joined.
@@ -248,10 +266,10 @@ impl WebSocket {
     }
 
     /// The next message from the server, waiting up to `timeout_ms` milliseconds for one, or
-    /// `none` if none came in that time. With 0 it doesn't wait, for a loop that does other work.
-    /// Messages that came before the connection ended are given first; after them it fails with
-    /// what the connection ended with: `Closed` with the server's code and reason, or why it
-    /// didn't open.
+    /// `none` if none came in that time, or a `Waker` woke it first. With 0 it doesn't wait, for a
+    /// loop that does other work. Messages that came before the connection ended are given first;
+    /// after them it fails with what the connection ended with: `Closed` with the server's code
+    /// and reason, or why it didn't open.
     pub fn receive(self, timeout_ms: u32) -> Message? ! Error {
         let kind = unsafe { cx_http_ws_receive(self.handle, timeout_ms) }
         if kind == 0 {
@@ -271,6 +289,13 @@ impl WebSocket {
             return some(Message.Text(String.from_utf8(bytes) ?? String()))
         }
         return some(Message.Binary(bytes))
+    }
+
+    /// A `Waker` another thread can wake `receive` with, so one thread can wait for messages
+    /// with a long timeout while others wake it when they've queued something for it to send,
+    /// rather than it looking every few milliseconds.
+    pub fn waker(self) -> Waker {
+        return Waker { handle: self.handle }
     }
 
     /// The subprotocol the server chose from those the `Sec-WebSocket-Protocol` header offered,

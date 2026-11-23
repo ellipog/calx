@@ -118,10 +118,12 @@ fn main() {
 | --- | --- |
 | `child.write(bytes: List<u8>) ! ProcessError`, `child.write_text(text: String) ! ProcessError` | Writes to its input, waiting until it has taken it, and reading what it writes meanwhile. Fails with `InputClosed` if it stops reading first |
 | `child.close_input()` | Ends its input once what was written has gone, so a program that reads to the end goes on |
-| `child.read_line(ms: u64) -> String?` | The next line of its output, without `\n` or `\r\n`, waiting at most `ms` milliseconds. `none` if it doesn't come in time, or the output has ended. The last line needn't end with a line break. With 0 it doesn't wait, but takes what's in the pipe already, as a read of a nonblocking pipe in Python does |
+| `child.read_line(ms: u64) -> String?` | The next line of its output, without `\n` or `\r\n`, waiting at most `ms` milliseconds. `none` if it doesn't come in time, a `Waker` woke it first, or the output has ended. The last line needn't end with a line break. With 0 it doesn't wait, but takes what's in the pipe already, as a read of a nonblocking pipe in Python does |
 | `child.wait_for_line(text: String, ms: u64) -> String?` | Reads lines until one has `text` in it, and gives it, waiting at most `ms` milliseconds in all: a server's "Done" line, say. The lines before it are dropped |
-| `child.read(ms: u64) -> List<u8>` | What has come from its output since the last read, waiting at most `ms` milliseconds if nothing has. Empty at the end, or if nothing comes in time. With 0, what's in the pipe already, without waiting |
+| `child.read(ms: u64) -> List<u8>` | What has come from its output since the last read, waiting at most `ms` milliseconds if nothing has. Empty at the end, if nothing comes in time, or if a `Waker` woke it first. With 0, what's in the pipe already, without waiting |
 | `child.ended() -> bool` | Whether its output has ended and all of it has been read |
+| `child.waker() -> Waker` | A `Waker` another thread can call `wake()` on, so the `read_line` or `read` waiting gives `none` or nothing at once ([below](#waking-a-read)). `wait_for_line` doesn't stop for it. Panics if the system can't make one, as when the program is out of file descriptors |
+| `Waker` | Wakes one child's reads, from any thread. It can be copied and sent to other threads, and once the child has been waited for a wake does nothing |
 | `child.try_wait() -> Status?` | How it ended, if it has, without waiting |
 | `child.wait_timeout(ms: u64) -> Status?` | How it ended, waiting at most `ms` milliseconds for it to, reading its output meanwhile: Python's `p.wait(timeout=...)`. `none` if it's still running |
 | `child.kill()` | Kills it, if it's running, without letting it clean up |
@@ -133,6 +135,59 @@ fn main() {
 Reading its output panics if the output isn't `Stdio.Pipe`, and writing panics if the input isn't.
 
 A loop that watches many programs at once reads each with `read_line(0)` or `read(0)`, which take what each has written without waiting for more, so none of them stops on a full pipe while the loop is busy with the others.
+
+### Waking a read
+
+A thread that talks to a child, writing what other threads queue for it and reading its answers, would otherwise write each only once `read_line(10)` gives up, up to 10 ms later, or about 15.6 ms on Windows, whose timer is that coarse. With the child's `Waker`, the others wake its read once they've queued something, so it can wait for seconds:
+
+```calx
+import std.env.{args}
+import std.io.{Lines, flush}
+import std.process.{Command, Stdio, Waker, current_exe}
+import std.thread.{Task}
+
+// Another thread with a line for the child, as a program's main loop hands one to the thread
+// that talks to it.
+struct Asker {
+    out: Sender<String>
+    waker: Waker
+}
+
+impl Task for Asker {
+    fn run(own self) {
+        var out = self.out
+        out.send("hello")
+        self.waker.wake()
+    }
+}
+
+fn main() {
+    if args().len() > 0 {
+        var lines = Lines {}
+        while let line = lines.next() {
+            println(line.to_upper_root())
+            flush()
+        }
+        return
+    }
+    var child = Command.new(current_exe()).arg("child").stdin(Stdio.Pipe).stdout(Stdio.Pipe).spawn()!
+    var outbox = Receiver<String>()
+    _ = unsafe { Thread.spawn(Asker { out: outbox.sender(), waker: child.waker() }) }
+    loop {
+        while let text = outbox.next() {
+            child.write_text("{text}\n")!
+        }
+        // Waits up to a minute for a line, or until a line is queued.
+        if let answer = child.read_line(60000) {
+            println(answer)    // out: HELLO
+            break
+        }
+    }
+    _ = child.wait()
+}
+```
+
+A wake makes the `read_line` or `read` that's waiting give way once what has come is taken, or makes the next one give way if none is waiting. Wakes that come before a read are one, `ended` leaves them for the read, and every copy of a `Waker` wakes the same child.
 
 ## Stopping it and what it started
 

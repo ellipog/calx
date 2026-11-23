@@ -1584,6 +1584,7 @@ typedef struct {
     cx_u32 my_code;
     bytes my_reason;
     cx_u64 heard_ms;     /* when anything last came from the server, in ws_now_ms's milliseconds, once open */
+    int woken;           /* cx_http_ws_wake was called, and no receive has given 0 for it yet */
 } wsock;
 
 static cx_u64 ws_now_ms(void) {
@@ -3238,10 +3239,31 @@ cx_i32 cx_http_ws_receive(cx_u64 h, cx_u32 timeout_ms) {
             ws_unlock(w);
             return -e;
         }
+        if (w->woken) {
+            w->woken = 0;
+            break;
+        }
         if (!ws_sleep(w, deadline)) break;
     }
     ws_unlock(w);
     return 0;
+}
+
+/* Wakes the receive waiting on the connection, or the next one, from any thread: it gives 0 once
+ * no message is queued. The table's lock is held throughout, so a close on another thread, which
+ * takes the connection out of the table before freeing it, waits for this to finish, and a wake
+ * after it finds nothing (CLX-437). */
+void cx_http_ws_wake(cx_u64 h) {
+    cx_u32 i = (cx_u32)h - 1, gen = (cx_u32)(h >> 32);
+    lock();
+    wsock* w = i < sockets.count && sockets.slots[i].gen == gen ? (wsock*)sockets.slots[i].p : NULL;
+    if (w) {
+        ws_lock(w);
+        w->woken = 1;
+        ws_signal(w);
+        ws_unlock(w);
+    }
+    unlock();
 }
 
 cx_usize cx_http_ws_taken_len(cx_u64 h) { return ws_of(h)->taken.len; }

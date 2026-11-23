@@ -65,6 +65,7 @@ fn main() ! Error {
 | `server.respond(req: Request, res: Response)` | Sends `res` as the answer to `req` |
 | `server.serve(dir: String)` | The folder `dir` served on this server until the program is stopped, as `serve_dir` serves it, with its files opened on worker threads and big ones sent by the system from the file ([below](#serving-a-folder)) |
 | `server.wake_on_signal() ! NetError` | Stops `next`, `next_event` and `serve` at each signal the program handles with [`std.signal`](signal.md): the first two give `none` while one is pending, and once after each, whichever thread takes it, and `serve` returns ([below](#stopping-cleanly)) |
+| `server.waker() -> Waker ! NetError` | A [`std.net.Waker`](net.md) another thread can call `wake()` on, so `next` or `next_event` gives `none` at once, after what's ready, rather than at its timeout ([below](#waking-the-loop-from-another-thread)) |
 | `server.shutdown(timeout_ms: i64 = 5000)` | Closes every connection cleanly, for a server that's stopping, waiting up to `timeout_ms` for what each was sent to go, WebSockets to close with 1001 and files to finish ([below](#stopping-cleanly)) |
 | `Request` | `method`, `GET` or `POST` or another, as it was sent. `target`, the path and query still percent-encoded: `/find?q=a%20b`. `path`, decoded, without the query: `/find`. `query`, what's after the `?`, as it was sent. `version`, `HTTP/1.1` or `HTTP/1.0`. `headers: List<Header>`, in the order they came. `body: List<u8>`. And `client`, the address it came from |
 | `req.header(name: String) -> String?` | The first header named `name`, in any case |
@@ -118,6 +119,45 @@ Some requests are answered by the server itself, without coming from `next`, and
 | `414 URI Too Long` | The request line is longer than 64 KB |
 | `431 Request Header Fields Too Large` | A header line is longer than 64 KB, or there are more than 100 |
 | `505 HTTP Version Not Supported` | HTTP/2 or later, which this server doesn't speak |
+
+## Waking the loop from another thread
+
+A loop that also takes what worker threads send it, through a `Receiver`, would otherwise hear of each only at `next_event`'s timeout: up to 10 ms with `next_event(10)`, and about 15.6 ms on Windows, whose timer is that coarse. A worker that wakes the server after each send is heard at once, so the loop can wait as long as it likes, as Python's asyncio hears `loop.call_soon_threadsafe`:
+
+```calx
+import std.http.server.{Server}
+import std.net.{Waker}
+import std.thread.{Task}
+
+struct Worker {
+    out: Sender<String>
+    waker: Waker
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        var out = self.out
+        out.send("done")
+        self.waker.wake()
+    }
+}
+
+fn main() ! Error {
+    var server = try Server.listen(0)
+    var results = Receiver<String>()
+    _ = unsafe { Thread.spawn(Worker { out: results.sender(), waker: try server.waker() }) }
+    loop {
+        // Waits until a request or a message comes, or the worker wakes it.
+        _ = server.next_event()
+        if let r = results.next() {
+            println(r)    // out: done
+            break
+        }
+    }
+}
+```
+
+A wake makes `next` or `next_event` give `none` once what's ready has been given, or makes the next call give it if none is waiting. Wakes that come before a call are one, and every copy of a `Waker` wakes the same server.
 
 ## Pushing to a browser
 

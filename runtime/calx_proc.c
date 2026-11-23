@@ -179,8 +179,29 @@ typedef struct {
 #endif
 } group;
 
+/* What wakes a child's reads from another thread (CLX-437): `woken` says a wake came that no read
+ * has given way to yet, and on Windows a completion posted to the group's port, or elsewhere a byte
+ * in a pipe the pump polls, makes the pump return. A wake posts or writes only as `woken` goes from
+ * 0 to 1, so a queue of them never builds. It's in `wakes` while the child is, and std.process's
+ * `Waker` holds its handle there, so a wake after the child is freed finds nothing. */
+typedef struct {
+    int woken;
+#ifdef _WIN32
+    HANDLE port;
+#else
+    int fd[2];
+#endif
+} pwake;
+
+#ifdef _WIN32
+/* The key of a wake's completion, with no OVERLAPPED. An exit's is its proc, never 1. */
+#define WAKE_KEY ((ULONG_PTR)1)
+#endif
+
 struct proc {
     stream s[3];
+    pwake* wake;        /* once cx_proc_waker has made one */
+    cx_u64 wake_h;      /* its handle in `wakes` */
     int close_input;    /* close the input once what's queued is written */
     int exited, killed, timed_out, has_code;
     cx_i32 code, signal;
@@ -1000,6 +1021,8 @@ static void pump(proc** ps, size_t n, cx_u64 until) {
     if (!GetQueuedCompletionStatusEx(ps[0]->g->port, e, 32, &got, ms, FALSE)) return;
     for (ULONG k = 0; k < got; k++) {
         if (!e[k].lpOverlapped) {
+            /* A wake's: its flag says so to the read that's waiting. */
+            if (e[k].lpCompletionKey == WAKE_KEY) continue;
             proc* q = (proc*)e[k].lpCompletionKey;
             q->exit_seen = 1;
             child_exited(q);
@@ -1529,19 +1552,19 @@ static void stop_os(proc* p) { signal_os(p, SIGTERM); }
 
 typedef struct {
     proc* p;
-    int what;   /* 0 to 2 a stream, 3 the pidfd */
+    int what;   /* 0 to 2 a stream, 3 the pidfd, 4 the wake's pipe */
 } poll_of;
 
 static void pump(proc** ps, size_t n, cx_u64 until) {
     cx_u64 now = cx_clock_ns();
     cx_u64 wake = until ? until : UINT64_MAX;
-    struct pollfd small_fds[32];
-    poll_of small_of[32];
+    struct pollfd small_fds[35];
+    poll_of small_of[35];
     struct pollfd* fds = small_fds;
     poll_of* of = small_of;
-    if (n * 4 > 32) {
-        fds = (struct pollfd*)grow(NULL, n * 4 * sizeof *fds);
-        of = (poll_of*)grow(NULL, n * 4 * sizeof *of);
+    if (n * 5 > 35) {
+        fds = (struct pollfd*)grow(NULL, n * 5 * sizeof *fds);
+        of = (poll_of*)grow(NULL, n * 5 * sizeof *of);
     }
     size_t k = 0;
     int looking = 0;   /* a child without a pidfd, whose exit is looked for after a while */
@@ -1578,6 +1601,11 @@ static void pump(proc** ps, size_t n, cx_u64 until) {
             fds[k].events = POLLIN;
             of[k++] = (poll_of){p, j};
         }
+        if (p->wake) {
+            fds[k].fd = p->wake->fd[0];
+            fds[k].events = POLLIN;
+            of[k++] = (poll_of){p, 4};
+        }
     }
     int ms = -1;
     if (wake != UINT64_MAX) {
@@ -1590,7 +1618,13 @@ static void pump(proc** ps, size_t n, cx_u64 until) {
         if (!fds[i].revents) continue;
         proc* p = of[i].p;
         int what = of[i].what;
-        if (what == 3) {
+        if (what == 4) {
+            /* A wake's byte, taken so the pipe doesn't keep the next poll from waiting: its flag
+             * says so to the read that's waiting. */
+            char drop[64];
+            while (read(fds[i].fd, drop, sizeof drop) > 0) {
+            }
+        } else if (what == 3) {
             if (!p->exited && p->pidfd == fds[i].fd) reap(p);
         } else if (p->s[what].open && p->s[what].fd == fds[i].fd) {
             if (what == 0) write_some(&p->s[0]);
@@ -2203,10 +2237,14 @@ cx_i32 cx_proc_poll(cx_i64 h) {
     return p->exited;
 }
 
+/* Whether a wake came that no read has given way to, which it then forgets. */
+static int take_wake(proc* p) { return p->wake && __atomic_exchange_n(&p->wake->woken, 0, __ATOMIC_ACQ_REL); }
+
 /* Waits until a line has come from the child's output, until `until` on cx_clock_ns's clock (0
  * for no limit). The line's length with its `\n`, or at the end the length of what's left
- * without one; -1 if `until` came first, and -2 at the end with nothing left. */
-cx_i64 cx_proc_line(cx_i64 h, cx_u64 until) {
+ * without one; -1 if `until` came first, -2 at the end with nothing left, and with `wake`, -3
+ * once a wake has come and no line has. */
+cx_i64 cx_proc_line(cx_i64 h, cx_u64 until, cx_bool wake) {
     proc* p = P(h);
     stream* s = &p->s[1];
     for (;;) {
@@ -2216,6 +2254,7 @@ cx_i64 cx_proc_line(cx_i64 h, cx_u64 until) {
         if (nl) return (cx_i64)(nl - (b->p + b->start)) + 1;
         s->scan = b->len;
         if (ended(s)) return b->len > b->start ? (cx_i64)(b->len - b->start) : -2;
+        if (wake && take_wake(p)) return -3;
         if (until && cx_clock_ns() >= until) {
             /* Out of time, but what's in the pipe already has come, so it's taken without waiting,
              * as a read of 0 ms needs (CLX-358): again while more comes, as a line may come in
@@ -2230,13 +2269,15 @@ cx_i64 cx_proc_line(cx_i64 h, cx_u64 until) {
     }
 }
 
-/* Waits until some output has come: how much, -1 if `until` came first, -2 at the end. */
-cx_i64 cx_proc_some(cx_i64 h, cx_u64 until) {
+/* Waits until some output has come: how much, -1 if `until` came first, -2 at the end, and with
+ * `wake`, -3 once a wake has come and nothing else has. */
+cx_i64 cx_proc_some(cx_i64 h, cx_u64 until, cx_bool wake) {
     proc* p = P(h);
     stream* s = &p->s[1];
     for (;;) {
         if (s->b.len > s->b.start) return (cx_i64)(s->b.len - s->b.start);
         if (ended(s)) return -2;
+        if (wake && take_wake(p)) return -3;
         if (until && cx_clock_ns() >= until) {
             /* What's in the pipe already is taken without waiting, as in cx_proc_line. */
             pump(&p, 1, 1);
@@ -2314,9 +2355,110 @@ void cx_proc_usage(cx_i64 h, cx_u64* out) {
 }
 
 /* Lets the child go: its handles and buffers. One that hasn't exited runs on. */
+/* --- Wakers (CLX-437) ----------------------------------------------------------------------- */
+
+/* Each child's wake, by a handle of its index plus 1 and the slot's generation, so a handle kept
+ * after the child is freed, or its slot is used again, finds nothing. The lock is held while a wake
+ * touches one, and while one is taken out, so it's never freed while it's woken. */
+typedef struct {
+    pwake* w;
+    cx_u32 gen;
+} wake_slot;
+
+static wake_slot* wakes;
+static cx_u32 wakes_n;
+#ifdef _WIN32
+static SRWLOCK wakes_lock = SRWLOCK_INIT;
+static void lock_wakes(void) { AcquireSRWLockExclusive(&wakes_lock); }
+static void unlock_wakes(void) { ReleaseSRWLockExclusive(&wakes_lock); }
+#else
+static pthread_mutex_t wakes_lock = PTHREAD_MUTEX_INITIALIZER;
+static void lock_wakes(void) { pthread_mutex_lock(&wakes_lock); }
+static void unlock_wakes(void) { pthread_mutex_unlock(&wakes_lock); }
+#endif
+
+/* The handle of the child's wake, made the first time: 0 if the system can't make its pipe. */
+cx_u64 cx_proc_waker(cx_i64 h) {
+    proc* p = P(h);
+    if (p->wake) return p->wake_h;
+    pwake* w = (pwake*)calloc(1, sizeof *w);
+    if (!w) out_of_memory();
+#ifdef _WIN32
+    w->port = p->g->port;
+#else
+    int fds[2];
+#ifdef __APPLE__
+    if (pipe(fds) != 0) {
+        free(w);
+        return 0;
+    }
+    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+#else
+    if (pipe2(fds, O_CLOEXEC) != 0) {
+        free(w);
+        return 0;
+    }
+#endif
+    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
+    fcntl(fds[1], F_SETFL, fcntl(fds[1], F_GETFL) | O_NONBLOCK);
+    w->fd[0] = fds[0], w->fd[1] = fds[1];
+#endif
+    lock_wakes();
+    cx_u32 i = 0;
+    while (i < wakes_n && wakes[i].w) i++;
+    if (i == wakes_n) {
+        cx_u32 n = wakes_n ? wakes_n * 2 : 16;
+        wake_slot* s = (wake_slot*)grow(wakes, n * sizeof *s);
+        memset(s + wakes_n, 0, (n - wakes_n) * sizeof *s);
+        wakes = s, wakes_n = n;
+    }
+    wakes[i].w = w;
+    cx_u64 wh = (cx_u64)wakes[i].gen << 32 | (i + 1);
+    unlock_wakes();
+    p->wake = w;
+    p->wake_h = wh;
+    return wh;
+}
+
+/* Wakes the child's read that's waiting, or the next one, from any thread; nothing once the child
+ * is freed. */
+void cx_proc_wake(cx_u64 wh) {
+    cx_u32 i = (cx_u32)wh - 1, gen = (cx_u32)(wh >> 32);
+    lock_wakes();
+    pwake* w = i < wakes_n && wakes[i].gen == gen ? wakes[i].w : NULL;
+    if (w && !__atomic_exchange_n(&w->woken, 1, __ATOMIC_ACQ_REL)) {
+#ifdef _WIN32
+        PostQueuedCompletionStatus(w->port, 0, WAKE_KEY, NULL);
+#else
+        char b = 1;
+        ssize_t n = write(w->fd[1], &b, 1);
+        (void)n;
+#endif
+    }
+    unlock_wakes();
+}
+
+/* Takes the child's wake out of `wakes`, so no wake finds it, and frees it. */
+static void free_wake(proc* p) {
+    if (!p->wake) return;
+    cx_u32 i = (cx_u32)p->wake_h - 1;
+    lock_wakes();
+    wakes[i].w = NULL;
+    wakes[i].gen++;
+    unlock_wakes();
+#ifndef _WIN32
+    close(p->wake->fd[0]);
+    close(p->wake->fd[1]);
+#endif
+    free(p->wake);
+    p->wake = NULL;
+}
+
 void cx_proc_free(cx_i64 h) {
     proc* p = P(h);
     if (!p) return;
+    free_wake(p);
     free_os(p);
     for (int i = 0; i < 3; i++) free(p->s[i].b.p);
     group_release(p->g);
