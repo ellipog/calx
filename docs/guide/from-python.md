@@ -164,6 +164,7 @@ fn main() ! Error {
 | `open(p, "w").write(t)` | `write_text(p, t)`, or `write(p, bytes)` |
 | `for line in open(p):` | `for line in (try read_text(p) ?? String()).lines()` |
 | `f = open(p, "wb")`, `f.write(b)`; `open(p, "rb").read(n)` | `var f = create(p)!`, `f.write(b)!`; `open_read(p)!.read(mut buf, n)!`, a [`std.io`](../std/io.md#reader-and-writer) `Writer` and `Reader`, so `std.tar` and `std.zstd` stream into and out of them |
+| `os.open(p, os.O_WRONLY \| os.O_CREAT \| os.O_EXCL \| os.O_NOFOLLOW, 0o600)`, `open(p, "x")` | `create_new(p, 0o600)!`, a `File`: `Exists` if anything's at `p`, a link too, and the mode exact whatever the umask ([Saving safely](../std/fs.md#saving-safely)) |
 | A function taking any file object, `shutil.copyfileobj(src, dst)` | `fn copy<R: Reader, W: Writer>(src: mut R, dst: mut W)` over [`std.io`](../std/io.md#reader-and-writer)'s interfaces, which files, `List<u8>`, `ByteReader` (`io.BytesIO`), standard input and output, connections and the zstd and tar streams have |
 | `os.listdir(d)`, `glob.glob("**/*.py", recursive=True)` | `list(d)`, `glob("**/*.py")`, sorted |
 | `os.walk(d)` | `walk(d)` |
