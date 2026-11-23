@@ -1,0 +1,84 @@
+// std.fs.create_new (CLX-443): a new file only if nothing is at the path, a link to something or
+// to nothing included, never following one, with its mode exact from the start on Linux and macOS.
+import std.fs.{FsError, create_new, make_dir, make_link, metadata, kind, read, read_text, write, rename_synced, separator, remove_dir_all, temp_dir}
+
+fn refused(path: String, mode: u32) -> String {
+    return match create_new(path, mode) {
+        ok(f) => {
+            f.close()!
+            String("made")
+        },
+        err(FsError.Exists) => String("exists"),
+        err(FsError.NotFound) => String("not found"),
+        err(e) => "{e}",
+    }
+}
+
+fn main() {
+    let dir = temp_dir()!
+    let windows = separator() == "\\"
+
+    // The mode, exact: the umask (022 on most systems) would make 0o666 0o644. On Windows only
+    // the owner's write bit counts.
+    let f = create_new("{dir}/token", 0o600)!
+    f.write_parts([(0u64, "secret".to_bytes())], true)!
+    f.close()!
+    let g = create_new("{dir}/shared", 0o666)!
+    g.close()!
+    let token_mode = metadata("{dir}/token")!.mode
+    let shared_mode = metadata("{dir}/shared")!.mode
+    if windows {
+        println("{token_mode == 0o666} {shared_mode == 0o666}")
+    } else {
+        println("{token_mode == 0o600} {shared_mode == 0o666}")
+    }
+    // out: true true
+    println("{read_text("{dir}/token")! ?? String("?")}")    // out: secret
+
+    // Read-only from the start, and still written through the `File` that made it.
+    var ro = create_new("{dir}/ro", 0o400)!
+    ro.write("kept".to_bytes())!
+    ro.close()!
+    let ro_mode = metadata("{dir}/ro")!.mode
+    println("{read_text("{dir}/ro")! ?? String("?")} {ro_mode & 0o222} {if windows { ro_mode == 0o444 } else { ro_mode == 0o400 }}")    // out: kept 0 true
+
+    // Something there already: a file, left as it was, and a directory.
+    println("{refused("{dir}/token", 0o600)} {read_text("{dir}/token")! ?? String("?")}")    // out: exists secret
+    make_dir("{dir}/d")!
+    println(refused("{dir}/d", 0o600))    // out: exists
+    println(refused("{dir}/missing/token", 0o600))    // out: not found
+
+    // Links: to a file, which isn't written through, and to nothing, which isn't made.
+    match make_link("{dir}/token", "{dir}/to-token") {
+        ok => {
+            make_link("{dir}/elsewhere", "{dir}/to-nothing")!
+            let through = refused("{dir}/to-token", 0o600)
+            let dangling = refused("{dir}/to-nothing", 0o600)
+            println("{through} {dangling} {read_text("{dir}/token")! ?? String("?")} {kind("{dir}/elsewhere")! == none}")
+        },
+        err(FsError.Denied) => if windows {
+            // Windows makes links only in developer mode.
+            println("exists exists secret true")
+        } else {
+            println("denied")
+        },
+        err(e) => println("{e}"),
+    }
+    // out: exists exists secret true
+
+    // A secret saved whole: made beside where it goes, synced, and renamed over what was there.
+    write("{dir}/config", "old".to_bytes())!
+    let tmp = create_new("{dir}/config.tmp", 0o600)!
+    tmp.write_parts([(0u64, "new".to_bytes())], true)!
+    tmp.close()!
+    rename_synced("{dir}/config.tmp", "{dir}/config")!
+    let config_mode = metadata("{dir}/config")!.mode
+    println("{read("{dir}/config")!.len()} {kind("{dir}/config.tmp")! == none} {if windows { true } else { config_mode == 0o600 }}")    // out: 3 true true
+
+    // A path that can't name anything.
+    match create_new("{dir}/a\0b", 0o600) {
+        ok(h) => h.close()!,
+        err(e) => println("{e}"),    // out: not a valid path
+    }
+    remove_dir_all(dir)!
+}

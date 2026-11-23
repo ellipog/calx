@@ -71,6 +71,7 @@ fn main() {
 | `DiskUsage` | `total: u64`, how big a file system is, `used: u64`, how much of it is in use, and `available: u64`, how much more this program may write to it, `df`'s `Avail`, all in bytes |
 | `open(path: String) -> File ! FsError` | The file kept open to read and write, made if nothing's there, keeping what it holds. Other programs, and this one, can read, write and remove it while it's open, as Java lets them while it has a `FileChannel` open. See [Files kept open](#files-kept-open) |
 | `open_read(path: String) -> File ! FsError` | The file kept open only to read, as Python's `open(path, "rb")`: `NotFound` if nothing's there, rather than a new empty file, and writing through it fails |
+| `create_new(path: String, mode: u32) -> File ! FsError` | A new, empty file kept open to read and write, only if nothing's at the path: `Exists` if anything is, a link too, even one to nothing, which is never followed. On Linux and macOS it has the permission bits `mode`, such as `0o600`, from the moment it's made, whatever the umask. See [Saving safely](#saving-safely) |
 | `File` | An open file: its `path()`, `size() -> u64`, `metadata() -> Metadata`, what `metadata` says of its path but from the file already open, which on Windows is quicker than opening it again, `read_part(from, n)` and `read_parts(ranges)`, which give what the functions of those names do, `write_parts(parts, sync)`, as the function does, `sync()`, `close(own self)`, and `raw() -> i64`, the system's handle to it, as Python's `fileno()`: a `HANDLE` on Windows, a file descriptor on Linux. All but `path` and `raw` fail with `FsError`. It's open until `close`, or until the program ends. It's a [handle](../reference/ownership.md#handles), so it can't be copied |
 | `FileLock` | A lock `try_lock` took, held until its `release(own self) ! FsError`, which lets it go and closes the file, or until the program ends. It's a handle too |
 | `Link` | `target: String`, where a link leads, as it was made, and `junction: bool`, whether it's a Windows junction |
@@ -156,6 +157,7 @@ fn main() {
 | `open(path: String) -> File ! FsError` | The file open to read and write, made if nothing's there, keeping what it holds |
 | `open_read(path: String) -> File ! FsError` | The file open only to read, as `open(path, "rb")`: `NotFound` if nothing's there |
 | `create(path: String) -> File ! FsError` | The file open only to write, empty, as `open(path, "wb")`: made if nothing's there, and emptied if it is |
+| `create_new(path: String, mode: u32) -> File ! FsError` | A new file open to read and write, with the permission bits `mode`: `Exists` if anything's there, a link included |
 | `file.read(buf: mut List<u8>, n: usize) -> usize ! String` | Up to `n` bytes from where the last read stopped, onto the end of `buf`; 0 at the end |
 | `file.write(bytes: List<u8>) ! String` | Writes the bytes where the last write stopped |
 
@@ -270,7 +272,7 @@ fn main() {
 
 ## Links
 
-A symbolic link is a name that leads to another path. `read_link` reads where it leads without going there, so a program can check a folder's links before it trusts them, as a Minecraft server checks its world's against `allowed_symlinks.txt`. `kind`, `rename`, `remove_file` and `remove_dir_all` see the link itself too, and every other call follows it.
+A symbolic link is a name that leads to another path. `read_link` reads where it leads without going there, so a program can check a folder's links before it trusts them, as a Minecraft server checks its world's against `allowed_symlinks.txt`. `kind`, `rename`, `remove_file` and `remove_dir_all` see the link itself too, `create_new` refuses it, and every other call follows it.
 
 ```calx
 import std.fs.{read_link, write, remove_dir_all, temp_dir}
@@ -334,12 +336,41 @@ fn main() {
 
 To keep a file whole through a power cut, write the new bytes with `write_parts` and its `sync`, then `rename_synced` them over it. Each returns once the system says what it did is on the disk, so after a power cut there's the old file or the new one, whole, and once `rename_synced` has returned, the new one. That costs a wait for the disk, which `write` and `rename` don't, so it's for files that must survive one, such as a world's saves, not for every file.
 
+### A file for a secret
+
+Every other way `std.fs` makes a file gives it the permission bits `0o666` less the umask, usually `0o644`, so anyone on the machine may read it, follows a link at the path, and takes a file that's already there. For a token or a key that's wrong three ways: another user can open the file before `set_mode` narrows it and keep reading it after, and someone who can write the folder can put a link there that sends the secret somewhere else, between a check with `kind` and the write.
+
+`create_new` makes the file only if nothing is at the path, with its mode set as it's made, as Python's `os.open(path, os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)` does. Anything already there, a file, a directory or a link, even one to nothing, is `Exists`, and a link is never followed. The umask can only narrow the mode, and `create_new` then sets it exactly on the file it holds open, so `0o666` is `0o666` too. With `rename_synced` after it, a secret goes into place whole:
+
+```calx
+import std.fs.{create_new, rename_synced, metadata, read, separator, remove_dir_all, temp_dir}
+
+fn main() {
+    let dir = temp_dir()!
+    let token = create_new("{dir}/token.tmp", 0o600)!
+    token.write_parts([(0u64, "s3cret".to_bytes())], true)!
+    token.close()!
+    rename_synced("{dir}/token.tmp", "{dir}/token")!
+    let mode = metadata("{dir}/token")!.mode
+    println("{read("{dir}/token")!.len()} {separator() == "\\" or mode == 0o600}")    // out: 6 true
+    match create_new("{dir}/token", 0o600) {
+        ok(f) => f.close()!,
+        err(e) => println("{e}"),    // out: already exists
+    }
+    remove_dir_all(dir)!
+}
+```
+
+Only the last name is never followed: links in the folders on the way to it are, as `open` follows them, so the folder itself is one the program trusts. If it can't set the mode, it removes the file it made and fails.
+
+On Windows only the owner's write bit, `0o200`, counts, as with `set_mode`: without it the file is made read-only, and the `File` that made it may still write it. Who else may read it is what the folder's permissions say, which a new file takes, so a secret goes in a folder of the user's own, such as one under their profile. A link is refused there too: `CreateFileW` with `CREATE_NEW` fails on any name that's there, and `FILE_FLAG_OPEN_REPARSE_POINT` keeps it from following one.
+
 ## How it works
 
 | Platform | Source |
 | --- | --- |
-| Windows | `CreateFileW`, `ReadFile` and `WriteFile`; `LockFileEx`; `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, and `MOVEFILE_WRITE_THROUGH` to sync; `CopyFileW`; `FindFirstFileExW`; `GetFinalPathNameByHandleW`, without the `\\?\` it puts first; `GetFullPathNameW`; `GetCurrentDirectoryW` and `SetCurrentDirectoryW`; `GetTempPathW`; `GetDiskFreeSpaceExW`, on the folder a file is in |
-| Linux | `open`, `read` and `write`; `fcntl` with `F_OFD_SETLK`; `rename`, then `fsync` on the folder it moved into and the one it moved from, to sync, where a file system that can't sync a folder offers nothing more; `copy_file_range`, or reads and writes where a file system can't, then `fchmod` and `futimens`; `opendir`; `realpath`; `getcwd` and `chdir`; `mkdtemp` in `TMPDIR` or `/tmp`; `statvfs`, or on macOS `statfs` |
+| Windows | `CreateFileW`, `ReadFile` and `WriteFile`; `CreateFileW` with `CREATE_NEW` and `FILE_FLAG_OPEN_REPARSE_POINT` for `create_new`; `LockFileEx`; `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, and `MOVEFILE_WRITE_THROUGH` to sync; `CopyFileW`; `FindFirstFileExW`; `GetFinalPathNameByHandleW`, without the `\\?\` it puts first; `GetFullPathNameW`; `GetCurrentDirectoryW` and `SetCurrentDirectoryW`; `GetTempPathW`; `GetDiskFreeSpaceExW`, on the folder a file is in |
+| Linux | `open`, `read` and `write`; `open` with `O_CREAT`, `O_EXCL` and `O_NOFOLLOW`, then `fchmod`, for `create_new`; `fcntl` with `F_OFD_SETLK`; `rename`, then `fsync` on the folder it moved into and the one it moved from, to sync, where a file system that can't sync a folder offers nothing more; `copy_file_range`, or reads and writes where a file system can't, then `fchmod` and `futimens`; `opendir`; `realpath`; `getcwd` and `chdir`; `mkdtemp` in `TMPDIR` or `/tmp`; `statvfs`, or on macOS `statfs` |
 
 `read` asks for the file's size and reads it whole in one call, so the list never grows, and a second call sees the end. A file can still grow as it's read, and `read` keeps going until the end.
 

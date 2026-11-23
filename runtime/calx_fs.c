@@ -220,6 +220,33 @@ cx_i64 cx_fs_open(const cx_u8* path, size_t len, cx_u32 write) {
     return (cx_i64)(intptr_t)h;
 }
 
+/* A new file to read and write, only if nothing is at the path. CREATE_NEW fails on any name
+ * that's there, a link to nothing too, and FILE_FLAG_OPEN_REPARSE_POINT keeps it from following
+ * one. Of `mode` only the owner's write bit counts, as in `cx_fs_set_mode`: without it the file is
+ * made read-only, and this handle may still write it. Who else may read it is the folder's ACL's
+ * to say. */
+cx_i64 cx_fs_create_new(const cx_u8* path, size_t len, cx_u32 mode) {
+    wchar_t* w = wide_long(path, len);
+    if (!w) return -1;
+    DWORD attrs = (mode & 0200) ? FILE_ATTRIBUTE_NORMAL : FILE_ATTRIBUTE_READONLY;
+    HANDLE h = CreateFileW(w, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                           CREATE_NEW, attrs | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD e = GetLastError();
+        /* A directory there is refused as denied; it's something at the path all the same. */
+        DWORD there = GetFileAttributesW(w);
+        if (e == ERROR_ACCESS_DENIED && there != INVALID_FILE_ATTRIBUTES && (there & FILE_ATTRIBUTE_DIRECTORY)) {
+            fs_fail(FS_EXISTS, (cx_i32)e);
+        } else {
+            fail_win(e);
+        }
+        free(w);
+        return -1;
+    }
+    free(w);
+    return (cx_i64)(intptr_t)h;
+}
+
 cx_i64 cx_fs_size(cx_i64 h) {
     LARGE_INTEGER size;
     if (!GetFileSizeEx((HANDLE)(intptr_t)h, &size)) return -1;
@@ -973,6 +1000,37 @@ cx_i64 cx_fs_open(const cx_u8* path, size_t len, cx_u32 write) {
             return -1;
         }
     }
+    return fd;
+}
+
+/* A new file to read and write, only if nothing is at the path: O_EXCL refuses any name that's
+ * there, a link to nothing too, and O_NOFOLLOW makes sure no link is followed. It's made with
+ * `mode`'s permission bits, which the umask can only narrow, so it's never wider than asked; then
+ * fchmod on the descriptor, which no other program holds, sets them exactly. */
+cx_i64 cx_fs_create_new(const cx_u8* path, size_t len, cx_u32 mode) {
+    char* s = cpath(path, len);
+    if (!s) return -1;
+    int fd = open(s, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, (mode_t)(mode & 0777));
+    if (fd < 0) {
+        int e = errno;
+        /* Some systems say a link is there as ELOOP, or on FreeBSD EMLINK, rather than EEXIST. */
+        if (e == ELOOP || e == EMLINK) {
+            fs_fail(FS_EXISTS, e);
+        } else {
+            fail_errno(e);
+        }
+        free(s);
+        return -1;
+    }
+    if (fchmod(fd, (mode_t)(mode & 07777)) != 0) {
+        int e = errno;
+        close(fd);
+        unlink(s);
+        fail_errno(e);
+        free(s);
+        return -1;
+    }
+    free(s);
     return fd;
 }
 

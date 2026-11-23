@@ -1412,6 +1412,7 @@ CX_FN(cx_i64, cx_fs_lock, (const cx_u8* path, cx_usize len, const cx_u8* bytes, 
 CX_FN(cx_i32, cx_fs_make_dir, (const cx_u8* path, cx_usize len));
 CX_FN(cx_i32, cx_fs_make_link, (const cx_u8* target, cx_usize target_len, const cx_u8* path, cx_usize len));
 CX_FN(cx_i64, cx_fs_open, (const cx_u8* path, cx_usize len, cx_u32 write));
+CX_FN(cx_i64, cx_fs_create_new, (const cx_u8* path, cx_usize len, cx_u32 mode));
 CX_FN(cx_i64, cx_fs_read, (cx_i64 h, cx_u8* to, cx_usize n));
 CX_FN(cx_i32, cx_fs_read_link, (const cx_u8* path, cx_usize len));
 CX_FN(cx_i32, cx_fs_real_path, (const cx_u8* path, cx_usize len));

@@ -14,6 +14,7 @@ extern "C" {
     fn cx_fs_set_current_dir(path: *const u8, len: usize) -> i32
     fn cx_fs_absolute(path: *const u8, len: usize) -> i32
     fn cx_fs_open(path: *const u8, len: usize, write: u32) -> i64
+    fn cx_fs_create_new(path: *const u8, len: usize, mode: u32) -> i64
     fn cx_fs_size(h: i64) -> i64
     fn cx_fs_read(h: i64, to: *u8, n: usize) -> i64
     fn cx_fs_seek(h: i64, at: u64) -> i32
@@ -382,6 +383,22 @@ pub fn open_read(path: String) -> File ! FsError {
 /// as an archive as it's made.
 pub fn create(path: String) -> File ! FsError {
     let h = unsafe { cx_fs_open(path.as_ptr(), path.len(), 1) }
+    if h < 0 {
+        fail last_error()
+    }
+    return File { handle: h, named: path.copy() }
+}
+
+/// Makes a new, empty file at `path` and opens it to read and write, only if nothing is there, as
+/// Python's `os.open` with `O_CREAT | O_EXCL | O_NOFOLLOW` and a mode: `Exists` if anything is,
+/// a link too, even one to nothing, which is never followed. On Linux and macOS it has the
+/// permission bits `mode`, such as `0o600` for a secret only its owner may read, from the moment
+/// it's made, whatever the umask, so no other program can open it before it holds what it's for.
+/// On Windows only the owner's write bit, `0o200`, counts, as with `set_mode`: without it the
+/// file is made read-only, and this `File` may still write it. Who else may read it there is up
+/// to the folder's permissions, which a new file takes.
+pub fn create_new(path: String, mode: u32) -> File ! FsError {
+    let h = unsafe { cx_fs_create_new(path.as_ptr(), path.len(), mode) }
     if h < 0 {
         fail last_error()
     }
