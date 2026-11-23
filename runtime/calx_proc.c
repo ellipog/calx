@@ -43,6 +43,7 @@
 #include <psapi.h> /* K32GetProcessMemoryInfo, which kernel32 has */
 #else
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -66,9 +67,13 @@ extern char** environ;
 #include <sys/event.h>
 #else
 #include <sched.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #ifndef SYS_pidfd_open
 #define SYS_pidfd_open 434
+#endif
+#ifndef SYS_pidfd_send_signal
+#define SYS_pidfd_send_signal 424
 #endif
 #endif
 #endif
@@ -287,9 +292,9 @@ typedef struct {
  * environment, each a byte that's 1 to set the variable and 0 to remove it, its name, and its
  * value if it's set; then the processors it may run on, a u32 count and a u32 each, none for any;
  * a byte that's 1 to take it out of power throttling; a byte that's 1 to start it from a
- * helper, so its peak memory is its own; and a byte that's 1 to start it in a group of its own,
- * so it can be stopped with what it starts. Integers are little-endian, and each text is a u32
- * length and its bytes. */
+ * helper, so its peak memory is its own; a byte that's 1 to start it in a group of its own,
+ * so it can be stopped with what it starts; and a byte that's 1 to end it, with its group, when
+ * this program ends. Integers are little-endian, and each text is a u32 length and its bytes. */
 typedef struct {
     cx_u32 io[3];
     int clear_env;
@@ -306,6 +311,7 @@ typedef struct {
     int full_speed;
     int measured;
     int own_group;
+    int bound;
 } spec;
 
 typedef struct {
@@ -374,6 +380,7 @@ static int spec_read(spec* sp, const cx_u8* p, size_t n) {
     sp->full_speed = (int)rd_int(&r, 1);
     sp->measured = (int)rd_int(&r, 1);
     sp->own_group = (int)rd_int(&r, 1);
+    sp->bound = (int)rd_int(&r, 1);
     return !r.bad;
 }
 
@@ -798,6 +805,29 @@ static BOOL CALLBACK make_job(PINIT_ONCE once, PVOID param, PVOID* ctx) {
     return TRUE;
 }
 
+/* The job each child started with `bound`, to end with this program, goes into as it starts,
+ * inside the one above (CLX-446). It kills what's in it as it closes, and it's never let go nor
+ * its handle closed, so it closes as this program ends, however it ends: by returning from `main`
+ * too. A program the child starts goes with it, unless it leaves the job. */
+static HANDLE bound_job;
+static INIT_ONCE bound_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK make_bound_job(PINIT_ONCE once, PVOID param, PVOID* ctx) {
+    (void)once;
+    (void)param;
+    (void)ctx;
+    HANDLE j = CreateJobObjectW(NULL, NULL);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION info;
+    memset(&info, 0, sizeof info);
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+    if (j && !SetInformationJobObject(j, JobObjectExtendedLimitInformation, &info, sizeof info)) {
+        CloseHandle(j);
+        j = NULL;
+    }
+    bound_job = j;
+    return TRUE;
+}
+
 /* The handles the child inherits and the job it goes into, for CreateProcess. */
 static LPPROC_THREAD_ATTRIBUTE_LIST make_attrs(HANDLE* list, DWORD count, int job) {
     DWORD n = (count ? 1 : 0) + (job ? 1 : 0);
@@ -1219,9 +1249,16 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
      * an editor or a service often has, shares it: making each child one costs 15 ms. */
     DWORD console;
     if (GetConsoleProcessList(&console, 1) == 0) flags |= CREATE_NO_WINDOW;
-    /* A child to pin, to run at full speed, or to put in a job of its own, starts suspended, so it
-     * runs no instruction before. */
-    if (pin || sp->full_speed || sp->own_group) flags |= CREATE_SUSPENDED;
+    /* A child to pin, to run at full speed, or to put in a job of its own or the bound one, starts
+     * suspended, so it runs no instruction before. */
+    if (pin || sp->full_speed || sp->own_group || sp->bound) flags |= CREATE_SUSPENDED;
+    if (sp->bound) {
+        InitOnceExecuteOnce(&bound_once, make_bound_job, NULL, NULL);
+        if (!bound_job) {
+            fail_win(GetLastError());
+            goto done;
+        }
+    }
     /* A group of its own: a console process group, which Ctrl+Break is sent to, and a job, inside
      * the one every child is in, which holds it and every program it starts, to end them all. It
      * lets them leave, as that one does. */
@@ -1255,8 +1292,9 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
         goto done;
     }
     if (flags & CREATE_SUSPENDED) {
-        /* Its job goes inside the one it's in, which Windows 8 allows. */
-        if ((pin && !SetProcessAffinityMask(pi.hProcess, pin)) || (tree && !AssignProcessToJobObject(tree, pi.hProcess))) {
+        /* Its jobs go inside the one it's in, which Windows 8 allows: the bound one, then its own. */
+        if ((pin && !SetProcessAffinityMask(pi.hProcess, pin)) || (sp->bound && !AssignProcessToJobObject(bound_job, pi.hProcess)) ||
+            (tree && !AssignProcessToJobObject(tree, pi.hProcess))) {
             DWORD e = GetLastError();
             TerminateProcess(pi.hProcess, 1);
             CloseHandle(pi.hThread);
@@ -1775,22 +1813,199 @@ static int same_name(const char* entry, span name) {
     return strncmp(entry, (const char*)name.p, name.n) == 0 && entry[name.n] == '=';
 }
 
-#ifndef __APPLE__
-/* --- A child measured on its own (CLX-295) --------------------------------------------------
- * On Linux a child's peak memory, wait4's ru_maxrss, is never less than the peak of the memory it
- * ran in before it exec'd: posix_spawn's child runs in this program's memory until then, a fork's
- * in a copy of it, and the kernel keeps that memory's peak as the child's. So a child started
- * with `measured` is started by a helper instead: this program's own file run again, which starts
- * the child before it has done anything else, when it holds a megabyte or two. It starts it with
- * CLONE_PARENT, so it's this program's child as any other is, and its ID, waiting for it, killing
- * it and what wait4 says of it all work as they would. The helper writes the child's ID, why it
- * couldn't run it, 0 when it could, and the time just before it started it, on cx_clock_ns's
- * clock, which is the system's, to a pipe this program gave it, and exits. So the child's wall
- * time doesn't count the helper's starting. */
+#ifndef CX_IOS
+/* --- Helpers: a child measured on its own, and the watcher that ends a bound one ----------------
+ *
+ * A child measured on its own (CLX-295). On Linux a child's peak memory, wait4's ru_maxrss, is
+ * never less than the peak of the memory it ran in before it exec'd: posix_spawn's child runs in
+ * this program's memory until then, a fork's in a copy of it, and the kernel keeps that memory's
+ * peak as the child's. So a child started with `measured` is started by a helper instead: this
+ * program's own file run again, which starts the child before it has done anything else, when it
+ * holds a megabyte or two. It starts it with CLONE_PARENT, so it's this program's child as any
+ * other is, and its ID, waiting for it, killing it and what wait4 says of it all work as they
+ * would. The helper writes the child's ID, why it couldn't run it, 0 when it could, and the time
+ * just before it started it, on cx_clock_ns's clock, which is the system's, to a pipe this program
+ * gave it, and exits. So the child's wall time doesn't count the helper's starting.
+ *
+ * A child that ends with this program (CLX-446). Linux's death signal, PR_SET_PDEATHSIG, comes when
+ * the thread that started the child ends, not the process, and reaches only the child, not its
+ * group, and macOS has none. So a watcher ends it instead: a process of its own, forked from the
+ * helper, holding the read end of a pipe whose write end only this program holds, close-on-exec,
+ * for as long as it runs. However this program ends, the kernel closes that, the watcher reads the
+ * pipe's end, and it kills the child with SIGKILL, and with own_group the child's whole group. On
+ * Linux the helper starts the child, as above, and forks the watcher before it says it has, so
+ * there's no moment the child runs unwatched. On macOS this program starts the child suspended,
+ * as a debugger would, the helper only forks the watcher, and the child goes on once it's watched.
+ * A watcher ends with the child, or with own_group once the child's group is empty, which it looks
+ * at each second once the child has gone; it's in no group of the child's and holds nothing else
+ * open, and it's no child of this program's, so nothing waits for it. */
 #define HELPER_NAME "\x01" "calx-measure"
+#define WATCH_NAME "\x01" "calx-watch"
 
 extern int cx_is_program;
 
+/* The pipe a watcher watches: written to by no one, and its write end in this process alone. */
+static int bound_pipe[2] = {-1, -1};
+static pthread_once_t bound_once = PTHREAD_ONCE_INIT;
+
+static void make_bound_pipe(void) {
+    int fds[2];
+#ifdef __APPLE__
+    if (pipe(fds) != 0) return;
+    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+#else
+    if (pipe2(fds, O_CLOEXEC) != 0) return;
+#endif
+    bound_pipe[0] = fds[0];
+    bound_pipe[1] = fds[1];
+}
+
+#ifndef __APPLE__
+/* When the process `pid` started, in clock ticks since the system did, from /proc, or 0: the same
+ * ID with another start is another process. */
+static unsigned long long started_at(pid_t pid) {
+    char path[64], buf[1024];
+    snprintf(path, sizeof path, "/proc/%d/stat", (int)pid);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    char* p = strrchr(buf, ')');
+    if (!p) return 0;
+    /* After the name: the state, field 3, and on to the start time, field 22. */
+    for (int field = 2; field < 22 && p; field++) p = strchr(p + 1, ' ');
+    return p ? strtoull(p + 1, NULL, 10) : 0;
+}
+#endif
+
+/* Closes every descriptor but `a` and `b`, and puts /dev/null on 0, 1 and 2. */
+static void close_others(int a, int b) {
+#ifdef __APPLE__
+    DIR* d = opendir("/dev/fd");
+#else
+    DIR* d = opendir("/proc/self/fd");
+#endif
+    int small[64];
+    int* fds = small;
+    size_t n = 0, cap = 64;
+    if (d) {
+        int self = dirfd(d);
+        struct dirent* e;
+        while ((e = readdir(d))) {
+            if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+            int fd = atoi(e->d_name);
+            if (fd == self || fd == a || fd == b) continue;
+            if (n == cap) {
+                int* more = (int*)malloc(cap * 2 * sizeof *more);
+                if (!more) break;
+                memcpy(more, fds, n * sizeof *fds);
+                if (fds != small) free(fds);
+                fds = more;
+                cap *= 2;
+            }
+            fds[n++] = fd;
+        }
+        closedir(d);
+        for (size_t i = 0; i < n; i++) close(fds[i]);
+        if (fds != small) free(fds);
+    } else {
+        for (int fd = 0; fd < 1024; fd++) {
+            if (fd != a && fd != b) close(fd);
+        }
+    }
+    int null = open("/dev/null", O_RDWR);
+    for (int fd = 0; fd < 3 && null >= 0; fd++) {
+        if (fd != null) dup2(null, fd);
+    }
+    if (null > 2) close(null);
+}
+
+/* Kills the child `pid`, unless it has gone already, and its group `pgid` if it's not 0. */
+static void end_them(pid_t pid, int pidfd, unsigned long long start, pid_t pgid, int gone) {
+    if (pgid > 1) killpg(pgid, SIGKILL);
+    if (gone) return;
+#ifdef __APPLE__
+    (void)pidfd;
+    (void)start;
+    kill(pid, SIGKILL);
+#else
+    if (pidfd >= 0) syscall(SYS_pidfd_send_signal, pidfd, SIGKILL, NULL, 0);
+    else if (start && started_at(pid) == start) kill(pid, SIGKILL);
+#endif
+}
+
+/* The group `pgid` has no one in it. */
+static int group_empty(pid_t pgid) { return kill(-pgid, 0) != 0 && errno == ESRCH; }
+
+/* The watcher, in the process the helper forked: never returns. `watch` is the pipe's read end,
+ * `pid` the child, `pidfd` a pidfd for it or -1 on Linux, and `pgid` its group, with own_group,
+ * or 0. */
+static void watch_child(int watch, pid_t pid, int pidfd, pid_t pgid) {
+    setsid();   /* in no group of the child's, nor the terminal's */
+    if (watch < 3) watch = fcntl(watch, F_DUPFD, 3);
+    if (pidfd >= 0 && pidfd < 3) pidfd = fcntl(pidfd, F_DUPFD, 3);
+    close_others(watch, pidfd);
+    int gone = 0;
+#ifdef __APPLE__
+    int kq = kqueue();
+    struct kevent ev;
+    EV_SET(&ev, watch, EVFILT_READ, EV_ADD, 0, 0, NULL);
+    if (kq < 0 || kevent(kq, &ev, 1, NULL, 0, NULL) != 0) {
+        end_them(pid, -1, 0, pgid, 0);   /* it can't be watched, so it can't be left running */
+        _exit(1);
+    }
+    EV_SET(&ev, pid, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, NULL);
+    if (kevent(kq, &ev, 1, NULL, 0, NULL) != 0) gone = 1;   /* it has exited already */
+    for (;;) {
+        if (gone && (!pgid || group_empty(pgid))) _exit(0);
+        struct kevent got[2];
+        struct timespec second = {1, 0};
+        int r = kevent(kq, NULL, 0, got, 2, gone ? &second : NULL);
+        if (r < 0 && errno != EINTR) _exit(1);
+        for (int i = 0; i < r; i++) {
+            if (got[i].filter == EVFILT_READ) {
+                end_them(pid, -1, 0, pgid, gone);
+                _exit(0);
+            }
+            if (got[i].filter == EVFILT_PROC) gone = 1;
+        }
+    }
+#else
+    prctl(PR_SET_NAME, "calx-watch");
+    /* Without a pidfd, before Linux 5.3, the child is told from a process given its ID later by
+     * when it started. */
+    unsigned long long start = pidfd < 0 ? started_at(pid) : 0;
+    if (pidfd < 0 && !start) gone = 1;
+    for (;;) {
+        if (gone && (!pgid || group_empty(pgid))) _exit(0);
+        struct pollfd f[2] = {{watch, POLLIN, 0}, {pidfd, POLLIN, 0}};
+        int both = !gone && pidfd >= 0;
+        int r = poll(f, both ? 2 : 1, both ? -1 : 1000);
+        if (r < 0 && errno != EINTR) _exit(1);
+        if (r > 0 && f[0].revents) {
+            end_them(pid, pidfd, start, pgid, gone);
+            _exit(0);
+        }
+        if (both && r > 0 && f[1].revents) gone = 1;
+        if (!gone && pidfd < 0 && started_at(pid) != start) gone = 1;
+    }
+#endif
+}
+
+/* Writes what the helper says to this program, and exits. */
+static void helper_say(int report, cx_u64 a, cx_u64 b, cx_u64 c) {
+    cx_u64 said[3] = {a, b, c};
+    ssize_t w;
+    do {
+        w = write(report, said, sizeof said);
+    } while (w < 0 && errno == EINTR);
+    _exit(0);
+}
+
+#ifndef __APPLE__
 typedef struct {
     const char* exe;
     char** argv;
@@ -1803,41 +2018,85 @@ static int helper_child(void* arg) {
     h->err = errno;
     _exit(127);
 }
+#endif
 
-/* Called first thing as a program starts: when it's the helper, it never returns. Its arguments
- * are the name above, the pipe's number, the program's path and the child's arguments, its
- * name first. The child shares its memory until it execs, as posix_spawn's does, on a stack of
- * its own, and the helper waits until it has. */
+/* Called first thing as a program starts: when it's a helper, it never returns.
+ *
+ * On Linux the helper that starts a child has the arguments HELPER_NAME, the report pipe's number,
+ * the watch pipe's number or -1 for none, the program's path and the child's arguments, its name
+ * first. The child shares its memory until it execs, as posix_spawn's does, on a stack of its own,
+ * and the helper waits until it has, then forks the watcher if it's to have one. The helper leads
+ * the child's group with own_group, which the watcher, forking from it, then leaves.
+ *
+ * On macOS the helper that watches a child this program started has the arguments WATCH_NAME, the
+ * report pipe's number, the watch pipe's number, the child's ID and its group's, or 0. */
 void cx_proc_helper(int argc, char** argv) {
-    if (argc < 4 || strcmp(argv[0], HELPER_NAME) != 0) return;
-    int report = atoi(argv[1]);
+#ifdef __APPLE__
+    if (argc != 5 || strcmp(argv[0], WATCH_NAME) != 0) return;
+    int report = atoi(argv[1]), watch = atoi(argv[2]);
     fcntl(report, F_SETFD, FD_CLOEXEC);
+    pid_t pid = (pid_t)atoi(argv[3]), pgid = (pid_t)atoi(argv[4]);
+    pid_t w = fork();
+    if (w == 0) {
+        close(report);
+        watch_child(watch, pid, -1, pgid);
+    }
+    helper_say(report, 1, (cx_u64)(w < 0 ? errno : 0), 0);
+#else
+    if (argc < 5 || strcmp(argv[0], HELPER_NAME) != 0) return;
+    int report = atoi(argv[1]), watch = atoi(argv[2]);
+    fcntl(report, F_SETFD, FD_CLOEXEC);
+    /* So the child doesn't hold the pipe open: the watcher's copy, forked, keeps it. */
+    if (watch >= 0) fcntl(watch, F_SETFD, FD_CLOEXEC);
     static char stack[65536] __attribute__((aligned(16)));
-    helped h = {argv[2], argv + 3, 0};
+    helped h = {argv[3], argv + 4, 0};
     cx_u64 at = cx_clock_ns();
     int pid = clone(helper_child, stack + sizeof stack, CLONE_PARENT | CLONE_VM | CLONE_VFORK, &h);
-    cx_u64 said[3] = {(cx_u64)(cx_i64)pid, (cx_u64)(pid < 0 ? errno : h.err), at};
-    ssize_t w;
-    do {
-        w = write(report, said, sizeof said);
-    } while (w < 0 && errno == EINTR);
-    _exit(0);
+    int err = pid < 0 ? errno : h.err;
+    if (pid > 0 && !err && watch >= 0) {
+        /* The child can't be reaped before this says its ID, so the pidfd is the child's. */
+        int pidfd = (int)syscall(SYS_pidfd_open, pid, 0);
+        pid_t pgid = getpgrp() == getpid() ? getpid() : 0;
+        pid_t w = fork();
+        if (w == 0) {
+            close(report);
+            watch_child(watch, pid, pidfd, pgid);
+        }
+        if (w < 0) {
+            err = errno;
+            kill(pid, SIGKILL);   /* reaped by this program, as helper_said does */
+        }
+    }
+    helper_say(report, (cx_u64)(cx_i64)pid, (cx_u64)err, at);
+#endif
 }
 
-/* Reads what the helper `hpid` said and waits for it to exit: 0 with the child's ID in `pid` and
- * when it started it in `at`, or why it couldn't start the child, whose own exit is reaped here. */
-static int helper_said(int fd, pid_t hpid, pid_t* pid, cx_u64* at) {
-    cx_u64 said[3] = {0, 0, 0};
+#ifdef __APPLE__
+/* On macOS a weak reference to a function that isn't linked in is an error, so the helper runs
+ * from here, before `main`: dyld gives an initializer the program's arguments. */
+__attribute__((constructor)) static void helper_at_start(int argc, char** argv) { cx_proc_helper(argc, argv); }
+#endif
+
+/* Reads what the helper `hpid` said into `said` and waits for it to exit: whether it said it all. */
+static int heard(int fd, pid_t hpid, cx_u64 said[3]) {
     size_t got = 0;
-    while (got < sizeof said) {
-        ssize_t r = read(fd, (char*)said + got, sizeof said - got);
+    while (got < 3 * sizeof(cx_u64)) {
+        ssize_t r = read(fd, (char*)said + got, 3 * sizeof(cx_u64) - got);
         if (r < 0 && errno == EINTR) continue;
         if (r <= 0) break;
         got += (size_t)r;
     }
     while (waitpid(hpid, NULL, 0) < 0 && errno == EINTR) {
     }
-    if (got != sizeof said) return EIO;   /* it ended before it could say */
+    return got == 3 * sizeof(cx_u64);
+}
+
+#ifndef __APPLE__
+/* Reads what the helper `hpid` said and waits for it to exit: 0 with the child's ID in `pid` and
+ * when it started it in `at`, or why it couldn't start the child, whose own exit is reaped here. */
+static int helper_said(int fd, pid_t hpid, pid_t* pid, cx_u64* at) {
+    cx_u64 said[3] = {0, 0, 0};
+    if (!heard(fd, hpid, said)) return EIO;   /* it ended before it could say */
     pid_t child = (pid_t)(cx_i64)said[0];
     int err = (int)said[1];
     if (child <= 0) return err ? err : EIO;
@@ -1850,6 +2109,61 @@ static int helper_said(int fd, pid_t hpid, pid_t* pid, cx_u64* at) {
     *at = said[2];
     return 0;
 }
+#else
+/* This program's file, resolved, for a helper to run: malloc'd, or NULL. */
+static char* self_path(void) {
+    uint32_t cap = 0;
+    _NSGetExecutablePath(NULL, &cap);
+    char* b = (char*)grow(NULL, (size_t)cap + 1);
+    if (_NSGetExecutablePath(b, &cap) != 0) {
+        free(b);
+        return NULL;
+    }
+    char* full = realpath(b, NULL);
+    free(b);
+    return full;
+}
+
+/* Starts the helper that forks a watcher for the child `pid`, whose group is `pgid` or 0, and
+ * waits until it has: 0, or the error. */
+static int start_watcher(pid_t pid, pid_t pgid) {
+    char* exe = self_path();
+    if (!exe) return ENOENT;
+    int report[2];
+    if (pipe(report) != 0) {
+        free(exe);
+        return errno;
+    }
+    fcntl(report[0], F_SETFD, FD_CLOEXEC);
+    fcntl(report[1], F_SETFD, FD_CLOEXEC);
+    char a1[16], a2[16], a3[16], a4[16];
+    snprintf(a1, sizeof a1, "%d", report[1]);
+    snprintf(a2, sizeof a2, "%d", bound_pipe[0]);
+    snprintf(a3, sizeof a3, "%d", (int)pid);
+    snprintf(a4, sizeof a4, "%d", (int)pgid);
+    char* hargv[] = {(char*)WATCH_NAME, a1, a2, a3, a4, NULL};
+    posix_spawn_file_actions_t fa;
+    posix_spawnattr_t at;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawnattr_init(&at);
+    for (int i = 0; i < 3; i++) posix_spawn_file_actions_addopen(&fa, i, "/dev/null", i == 0 ? O_RDONLY : O_WRONLY, 0);
+    posix_spawn_file_actions_addinherit_np(&fa, report[1]);
+    posix_spawn_file_actions_addinherit_np(&fa, bound_pipe[0]);
+    posix_spawnattr_setflags(&at, POSIX_SPAWN_CLOEXEC_DEFAULT);
+    pid_t hpid;
+    int e = posix_spawn(&hpid, exe, &fa, &at, hargv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    posix_spawnattr_destroy(&at);
+    free(exe);
+    close(report[1]);
+    if (!e) {
+        cx_u64 said[3] = {0, 0, 0};
+        e = heard(report[0], hpid, said) ? (int)said[1] : EIO;
+    }
+    close(report[0]);
+    return e;
+}
+#endif
 #endif
 
 #ifdef CX_IOS
@@ -2001,6 +2315,24 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
 #endif
     }
     posix_spawnattr_setflags(&at, spawn_flags);
+    /* A bound child is watched by a process forked from this program's file run again, which a
+     * Calx library in another program can't do. */
+    if (sp->bound) {
+        pthread_once(&bound_once, make_bound_pipe);
+#ifndef __APPLE__
+        int can = cx_is_program && access("/proc/self/exe", X_OK) == 0;
+#else
+        int can = cx_is_program;
+#endif
+        if (!can) {
+            fail(E_BAD_ARG, 7);
+            goto done;
+        }
+        if (bound_pipe[0] < 0) {
+            fail(E_OS, EMFILE);
+            goto done;
+        }
+    }
 #ifdef __APPLE__
     /* macOS has no affinity a program can set: its scheduler places threads itself. */
     if (sp->ncpus) {
@@ -2034,27 +2366,48 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
         pinned = 1;
     }
 #endif
-#ifndef __APPLE__
-    /* A measured child is started by the helper, which this program gives the write end of a pipe
-     * as `slot`, a number of its own for now, so the dup2 replaces nothing the child would have
-     * had. A Calx library in another program, or one without /proc, starts it as any other. */
-    int report[2] = {-1, -1}, slot = -1;
+#ifdef __APPLE__
+    /* A bound child waits, as if stopped, until its watcher is watching, so this program ending in
+     * between can't leave it running. */
+    if (sp->bound) posix_spawnattr_setflags(&at, spawn_flags | POSIX_SPAWN_START_SUSPENDED);
+#else
+    /* A measured or bound child is started by the helper, which this program gives the write end
+     * of a pipe as `slot`, and with `bound` the read end of the bound pipe as `wslot`, each a
+     * number of its own for now, so the dup2 replaces nothing the child would have had. A measured
+     * one, in a Calx library in another program or without /proc, starts as any other. */
+    int report[2] = {-1, -1}, slot = -1, wslot = -1;
     char** hargv = NULL;
-    char slot_text[16];
-    if (sp->measured && cx_is_program && access("/proc/self/exe", X_OK) == 0 && pipe2(report, O_CLOEXEC) == 0) {
+    char slot_text[16], wslot_text[16];
+    if ((sp->measured || sp->bound) && cx_is_program && access("/proc/self/exe", X_OK) == 0 && pipe2(report, O_CLOEXEC) == 0) {
         slot = fcntl(report[1], F_DUPFD_CLOEXEC, 3);
-        if (slot >= 0) {
+        if (sp->bound && slot >= 0) wslot = fcntl(bound_pipe[0], F_DUPFD_CLOEXEC, 3);
+        if (slot >= 0 && (!sp->bound || wslot >= 0)) {
             snprintf(slot_text, sizeof slot_text, "%d", slot);
-            hargv = (char**)grow(NULL, (sp->argc + 5) * sizeof *hargv);
+            snprintf(wslot_text, sizeof wslot_text, "%d", wslot);
+            hargv = (char**)grow(NULL, (sp->argc + 6) * sizeof *hargv);
             hargv[0] = (char*)HELPER_NAME;
             hargv[1] = slot_text;
-            hargv[2] = exe.p;
-            memcpy(hargv + 3, argv, (sp->argc + 2) * sizeof *argv);
+            hargv[2] = wslot_text;
+            hargv[3] = exe.p;
+            memcpy(hargv + 4, argv, (sp->argc + 2) * sizeof *argv);
             posix_spawn_file_actions_adddup2(&fa, report[1], slot);
+            if (wslot >= 0) posix_spawn_file_actions_adddup2(&fa, bound_pipe[0], wslot);
         } else {
+            int e = errno;
             close(report[0]);
             close(report[1]);
+            if (slot >= 0) close(slot);
+            if (sp->bound) {
+                if (pinned) sched_setaffinity(0, sizeof was, &was);
+                fail(E_OS, e);
+                goto done;
+            }
         }
+    } else if (sp->bound) {
+        int e = errno;
+        if (pinned) sched_setaffinity(0, sizeof was, &was);
+        fail(E_OS, e);
+        goto done;
     }
 #endif
     if (sp->io[1] == IO_INHERIT || sp->io[2] == IO_INHERIT || (sp->io[2] == IO_STDOUT && sp->io[1] == IO_INHERIT)) cx_out_flush();
@@ -2063,6 +2416,18 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
 #ifdef __APPLE__
     int e = posix_spawn(&pid, exe.p, &fa, &at, argv, envp);
     p->pgid = pid;
+    if (!e && sp->bound) {
+        int w = start_watcher(pid, sp->own_group ? pid : 0);
+        if (w) {
+            /* Unwatched, it doesn't run. */
+            kill(pid, SIGKILL);
+            while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+            }
+            fail(E_OS, w);
+            goto done;
+        }
+        kill(pid, SIGCONT);
+    }
 #else
     int e;
     if (hargv) {
@@ -2073,6 +2438,7 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
         p->pgid = hpid;
         close(report[1]);
         close(slot);
+        if (wslot >= 0) close(wslot);
         if (!e) e = helper_said(report[0], hpid, &pid, &p->started_ns);
         close(report[0]);
         free(hargv);

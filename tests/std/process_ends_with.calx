@@ -1,0 +1,126 @@
+// std.process: a child started with `ends_with_this` ends when the program that started it does,
+// however that ends, and with `own_group` its whole group goes with it (CLX-446). The test runs
+// itself as each program: a parent starts a child that adds a byte to a file every 20 ms, so the
+// file stops growing once the child has gone. The test kills the parent, as `kill -9` or the OOM
+// killer would, or lets it end by itself.
+import std.env.{args}
+import std.fs.{append_text, metadata, remove_dir_all, separator, temp_dir}
+import std.io.{flush}
+import std.process.{Command, Stdio, current_exe, exit}
+import std.thread.{sleep}
+
+fn pause(ms: u64) {
+    unsafe {
+        sleep(ms * 1000000)
+    }
+}
+
+fn size(file: String) -> u64 {
+    return match metadata(file) {
+        ok(m) => m.size,
+        err(_) => 0,
+    }
+}
+
+// Whether the file is growing, as it does while the child runs, within 30 seconds.
+fn growing(file: String) -> bool {
+    for _ in 0..300 {
+        let was = size(file)
+        pause(100)
+        if was > 0 and size(file) > was {
+            return true
+        }
+    }
+    return false
+}
+
+// Whether the file has stopped growing, as it does once the child has gone, within 10 seconds.
+fn still(file: String) -> bool {
+    for _ in 0..20 {
+        let was = size(file)
+        pause(500)
+        if size(file) == was {
+            return true
+        }
+    }
+    return false
+}
+
+// What the parent starts: the child alone; a launcher in a group of its own that starts the child
+// and waits, or ends at once and leaves it in the group; or the child, measured.
+fn bound(how: String, file: String) -> Command {
+    let c = Command.new(current_exe()).stdin(Stdio.Null).stdout(Stdio.Null).stderr(Stdio.Null).ends_with_this()
+    if how == "group" {
+        return c.args(["launch", file.copy(), "wait"]).own_group()
+    }
+    if how == "leaves" {
+        return c.args(["launch", file.copy(), "end"]).own_group()
+    }
+    if how == "measured" {
+        return c.args(["beat", file.copy()]).measured()
+    }
+    return c.args(["beat", file.copy()])
+}
+
+fn child(a: List<String>) {
+    let what = a[0].copy()
+    if what == "beat" {
+        for _ in 0..3000 {
+            append_text(a[1], "x")!
+            pause(20)
+        }
+    } else if what == "launch" {
+        _ = Command.new(current_exe()).args(["beat", a[1].copy()]).stdin(Stdio.Null).stdout(Stdio.Null).stderr(Stdio.Null).spawn()!
+        if a[2] == "wait" {
+            pause(60000)
+        }
+    } else if what == "parent" {
+        _ = bound(a[1], a[2]).spawn()!
+        println("ready")
+        flush()
+        if a[3] == "return" {
+            _ = growing(a[2])
+            return
+        }
+        pause(60000)
+    } else if what == "code" {
+        exit(3)
+    } else if what == "hi" {
+        println("hi")
+    }
+}
+
+fn main() {
+    let a = args()
+    if a.len() > 0 {
+        child(a)
+        return
+    }
+    let me = current_exe()
+
+    // A child that ends with this one is as any other while this one runs.
+    println("{Command.new(me).arg("code").ends_with_this().status()!}")    // out: exited with status 3
+    println(Command.new(me).arg("hi").ends_with_this().read()!)    // out: hi
+    println(Command.new(me).arg("hi").ends_with_this().own_group().measured().read()!)    // out: hi
+
+    let tmp = temp_dir()!
+    let sep = separator()
+    for (how, end) in [("plain", "kill"), ("group", "kill"), ("leaves", "kill"), ("measured", "kill"), ("plain", "return"), ("group", "return")] {
+        let file = "{tmp}{sep}{how}-{end}"
+        var parent = Command.new(me).args(["parent", String(how), file.copy(), String(end)]).stdout(Stdio.Pipe).spawn()!
+        _ = parent.wait_for_line("ready", 60000)
+        let ran = growing(file)
+        if end == "kill" {
+            parent.kill()
+        }
+        _ = parent.wait()
+        println("{how}, {end}: {ran} {still(file)}")
+    }
+    // out: plain, kill: true true
+    // out: group, kill: true true
+    // out: leaves, kill: true true
+    // out: measured, kill: true true
+    // out: plain, return: true true
+    // out: group, return: true true
+    remove_dir_all(tmp)!
+}
