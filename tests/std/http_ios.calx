@@ -87,6 +87,8 @@ fn main() {
     // out: http_serve: as on the other systems
     // out: http_server_ping: as on the other systems
     // out: http_server_push: as on the other systems
+    // out: http_wake_on: as on the other systems
+    // out: http_websocket_wake_on: as on the other systems
     // out: net: as on the other systems
     // out: net_echo: as on the other systems
     // out: net_wake: as on the other systems
