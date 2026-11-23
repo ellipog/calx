@@ -1132,7 +1132,10 @@ CX_FN(cx_u64, cx_http_expected, (cx_u64 h));
  * and 2 for binary, with its bytes for `cx_http_ws_taken`; 0 if none came in the time; or what the
  * connection ended with, negated. `which` is 0 for the close's reason and 1 for the protocol. With a
  * ping interval it pings a quiet server and ends if it stays quiet (CLX-395), and
- * `cx_http_ws_idle_ms` gives how long it has been quiet. */
+ * `cx_http_ws_idle_ms` gives how long it has been quiet. `cx_http_ws_wake`, from any thread, makes
+ * the receive waiting, or the next, give 0 once the queue is empty (CLX-437); a handle let go is
+ * left alone. */
+CX_FN(void, cx_http_ws_wake, (cx_u64 h));
 CX_FN(cx_u64, cx_http_ws_open, (const cx_u8* url, cx_usize url_len, const cx_u8* head, cx_usize head_len, cx_u32 timeout_ms, cx_usize limit,
                                 cx_u32 ping_interval_ms, cx_u32 ping_timeout_ms));
 CX_FN(cx_i32, cx_http_ws_state, (cx_u64 h));
@@ -1432,7 +1435,7 @@ CX_FN(void, cx_proc_group_free, (cx_i64 g));
 CX_FN(cx_u32, cx_proc_id, (cx_i64 h));
 CX_FN(void, cx_proc_kill, (cx_i64 h));
 CX_FN(void, cx_proc_kill_tree, (cx_i64 h));
-CX_FN(cx_i64, cx_proc_line, (cx_i64 h, cx_u64 until));
+CX_FN(cx_i64, cx_proc_line, (cx_i64 h, cx_u64 until, cx_bool wake));
 CX_FN(void, cx_proc_machine_cpu, (cx_u64* out));
 CX_FN(cx_i32, cx_proc_poll, (cx_i64 h));
 CX_FN(void, cx_proc_result_copy, (cx_u8* to));
@@ -1441,12 +1444,17 @@ CX_FN(cx_i32, cx_proc_send_signal, (cx_i64 h, cx_i32 sig));
 CX_FN(cx_i32, cx_proc_set_affinity, (const cx_u32* cpus, cx_usize n));
 CX_FN(cx_i32, cx_proc_signal, (cx_i64 h));
 CX_FN(void, cx_proc_usage, (cx_i64 h, cx_u64* out));
-CX_FN(cx_i64, cx_proc_some, (cx_i64 h, cx_u64 until));
+CX_FN(cx_i64, cx_proc_some, (cx_i64 h, cx_u64 until, cx_bool wake));
 CX_FN(cx_i64, cx_proc_spawn, (const cx_u8* spec_p, cx_usize spec_n, const cx_u8* input, cx_usize input_n, cx_i64 g));
 CX_FN(cx_u32, cx_proc_state, (cx_i64 h));
 CX_FN(void, cx_proc_stop, (cx_i64 h));
 CX_FN(void, cx_proc_take, (cx_i64 h, cx_u32 i, cx_u8* to, cx_usize n));
 CX_FN(void, cx_proc_wait, (cx_i64 h));
+/* A child's wake (CLX-437): `cx_proc_waker` gives its handle, 0 if the system can't make one, and
+ * `cx_proc_wake`, from any thread, makes the read waiting with `wake`, or the next, give -3; a
+ * handle whose child was freed is left alone. */
+CX_FN(cx_u64, cx_proc_waker, (cx_i64 h));
+CX_FN(void, cx_proc_wake, (cx_u64 wh));
 CX_FN(cx_usize, cx_proc_wait_any, (const cx_i64* hs, cx_usize n));
 CX_FN(cx_i32, cx_proc_wait_exit, (cx_i64 h, cx_u64 until));
 CX_FN(cx_i32, cx_proc_which, (const cx_u8* name, cx_usize n));

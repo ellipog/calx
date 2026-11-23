@@ -1,0 +1,95 @@
+// std.http.server: another thread wakes `next_event` and `next` with `Server.waker`, and they give
+// `none` at once rather than at their timeout; wakes before a call come as one; and a loop that
+// takes what a worker thread sends hears of each as it's sent (CLX-437).
+import std.http.server.{Server}
+import std.net.{Waker}
+import std.thread.{Task, sleep}
+import std.time.{Instant}
+
+// Wakes the server after a millisecond.
+struct Later {
+    waker: Waker
+}
+
+impl Task for Later {
+    fn run(own self) {
+        unsafe {
+            sleep(1000000)
+        }
+        self.waker.wake()
+    }
+}
+
+// Sends each number, waking the server after each, as a worker hands its results back.
+struct Worker {
+    out: Sender<i32>
+    waker: Waker
+    upto: i32
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        var out = self.out
+        for i in 1..self.upto + 1 {
+            out.send(i)
+            self.waker.wake()
+        }
+    }
+}
+
+fn ms_since(t: Instant) -> u64 {
+    return unsafe { Instant.now() }.nanos_since(t) / 1000000
+}
+
+fn main() {
+    var s = Server.listen(0)!
+    let w = s.waker()!
+
+    // `next_event` gives `none` at the wake, long before its second.
+    let t = unsafe { Thread.spawn(Later { waker: w }) }
+    var start = unsafe { Instant.now() }
+    let e = s.next_event(1000)
+    var ms = ms_since(start)
+    t.join()
+    println(match e {
+        some(_) => "an event",
+        none => "none",
+    })    // out: none
+    assert(ms < 500, "next_event took {ms} ms after a wake 1 ms in")
+
+    // So does `next`.
+    let t2 = unsafe { Thread.spawn(Later { waker: w }) }
+    start = unsafe { Instant.now() }
+    let r = s.next(1000)
+    ms = ms_since(start)
+    t2.join()
+    println("{r == none}")    // out: true
+    assert(ms < 500, "next took {ms} ms after a wake 1 ms in")
+
+    // Wakes with no call waiting wake the next, as one, and the call after waits.
+    w.wake()
+    w.wake()
+    start = unsafe { Instant.now() }
+    println("{s.next_event(10000) == none} {ms_since(start) < 500}")    // out: true true
+    start = unsafe { Instant.now() }
+    println("{s.next_event(100) == none} {ms_since(start) >= 50}")    // out: true true
+
+    // A loop of the usual shape: wait for the network, then take what the worker sent.
+    var numbers = Receiver<i32>()
+    start = unsafe { Instant.now() }
+    let worker = unsafe { Thread.spawn(Worker { out: numbers.sender(), waker: w, upto: 1000 }) }
+    var got = 0
+    while got < 1000 {
+        // Without the wakes, each call would wait 10 seconds.
+        _ = s.next_event(10000)
+        while let n = numbers.next() {
+            got += 1
+            assert(n == got, "{n} came as number {got}")
+        }
+    }
+    worker.join()
+    ms = ms_since(start)
+    assert(ms < 5000, "the worker's numbers took {ms} ms")
+    println("{got}")    // out: 1000
+    s.shutdown()
+}

@@ -30,8 +30,10 @@ extern "C" {
     fn cx_proc_wait(h: i64)
     fn cx_proc_wait_any(hs: *const i64, n: usize) -> usize
     fn cx_proc_poll(h: i64) -> i32
-    fn cx_proc_line(h: i64, until: u64) -> i64
-    fn cx_proc_some(h: i64, until: u64) -> i64
+    fn cx_proc_line(h: i64, until: u64, wake: bool) -> i64
+    fn cx_proc_some(h: i64, until: u64, wake: bool) -> i64
+    fn cx_proc_waker(h: i64) -> u64
+    fn cx_proc_wake(wh: u64)
     fn cx_proc_available(h: i64, stream: u32) -> usize
     fn cx_proc_take(h: i64, stream: u32, to: *u8, n: usize)
     fn cx_proc_kill(h: i64)
@@ -486,6 +488,23 @@ fn show_word(w: String) {
     print("\"")
 }
 
+/// Wakes a `Child`'s `read_line` or `read` from another thread: the read waiting gives `none` at
+/// once, or the next one does if none is waiting, and wakes that come before it are one. It's
+/// `Copy` and `Send`, every copy wakes the same child, and once that has been waited for a wake
+/// does nothing.
+pub struct Waker {
+    handle: u64,
+}
+
+impl Waker {
+    /// Wakes the child's read. Any thread can.
+    pub fn wake(self) {
+        unsafe {
+            cx_proc_wake(self.handle)
+        }
+    }
+}
+
 /// A program that's running, or has ended and not been waited for.
 pub struct Child {
     handle: i64,
@@ -545,17 +564,17 @@ impl Child {
     }
 
     /// The next line it writes to standard output, which is `Stdio.Pipe`, without its `\n` or
-    /// `\r\n`, waiting at most `ms` milliseconds for it. `none` if it doesn't come in time, or the
-    /// output has ended, which `ended` tells apart. The last line needn't end with a line break.
-    /// With 0 it doesn't wait, but takes a line that's in the pipe already. Panics if its output
-    /// isn't a pipe.
+    /// `\r\n`, waiting at most `ms` milliseconds for it. `none` if it doesn't come in time, a
+    /// `Waker` woke it first, or the output has ended, which `ended` tells apart. The last line
+    /// needn't end with a line break. With 0 it doesn't wait, but takes a line that's in the pipe
+    /// already. Panics if its output isn't a pipe.
     @track_caller
     pub fn read_line(self, ms: u64) -> String? {
         let h = self.live()
         if not self.output_piped {
             panic("the child's standard output isn't Stdio.Pipe")
         }
-        let n = unsafe { cx_proc_line(h, deadline(ms)) }
+        let n = unsafe { cx_proc_line(h, deadline(ms), true) }
         if n < 0 {
             return none
         }
@@ -573,7 +592,7 @@ impl Child {
         }
         let until = deadline(ms)
         loop {
-            let n = unsafe { cx_proc_line(h, until) }
+            let n = unsafe { cx_proc_line(h, until, false) }
             if n < 0 {
                 return none
             }
@@ -586,14 +605,15 @@ impl Child {
 
     /// What has come from its standard output, which is `Stdio.Pipe`, since it was last read,
     /// waiting at most `ms` milliseconds for something if nothing has. Empty if nothing comes in
-    /// time, or the output has ended. With 0 it doesn't wait, but takes what's in the pipe already.
+    /// time, a `Waker` woke it first, or the output has ended. With 0 it doesn't wait, but takes
+    /// what's in the pipe already.
     @track_caller
     pub fn read(self, ms: u64) -> List<u8> {
         let h = self.live()
         if not self.output_piped {
             panic("the child's standard output isn't Stdio.Pipe")
         }
-        let n = unsafe { cx_proc_some(h, deadline(ms)) }
+        let n = unsafe { cx_proc_some(h, deadline(ms), true) }
         if n < 0 {
             return List<u8>()
         }
@@ -605,7 +625,20 @@ impl Child {
     @track_caller
     pub fn ended(self) -> bool {
         let h = self.live()
-        return unsafe { cx_proc_some(h, 1) } == -2
+        return unsafe { cx_proc_some(h, 1, false) } == -2
+    }
+
+    /// A `Waker` another thread can wake `read_line` and `read` with, so a thread that waits for
+    /// the child's output can also write to it what other threads queue, as soon as they do: the
+    /// read waiting gives `none` at a wake, rather than at its timeout. Panics if the system can't
+    /// make one, as when the program has run out of file descriptors.
+    @track_caller
+    pub fn waker(self) -> Waker {
+        let wh = unsafe { cx_proc_waker(self.live()) }
+        if wh == 0 {
+            panic("the system can't make a waker for the child: no pipe")
+        }
+        return Waker { handle: wh }
     }
 
     /// How it ended, if it has, without waiting.

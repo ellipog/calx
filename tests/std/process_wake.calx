@@ -1,0 +1,130 @@
+// std.process: another thread wakes a child's `read_line` and `read` with `Child.waker`, and they
+// give `none` and nothing at once rather than at their timeout; wakes before a read come as one,
+// and `ended` leaves them for the read; a thread that waits for a child's output writes to it
+// what another thread queues as soon as it's queued; and a wake once the child has been waited for
+// does nothing (CLX-437). The test runs itself as the child, which answers each line in capitals.
+import std.env.{args}
+import std.io.{Lines, flush}
+import std.process.{Command, Stdio, Waker, current_exe}
+import std.thread.{Task, sleep}
+import std.time.{Instant}
+
+fn child() {
+    var lines = Lines {}
+    loop {
+        match lines.next() {
+            some(l) => {
+                if l == "quit" {
+                    break
+                }
+                println(l.to_upper_root())
+                flush()
+            },
+            none => break,
+        }
+    }
+}
+
+// Wakes the child's read after a millisecond.
+struct Later {
+    waker: Waker
+}
+
+impl Task for Later {
+    fn run(own self) {
+        unsafe {
+            sleep(1000000)
+        }
+        self.waker.wake()
+    }
+}
+
+// Queues each line for the thread that talks to the child, waking its read, and waits for the
+// answer before the next, as a program's main loop hands prompts to a worker.
+struct Feeder {
+    out: Sender<String>
+    acks: Receiver<i32>
+    waker: Waker
+    count: i32
+}
+
+impl Task for Feeder {
+    fn run(own self) {
+        var out = self.out
+        for i in 0..self.count {
+            out.send("line {i}")
+            self.waker.wake()
+            _ = self.acks.wait()
+        }
+    }
+}
+
+fn ms_since(t: Instant) -> u64 {
+    return unsafe { Instant.now() }.nanos_since(t) / 1000000
+}
+
+fn main() {
+    if args().len() > 0 {
+        child()
+        return
+    }
+    var c = Command.new(current_exe()).arg("child").stdin(Stdio.Pipe).stdout(Stdio.Pipe).spawn()!
+    let w = c.waker()
+
+    // `read_line` gives `none` at the wake, long before its second.
+    let t = unsafe { Thread.spawn(Later { waker: w }) }
+    var start = unsafe { Instant.now() }
+    let line = c.read_line(1000)
+    var ms = ms_since(start)
+    t.join()
+    println("{line == none} {c.ended()}")    // out: true false
+    assert(ms < 500, "read_line took {ms} ms after a wake 1 ms in")
+
+    // So does `read`.
+    let t2 = unsafe { Thread.spawn(Later { waker: w }) }
+    start = unsafe { Instant.now() }
+    let bytes = c.read(1000)
+    ms = ms_since(start)
+    t2.join()
+    println("{bytes.len()}")    // out: 0
+    assert(ms < 500, "read took {ms} ms after a wake 1 ms in")
+
+    // Wakes with no read waiting wake the next, as one, and the read after waits. `ended`
+    // leaves the wake for the read.
+    w.wake()
+    w.wake()
+    println("{c.ended()}")    // out: false
+    start = unsafe { Instant.now() }
+    println("{c.read_line(10000) == none} {ms_since(start) < 500}")    // out: true true
+    start = unsafe { Instant.now() }
+    println("{c.read_line(100) == none} {ms_since(start) >= 50}")    // out: true true
+
+    // The worker's loop: write what's queued, then wait for the child's output.
+    var outbox = Receiver<String>()
+    let acks = Receiver<i32>()
+    var ack = acks.sender()
+    start = unsafe { Instant.now() }
+    let feeder = unsafe { Thread.spawn(Feeder { out: outbox.sender(), acks: acks.share(), waker: w, count: 50 }) }
+    var answers = 0
+    while answers < 50 {
+        while let out = outbox.next() {
+            c.write_text("{out}\n")!
+        }
+        // Without the wakes, each line would wait the read's 10 seconds before it's written.
+        if let l = c.read_line(10000) {
+            assert(l == "LINE {answers}", "the answer {l} came as number {answers}")
+            answers += 1
+            ack.send(answers)
+        }
+    }
+    feeder.join()
+    ms = ms_since(start)
+    assert(ms < 5000, "50 lines took {ms} ms")
+    println("{answers}")    // out: 50
+
+    c.write_text("quit\n")!
+    let o = c.wait()
+    println("{o.status.success()}")    // out: true
+    // The child is gone, so this does nothing.
+    w.wake()
+}

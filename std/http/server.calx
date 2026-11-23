@@ -289,6 +289,8 @@ pub struct Server {
     closing: usize
     // `wake_on_signal` was called, so `next`, `next_event` and `serve` stop at a signal.
     on_signal: bool
+    // A poll reported `Woken`, which `next` or `next_event` hasn't returned `none` for yet.
+    woken: bool
     // The keepalive's clock, which starts with the server, the time of its next ping or timeout,
     // `u64.MAX` for none, and the interval and timeout that time was worked out with.
     born: Instant
@@ -348,7 +350,7 @@ impl Server {
     pub fn listen(port: u16, host: String = "127.0.0.1") -> Server ! NetError {
         let net = try Net.new()
         let p = try net.listen(host, port)
-        return Server { port: p, host: host.copy(), max_body: 67108864, log: true, max_message: 67108864, ping_interval_ms: 20000, ping_timeout_ms: 20000, net: net, clients: Map<u32, Client>(), ready: Deque<u32>(), events: List<Event>(), date: String(), date_second: -1, streams: List<Stream>(), happened: Deque<ServerEvent>(), closing: 0, on_signal: false, born: unsafe { Instant.now() }, ping_due: u64.MAX, due_interval: 20000, due_timeout: 20000 }
+        return Server { port: p, host: host.copy(), max_body: 67108864, log: true, max_message: 67108864, ping_interval_ms: 20000, ping_timeout_ms: 20000, net: net, clients: Map<u32, Client>(), ready: Deque<u32>(), events: List<Event>(), date: String(), date_second: -1, streams: List<Stream>(), happened: Deque<ServerEvent>(), closing: 0, on_signal: false, woken: false, born: unsafe { Instant.now() }, ping_due: u64.MAX, due_interval: 20000, due_timeout: 20000 }
     }
 
     /// The address to open in a browser: `http://127.0.0.1:8000/`.
@@ -365,7 +367,8 @@ impl Server {
     /// request gets one `respond`; until it does, the next request on the same connection waits,
     /// while other connections' come. After `wake_on_signal`, it's `none` at once while a signal
     /// is pending, and once after each signal, whichever thread takes it, so a server's loop ends
-    /// when it's asked to stop.
+    /// when it's asked to stop. A wake from `waker` makes it `none` at once too, once the requests
+    /// that are ready have been given.
     pub fn next(mut self, timeout_ms: i64 = -1) -> Request? {
         let start = unsafe { Instant.now() }
         loop {
@@ -374,6 +377,10 @@ impl Server {
             }
             if let r = self.take_ready() {
                 return some(r)
+            }
+            if self.woken {
+                self.woken = false
+                return none
             }
             let wait = self.wait_left(start, timeout_ms)
             if wait == none {
@@ -387,7 +394,8 @@ impl Server {
     /// or close, or an event stream's end, waiting up to `timeout_ms` milliseconds for it, or
     /// forever if it's negative. `none` if nothing happened in that time. What happens on
     /// sockets and streams waits for it in order, while `next` gives only the requests. After
-    /// `wake_on_signal`, it's `none` at a signal, as `next` is.
+    /// `wake_on_signal`, it's `none` at a signal, as `next` is, and it's `none` at a wake from
+    /// `waker`, once what has happened has been given.
     pub fn next_event(mut self, timeout_ms: i64 = -1) -> ServerEvent? {
         let start = unsafe { Instant.now() }
         loop {
@@ -399,6 +407,10 @@ impl Server {
             }
             if let r = self.take_ready() {
                 return some(ServerEvent.Request(r))
+            }
+            if self.woken {
+                self.woken = false
+                return none
             }
             let wait = self.wait_left(start, timeout_ms)
             if wait == none {
@@ -416,6 +428,15 @@ impl Server {
     pub fn wake_on_signal(mut self) ! NetError {
         try self.net.wake_on_signal()
         self.on_signal = true
+    }
+
+    /// A `Waker` another thread can wake `next` and `next_event` with, so a loop that also takes
+    /// what worker threads send it hears of each as it's sent, rather than at the poll's timeout,
+    /// as Python's `loop.call_soon_threadsafe` does for asyncio. A wake makes `next` or
+    /// `next_event` give `none` at once, after what's ready, or the next call does if none is
+    /// waiting, and wakes that come before it are one. Every copy wakes the same server.
+    pub fn waker(self) -> Waker ! NetError {
+        return try self.net.waker()
     }
 
     // Whether to stop at a signal: one woke this server's `Net`, or one is pending. Its `Net`
@@ -645,7 +666,7 @@ impl Server {
                     }
                 }
                 Connected(_) => {}
-                Woken => {}
+                Woken => self.woken = true,
                 Datagram(_) => {}
             }
         }

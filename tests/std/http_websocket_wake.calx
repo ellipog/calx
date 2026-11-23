@@ -1,0 +1,103 @@
+// std.http.websocket: another thread wakes `receive` with `WebSocket.waker`, and it gives `none` at
+// once rather than at its timeout; wakes before a receive come as one; a message that has come is
+// given before the wake's `none`; and a wake after the close does nothing (CLX-437).
+import std.http.server.{Server}
+import std.http.websocket.{Message, Waker, connect}
+import std.thread.{Task, sleep}
+import std.time.{Instant}
+
+// Answers each text with the same text and " back", until the client closes.
+struct Serving {
+    port: Sender<u16>
+}
+
+impl Task for Serving {
+    fn run(own self) {
+        var port = self.port
+        var server = Server.listen(0)!
+        port.send(server.port)
+        loop {
+            match server.next_event(20000) {
+                some(Request(req)) => {
+                    _ = server.upgrade(req)!
+                },
+                some(Message(s, Text(t))) => {
+                    _ = server.send_text(s, "{t} back")
+                },
+                some(Closed(_, _, _)) => break,
+                some(_) => {},
+                none => break,
+            }
+        }
+        server.shutdown()
+    }
+}
+
+// Wakes the socket after a millisecond.
+struct Later {
+    waker: Waker
+}
+
+impl Task for Later {
+    fn run(own self) {
+        unsafe {
+            sleep(1000000)
+        }
+        self.waker.wake()
+    }
+}
+
+fn ms_since(t: Instant) -> u64 {
+    return unsafe { Instant.now() }.nanos_since(t) / 1000000
+}
+
+fn shown(m: own Message?) -> String {
+    return match m {
+        some(Text(t)) => t,
+        some(Binary(_)) => String("<binary>"),
+        none => String("none"),
+    }
+}
+
+fn main() {
+    var ports = Receiver<u16>()
+    let server = unsafe { Thread.spawn(Serving { port: ports.sender() }) }
+    let port = ports.wait() ?? 0
+    let ws = connect("ws://127.0.0.1:{port}/")!
+    let w = ws.waker()
+
+    // `receive` gives `none` at the wake, long before its second.
+    let t = unsafe { Thread.spawn(Later { waker: w }) }
+    var start = unsafe { Instant.now() }
+    let m = ws.receive(1000)!
+    let ms = ms_since(start)
+    t.join()
+    println(shown(m))    // out: none
+    assert(ms < 500, "receive took {ms} ms after a wake 1 ms in")
+
+    // Wakes with no receive waiting wake the next, as one, and the receive after waits.
+    w.wake()
+    w.wake()
+    start = unsafe { Instant.now() }
+    println("{shown(ws.receive(10000)!)} {ms_since(start) < 500}")    // out: none true
+    start = unsafe { Instant.now() }
+    println("{shown(ws.receive(100)!)} {ms_since(start) >= 50}")    // out: none true
+
+    // A message that has come is given first, then the wake's `none`.
+    ws.send_text("one")!
+    println(shown(ws.receive(10000)!))    // out: one back
+    ws.send_text("two")!
+    // Time for the answer to come, over loopback.
+    unsafe {
+        sleep(300000000)
+    }
+    w.wake()
+    println(shown(ws.receive(10000)!))    // out: two back
+    start = unsafe { Instant.now() }
+    println("{shown(ws.receive(10000)!)} {ms_since(start) < 500}")    // out: none true
+
+    ws.close()
+    // The connection is gone, so this does nothing.
+    w.wake()
+    server.join()
+}
