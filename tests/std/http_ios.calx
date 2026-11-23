@@ -57,7 +57,13 @@ fn main() {
             continue
         }
         let source = read_text(join(dir.copy(), "{t}.calx"))! ?? String()
-        let ran = Command.new("xcrun").args(["simctl", "spawn", sim.copy(), join(out.copy(), t)]).timeout(60000).output()!
+        // A simulator that has just booted can take over a minute to start a program, so one that
+        // runs out of time having printed nothing is run once more, and only that run counts
+        // (CLX-442). A program that hangs hangs again.
+        var ran = Command.new("xcrun").args(["simctl", "spawn", sim.copy(), join(out.copy(), t)]).timeout(60000).output()!
+        if ran.status.timed_out and ran.text().is_empty() and ran.error_text().is_empty() {
+            ran = Command.new("xcrun").args(["simctl", "spawn", sim.copy(), join(out.copy(), t)]).timeout(60000).output()!
+        }
         var problems: List<String> = []
         let got = ran.text().lines()
         var want: List<String> = []
