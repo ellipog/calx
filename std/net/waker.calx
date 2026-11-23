@@ -1,0 +1,38 @@
+/// `std.net`'s `Waker`, in a module of its own that imports nothing, so `std.process`, `std.http`
+/// and `std.http.websocket` can take one, to wake a `Net` when something comes (CLX-440), without
+/// every program that starts a process or makes a request checking all of `std.net`. Programs name
+/// it `std.net.Waker`, which is this type.
+module std.net.waker
+
+extern "C" {
+    fn cx_net_wake(net: u64)
+    fn cx_net_hooks() -> usize
+}
+
+/// Wakes a `Net`'s poll from another thread, so a thread that queued something for the one
+/// polling can say so: the poll reports `Woken`, or the next one does if none is waiting. It's
+/// `Copy` and `Send`, and every copy wakes the same `Net`.
+pub struct Waker {
+    handle: u64,
+}
+
+impl Waker {
+    /// The waker of the `Net` whose handle is `handle`, which has made its waker. A handle that
+    /// isn't one is memory that a wake writes to.
+    pub unsafe fn of(handle: u64) -> Waker {
+        return Waker { handle: handle }
+    }
+
+    /// Wakes the poll. Any thread can, except inside a `parallel for`.
+    pub fn wake(self) {
+        unsafe {
+            cx_net_wake(self.handle)
+        }
+    }
+
+    /// The `Net`'s handle, and where the runtime's functions that wake it are, for another part of
+    /// the runtime that wakes it itself.
+    pub unsafe fn parts(self) -> (u64, usize) {
+        return (self.handle, unsafe { cx_net_hooks() })
+    }
+}

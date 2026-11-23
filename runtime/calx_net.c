@@ -86,6 +86,8 @@ enum { CONN_CONNECTING, CONN_OPEN, CONN_CLOSING, CONN_CLOSED };
 
 #define NET_NONE 0xFFFFFFFFu
 #define NET_INDEX_BITS 24
+/* On macOS, the udata of a file `net_watch` added, which no slot's index is. */
+#define NET_WATCHED ((void*)~(uintptr_t)0)
 #define NET_RECV 16384 /* bytes read at a time */
 #define NET_UDP_MAX 65536 /* the most a datagram can hold, and more */
 #define NET_UDP_KEEP (1 << 20) /* bytes of datagrams a UDP socket keeps waiting, either way */
@@ -1554,7 +1556,7 @@ static void wait_events(net* n, cx_i64 timeout_ms) {
         if (got < 0 && errno != EINTR) return;
         if (got > 0) {
             for (int i = 0; i < got; i++) {
-                if (evs[i].filter == EVFILT_USER) {
+                if (evs[i].filter == EVFILT_USER || evs[i].udata == NET_WATCHED) {
                     woke(n);  /* EV_CLEAR set it back */
                     continue;
                 }
@@ -1927,6 +1929,47 @@ void cx_net_wake(cx_u64 h) {
     (void)r;
 #endif
 }
+
+/* Adds a file of another part's, such as a child's pipe, to the poller's epoll or kqueue, so that
+ * it becoming readable (`what` 0) or writable (1) is a wake, or takes it out (2) (CLX-440). It's
+ * edge-triggered, so each time more comes is one wake, however much is left unread. Any thread may
+ * call it, since it touches only the kernel's set, and a file that's closed leaves the set by
+ * itself. Windows has no files to add: what wakes a poller there calls `cx_net_wake`. */
+static cx_bool net_watch(cx_u64 h, int fd, int what) {
+#ifdef _WIN32
+    (void)h, (void)fd, (void)what;
+    return 0;
+#elif defined(__APPLE__)
+    net* n = (net*)(uintptr_t)h;
+    struct kevent e[2];
+    if (what == 2) {
+        EV_SET(&e[0], fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+        EV_SET(&e[1], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+        /* One that wasn't there gives ENOENT, which is as good. */
+        for (int i = 0; i < 2; i++) kevent(n->ep, &e[i], 1, NULL, 0, NULL);
+        return 1;
+    }
+    EV_SET(&e[0], fd, what ? EVFILT_WRITE : EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, NET_WATCHED);
+    return kevent(n->ep, e, 1, NULL, 0, NULL) == 0;
+#else
+    net* n = (net*)(uintptr_t)h;
+    if (what == 2) {
+        epoll_ctl(n->ep, EPOLL_CTL_DEL, fd, NULL);
+        return 1;
+    }
+    struct epoll_event e;
+    memset(&e, 0, sizeof e);
+    e.events = (what ? EPOLLOUT : EPOLLIN | EPOLLRDHUP) | EPOLLET;
+    /* NET_NONE, as the eventfd's: a wake. */
+    e.data.u32 = NET_NONE;
+    if (epoll_ctl(n->ep, EPOLL_CTL_ADD, fd, &e) == 0) return 1;
+    return errno == EEXIST && epoll_ctl(n->ep, EPOLL_CTL_MOD, fd, &e) == 0;
+#endif
+}
+
+static const cx_net_hooks_t net_hooks = {cx_net_wake, net_watch};
+
+cx_usize cx_net_hooks(void) { return (cx_usize)(uintptr_t)&net_hooks; }
 
 /* Whether every connection has sent what was queued on it, and each the program closed has
  * closed: on Windows, once the receive `finish` cancelled has come back and the socket with it. */

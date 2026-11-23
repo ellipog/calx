@@ -52,6 +52,7 @@ fn main() {
 | `post(url: String, headers: List<Header>, body: List<u8>, timeout_ms: u32, limit: usize, version: Version = Version.Http1) -> Request` | Starts a POST of `body`. Give a `Content-Type` header for it |
 | `fetch(url: String, timeout_ms: u32 = 60000, version: Version = Version.Http1) -> Response ! Error` | GETs `url` and waits for the answer, for scripts, as Python's `requests.get(url)`: no headers of its own and a body of up to 1 GiB. Any status is an answer; only no answer is an error |
 | `r.done() -> bool` | Whether the request has finished, so `wait` won't wait |
+| `r.wake_on(waker: Waker)` | Wakes the [`std.net.Waker`](net.md)'s `Net`, such as a server's, as the request finishes, or at once if it has ([below](#waking-a-servers-loop)) |
 | `r.progress() -> Progress` | How much of the body has come so far, while the request runs or once it's done, for a progress bar. Nothing has come until the headers have, and once the response is taken it's 0 of an unknown length |
 | `Progress { received: u64, total: u64? }` | The bytes of the body that have come, and its length in all if the server gave a `Content-Length` |
 | `r.wait() -> Response ! Error` | Waits for it to finish and takes the response. Panics if it was taken already, by `r` or a copy of it |
@@ -94,6 +95,24 @@ fn main() {
 ```
 
 `get` and `post` panic if the timeout is 0, or if a header is one that `std.http` writes itself (`Host`, `Content-Length`, `Transfer-Encoding` or `Connection`). They also panic if a header's name has a byte HTTP doesn't allow in names, or its value has a line break or a zero byte. Those would let a value a player chose start a header of its own.
+
+## Waking a server's loop
+
+A server's loop that also starts requests would otherwise look at `done` after each `next_event(10)`, and hear of an answer up to 10 ms late, or about 15.6 ms on Windows, whose timer is that coarse. Given the server's `Waker`, the request wakes `next_event` as it finishes, so the loop waits as long as it likes, as asyncio's `wait` returns once a request does:
+
+```
+var r = get(url, [], 10000, 1 << 20)
+r.wake_on(server.waker()!)
+loop {
+    _ = server.next_event()
+    if r.done() {
+        handle(r.wait())
+        break
+    }
+}
+```
+
+It wakes it from the thread that finished the request, and at once if it had finished already. A later `wake_on` wakes the `Net` it's given instead. [`std.http.server`](http-server.md#clients-requests-and-programs-on-the-same-loop) has a whole loop.
 
 ## HTTP/2
 

@@ -1,0 +1,73 @@
+// std.http: `req.wake_on` has a request that finishes wake a server's `next_event`, so one thread
+// that serves and also asks, here asking itself, hears each answer as it comes rather than at the
+// wait's timeout; one that has finished when it's asked wakes it at once; and a loop of requests
+// runs at the network's pace (CLX-440).
+import std.http.{Request, get}
+import std.http.server.{Response, Server}
+import std.time.{Instant}
+
+fn ms_since(t: Instant) -> u64 {
+    return unsafe { Instant.now() }.nanos_since(t) / 1000000
+}
+
+// Serves until `req` has finished, each wait up to 10 seconds, and gives its body.
+fn answer(s: mut Server, req: mut Request) -> String {
+    while not req.done() {
+        match s.next_event(10000) {
+            some(Request(r)) => s.respond(r, Response.text("answer to {r.path}")),
+            some(_) => {},
+            none => {},
+        }
+    }
+    return String.from_utf8(req.wait()!.body) ?? "bad"
+}
+
+fn main() {
+    var s = Server.listen(0)!
+    s.log = false
+    let w = s.waker()!
+    let url = "http://127.0.0.1:{s.port}"
+
+    // The answer, which this loop gives, wakes it as the request finishes, long before 10 s.
+    var start = unsafe { Instant.now() }
+    var req = get("{url}/one", [], 10000, 1 << 20)
+    req.wake_on(w)
+    println(answer(mut s, mut req))    // out: answer to /one
+    var ms = ms_since(start)
+    assert(ms < 2000, "a request took {ms} ms")
+
+    // One that has finished when `wake_on` is asked wakes it at once.
+    var early = get("{url}/two", [], 10000, 1 << 20)
+    while not early.done() {
+        if let Request(r) = s.next_event(50) {
+            s.respond(r, Response.text("answer to {r.path}"))
+        }
+    }
+    _ = s.next_event(0)
+    early.wake_on(w)
+    start = unsafe { Instant.now() }
+    _ = s.next_event(1000)
+    ms = ms_since(start)
+    assert(ms < 500, "next_event took {ms} ms for a request that had finished")
+    println(String.from_utf8(early.wait()!.body) ?? "bad")    // out: answer to /two
+
+    // Nothing comes, so the wait is its whole timeout.
+    start = unsafe { Instant.now() }
+    _ = s.next_event(100)
+    println("{ms_since(start) >= 50}")    // out: true
+
+    // A loop of requests: without the wakes, each would wait out a 10-second timeout.
+    start = unsafe { Instant.now() }
+    var right = 0
+    for i in 0..50 {
+        var r = get("{url}/{i}", [], 10000, 1 << 20)
+        r.wake_on(w)
+        if answer(mut s, mut r) == "answer to /{i}" {
+            right += 1
+        }
+    }
+    ms = ms_since(start)
+    assert(ms < 5000, "50 requests took {ms} ms")
+    println("{right}")    // out: 50
+    s.shutdown()
+}

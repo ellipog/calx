@@ -68,6 +68,7 @@ fn main() {
 | `ws.receive(timeout_ms: u32) -> Message? ! Error` | The next message, waiting up to `timeout_ms` for one, or `none` if none came, or a `Waker` woke it first; with 0 it doesn't wait. Once the connection has ended and every message before the end is taken, it fails with what it ended with |
 | `ws.waker() -> Waker` | A `Waker` another thread can call `wake()` on, so the `receive` waiting gives `none` at once, after the messages that have come ([below](#waking-a-receive)) |
 | `Waker` | Wakes one connection's `receive`, from any thread. It can be copied and sent to other threads, and once the connection is closed a wake does nothing |
+| `ws.wake_on(waker: std.net.Waker)` | Wakes the `Net` of a [`std.net.Waker`](net.md), such as a server's, each time a message comes and as the connection opens or ends, and at once if a message is waiting or it has ended ([below](#waking-a-servers-loop)) |
 | `ws.wait_open() ! Error` | Waits while the connection opens, and fails with why it didn't |
 | `ws.is_open() -> bool` | Whether the handshake is done and the connection hasn't closed |
 | `ws.idle_ms() -> u64` | The milliseconds since anything last came from the server, a message, a ping, a pong or part of one, or since it opened if nothing has; 0 while it opens |
@@ -123,6 +124,29 @@ loop {
 ```
 
 A wake makes the `receive` that's waiting give `none` once the messages that have come are taken, or makes the next one give it if none is waiting. Wakes that come before a `receive` are one, and every copy of a `Waker` wakes the same connection.
+
+## Waking a server's loop
+
+A server's loop that also reads clients it opened, as a bridge between two networks does, would otherwise call `next_event(10)` and then `receive(0)` on each, and hear of a message up to 10 ms late, or about 15.6 ms on Windows. Given the server's [`std.net.Waker`](net.md), the connection's thread wakes `next_event` each time a message comes, and as the connection opens or ends, so the loop waits as long as it likes:
+
+```
+var server = Server.listen(8080)!
+let ws = connect("wss://example.com/feed")!
+ws.wake_on(server.waker()!)
+loop {
+    match server.next_event() {
+        some(e) => serve(e),
+        none => {
+            // Woken: take every message that has come.
+            while let m = ws.receive(0)! {
+                handle(m)
+            }
+        },
+    }
+}
+```
+
+It wakes it at once if a message is waiting or the connection has ended. Wakes that come before a call are one, so after one the loop takes every message that's there, and once the connection has ended, `receive` fails with how. A later `wake_on` wakes the `Net` it's given instead.
 
 ## How a connection ends
 

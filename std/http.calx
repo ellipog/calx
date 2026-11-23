@@ -7,6 +7,8 @@
 /// which `Version.Http2` asks for, go over one connection at once (CLX-383).
 module std.http
 
+import std.net.waker.{Waker}
+
 extern "C" {
     fn cx_http_start(post: bool, url: *const u8, url_len: usize, head: *const u8, head_len: usize, body: *const u8, body_len: usize, timeout_ms: u32, limit: usize, version: u32) -> u64
     fn cx_http_done(h: u64) -> i32
@@ -22,6 +24,7 @@ extern "C" {
     fn cx_http_expected(h: u64) -> u64
     fn cx_http_version(h: u64) -> u32
     fn cx_http_times(h: u64, out: *u64)
+    fn cx_http_wake_on(h: u64, hooks: usize, net: u64)
     fn cx_crypto_random(p: *u8, n: usize)
 }
 
@@ -155,6 +158,20 @@ impl Request {
     /// Whether it has finished, so that `wait` won't wait.
     pub fn done(self) -> bool {
         return self.handle == 0 or unsafe { cx_http_done(self.handle) } != 0
+    }
+
+    /// Wakes `waker`'s `Net` as it finishes, so a loop waiting on a server's `next_event`, or a
+    /// `Net`'s `poll`, hears of it then and takes the response with `wait`, rather than looking
+    /// at `done` at each timeout, as asyncio's `wait` returns once a request finishes. It wakes it
+    /// at once if it has finished already, and a later call wakes the `Net` it's given instead.
+    pub fn wake_on(self, waker: Waker) {
+        if self.handle == 0 {
+            return
+        }
+        let (net, hooks) = unsafe { waker.parts() }
+        unsafe {
+            cx_http_wake_on(self.handle, hooks, net)
+        }
     }
 
     /// How much of the body has come so far, and how long it is in all if the server said, which

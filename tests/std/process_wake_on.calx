@@ -1,0 +1,110 @@
+// std.process: `child.wake_on` has a child's output, and its exit, wake a server's `next_event`, so
+// one thread that serves and also talks to a child hears each line as it comes rather than at the
+// wait's timeout; output waiting when it's asked wakes it at once; a loop of lines runs at the
+// pipe's pace; and the exit is heard as it happens (CLX-440). The test runs itself as the child,
+// which answers each line in capitals.
+import std.env.{args}
+import std.http.server.{Server}
+import std.io.{Lines, flush}
+import std.process.{Command, Stdio, current_exe}
+import std.time.{Instant}
+
+fn child() {
+    var lines = Lines {}
+    loop {
+        match lines.next() {
+            some(l) => {
+                if l == "quit" {
+                    break
+                }
+                println(l.to_upper_root())
+                flush()
+            },
+            none => break,
+        }
+    }
+}
+
+fn ms_since(t: Instant) -> u64 {
+    return unsafe { Instant.now() }.nanos_since(t) / 1000000
+}
+
+fn main() {
+    if args().len() > 0 {
+        child()
+        return
+    }
+    var s = Server.listen(0)!
+    let w = s.waker()!
+    var c = Command.new(current_exe()).arg("child").stdin(Stdio.Pipe).stdout(Stdio.Pipe).spawn()!
+    c.wake_on(w)
+
+    // The answer wakes `next_event`, long before its second.
+    c.write_text("hi\n")!
+    var start = unsafe { Instant.now() }
+    var line: String? = none
+    while line == none {
+        _ = s.next_event(1000)
+        line = c.read_line(0)
+    }
+    var ms = ms_since(start)
+    println(line ?? "")    // out: HI
+    assert(ms < 500, "a line took {ms} ms")
+
+    // After the wake, `read_line(0)` takes the line, though it's as long as the one before, which
+    // it once read as nothing come.
+    c.write_text("ho\n")!
+    _ = s.next_event(1000)
+    println(c.read_line(0) ?? "none")    // out: HO
+
+    // Output waiting when `wake_on` is asked wakes it at once.
+    c.write_text("again\n")!
+    _ = s.next_event(1000)
+    c.wake_on(w)
+    start = unsafe { Instant.now() }
+    _ = s.next_event(1000)
+    ms = ms_since(start)
+    assert(ms < 500, "next_event took {ms} ms with output waiting")
+    println(c.read_line(1000) ?? "none")    // out: AGAIN
+
+    // A read took what came, so nothing wakes the wait, which is its whole timeout.
+    start = unsafe { Instant.now() }
+    _ = s.next_event(100)
+    println("{ms_since(start) >= 50}")    // out: true
+
+    // A loop of lines, each waiting up to 10 seconds: without the wakes, one would take that.
+    start = unsafe { Instant.now() }
+    var got = 0
+    for i in 0..200 {
+        c.write_text("line {i}\n")!
+        loop {
+            _ = s.next_event(10000)
+            if let l = c.read_line(0) {
+                assert(l == "LINE {i}", "line {i} came back as {l}")
+                got += 1
+                break
+            }
+        }
+    }
+    ms = ms_since(start)
+    assert(ms < 5000, "200 lines took {ms} ms")
+    println("{got}")    // out: 200
+
+    // Its exit wakes the loop too, and `try_wait` says how it ended.
+    c.write_text("quit\n")!
+    start = unsafe { Instant.now() }
+    loop {
+        _ = s.next_event(10000)
+        while let l = c.read_line(0) {
+            println(l)
+        }
+        if let st = c.try_wait() {
+            println("{st.success()} {c.ended()}")    // out: true true
+            break
+        }
+    }
+    ms = ms_since(start)
+    assert(ms < 2000, "the exit took {ms} ms to be heard")
+    _ = c.wait()
+    s.shutdown()
+}
