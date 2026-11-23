@@ -1,0 +1,60 @@
+// What a type alias can't be, and errors that name an alias as the code wrote it (CLX-436).
+type Pt = (f64, f64)
+type Pair<T> = (T, T)
+type Loop = List<Loop>          // error: the type alias `Loop` names itself
+type A = List<B>                // error: the type alias `A` names itself
+type B = Map<String, A>
+type Bad = Nope                 // error: unknown type `Nope`
+type Unused = i32               // error: type alias `Unused` is never used
+type Const<T> = i32             // error: generic parameter `T` isn't used by the type it names
+type Shown: Display = i32       // error: a type alias has no bounds, which are for an interface's associated types; write `type Shown = i32`
+type Missing                    // error: give the type alias `Missing` the type it names
+type Pt = i32                   // error: `Pt` is already defined
+type i64 = i32                  // error: `i64` is a built-in name
+type Keys<T: Hash> = Set<T>
+type Raw = *u8
+type Scoped = ArenaList<i32>    // error: an `ArenaList` can only be the type of a variable
+
+struct Secret {
+    n: i32
+}
+
+pub type Hidden = Secret        // error: `Secret` isn't `pub`, so a `pub` type alias can't name it
+
+fn shift(p: Pt) -> Pt {
+    return (p.0 + 1.0, p.1)
+}
+
+fn mid(a: Pt, b: Pt) -> Pt {
+    return a.0 + b.0            // error: expected `Pt`, which is `(f64, f64)`, found `f64`
+}
+
+fn count(k: Keys<Pt>) -> usize {    // error: `(f64, f64)` has no `Hash`, which `Keys` needs for `T`
+    return k.len()
+}
+
+struct Shape {
+    corners: List<Pt>
+}
+
+fn main() {
+    let flat: List<f64> = [1.0]
+    let p: Pt = 1.0                     // error: expected `Pt`, which is `(f64, f64)`, found `f64`
+    let q = shift(1.0)                  // error: expected `Pt`, which is `(f64, f64)`, found `f64`
+    let ps: List<Pt> = flat             // error: expected `List<Pt>`, which is `List<(f64, f64)>`, found `List<f64>`
+    let sh = Shape { corners: ps.copy() }
+    let sh2 = Shape { corners: [1.0] }  // error: expected `(f64, f64)`, found `f64`
+    let pair: Pair = (1, 2)             // error: `Pair` is generic; give its type, as in `Pair<...>`
+    let two: Pair<i32, i32> = (1, 2)    // error: `Pair` takes 1 type, but 2 were given
+    let one: Pt<i32> = (1.0, 2.0)       // error: `Pt` doesn't take generic arguments
+    let r: Raw = 0                      // error: `Raw` is `*u8`, which holds a pointer, and a pointer can only be
+    let h = Pair                        // error: `Pair` is a type, not a value
+    let c: Const<str> = 1
+    let s: Hidden = Secret { n: 1 }
+    let l: Loop = []
+    let x: Bad = 1
+    let sc: Scoped = []
+    let z: i64 = 1
+    println("{p.0} {q.0} {ps.len()} {sh.corners.len()} {sh2.corners.len()} {pair.0} {two.0} {one.0} {r} {h} {c} {s.n}")
+    println("{l.len()} {x} {sc.len()} {z} {mid((1.0, 1.0), (2.0, 2.0))} {count(Set<i64>())}")
+}

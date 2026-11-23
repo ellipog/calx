@@ -7,7 +7,7 @@ struct Boxed<T> {
     v: T,
 }
 
-pub interface Sized<const N: usize> {    // error: an interface can't have a length parameter, `const N: usize`; a function, a struct, an enum or an impl can
+pub interface Sized<const N: usize> {    // error: an interface can't have a length parameter, `const N: usize`; a function, a struct, an enum, an impl or a type alias can
     fn size(self) -> usize
 }
 

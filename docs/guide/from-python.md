@@ -154,6 +154,7 @@ fn main() ! Error {
 | `collections.deque` | `Deque<T>` ([deques](../reference/deques.md)) |
 | `heapq` | `PriorityQueue<T>` ([priority queues](../reference/priority-queues.md)) |
 | `None` | `none`, in a type that says it may be missing: `String?` ([optionals](../reference/optionals.md)) |
+| `Pt = tuple[float, float]`, `type Pt = tuple[float, float]` | `type Pt = (f64, f64)`, another name for the same type ([type aliases](../reference/types.md#type-aliases)) |
 
 ## Files and programs
 

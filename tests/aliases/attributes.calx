@@ -1,0 +1,24 @@
+// An attribute reads a field of a type alias as the type it names, so `@json` writes a `Path`
+// field as the list it is (CLX-436).
+import std.json.{json}
+
+type Path = List<f64>
+type Tagged<T> = Map<String, T>
+type Label = String?
+
+@json
+struct Shape {
+    corners: Path
+    counts: Tagged<i32>
+    label: Label
+}
+
+fn main() {
+    var counts = Tagged<i32>()
+    counts.insert("sides", 4)
+    let s = Shape { corners: [1.0, 2.0], counts: counts, label: none }
+    let text = s.to_json_text()
+    println(text)    // out: {"corners":[1.0,2.0],"counts":{"sides":4},"label":null}
+    let back = Shape.from_json_text(text)!
+    println("{back.corners[1]} {back.counts["sides"]} {back.label ?? "none"}")    // out: 2.0 4 none
+}

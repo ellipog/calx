@@ -1,0 +1,131 @@
+// Type aliases: `type Pt = (f64, f64)` is another name for the type, not a new one, so values go
+// between them freely, tuples destructure and methods work as on the type itself. Generic ones
+// put what's written for their parameters in place of them (CLX-436).
+type Pt = (f64, f64)
+type Path = List<Pt>
+type Pair<T> = (T, T)
+type Grid<const N: usize> = [[u8; N]; N]
+type Index = Map<String, List<Pt>>
+type Ids = Set<u64>
+type Step = fn(Pt) -> Pt
+type Scale = f64
+type Maybe = Pt?
+
+struct Vec2 {
+    x: f64
+    y: f64
+}
+
+impl Vec2 {
+    fn new(x: f64, y: f64) -> V {
+        return V { x: x, y: y }
+    }
+
+    fn len2(self) -> Scale {
+        return self.x * self.x + self.y * self.y
+    }
+}
+
+type V = Vec2
+
+enum Color {
+    Red
+    Green
+}
+
+type C = Color
+
+struct Shape {
+    corners: Path
+    origin: Pt
+}
+
+const ORIGIN: Pt = (0.0, 0.0)
+
+fn line(a: Pt, b: Pt, n: usize) -> Path {
+    var out: Path = []
+    for i in 0..n {
+        let t = f64.nearest(i) / f64.nearest(n - 1)
+        out.push((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t))
+    }
+    return out
+}
+
+fn curve(f: Fn(f64) -> Pt, t0: f64, t1: f64, n: usize) -> List<Pt> {
+    var out: List<Pt> = []
+    for i in 0..n {
+        out.push(f(t0 + (t1 - t0) * f64.nearest(i) / f64.nearest(n - 1)))
+    }
+    return out
+}
+
+fn swap<T: Copy>(p: Pair<T>) -> Pair<T> {
+    let (a, b) = p
+    return (b, a)
+}
+
+fn shift(p: Pt) -> Pt {
+    return (p.0 + 1.0, p.1)
+}
+
+fn plain(p: (f64, f64)) -> f64 {
+    return p.0 + p.1
+}
+
+fn first(ps: Path) -> Maybe {
+    if ps.is_empty() {
+        return none
+    }
+    return some(ps[0])
+}
+
+fn main() {
+    let pts = line(ORIGIN, (1.0, 2.0), 3)
+    for (x, y) in pts {
+        println("{x} {y}")
+    }
+    // out: 0.0 0.0
+    // out: 0.5 1.0
+    // out: 1.0 2.0
+
+    // An alias and what it names are one type, both ways.
+    let raw: (f64, f64) = pts[1]
+    let p: Pt = raw
+    let (x, y) = p
+    println("{x} {y} {plain(p)} {p == raw}")    // out: 0.5 1.0 1.5 true
+
+    var c = curve(|t| (t, t * t), 0.0, 1.0, 3)
+    println("{c.len()} {c[2].1} {c.pop()!.0}")    // out: 3 1.0 1.0
+
+    let q: Pair<i32> = swap((1, 2))
+    let r: (i32, i32) = q
+    println("{q.0} {r.1}")    // out: 2 1
+
+    var g: Grid<2> = [[0u8; 2]; 2]
+    g[1][1] = 7
+    println("{g[1][1]} {g.len()}")    // out: 7 2
+
+    // A collection's alias builds an empty one, as its own name does.
+    var m = Index()
+    m.insert("line", pts.copy())
+    var ids = Ids()
+    ids.insert(7)
+    println("{m["line"].len()} {ids.contains(7)}")    // out: 3 true
+
+    let step: Step = shift
+    println("{step((1.0, 1.0)).0}")    // out: 2.0
+
+    // A struct's or an enum's alias is the type where a value goes, too.
+    let v = V.new(3.0, 4.0)
+    let w: Vec2 = V { x: 1.0, y: 1.0 }
+    println("{v.len2()} {w.len2()}")    // out: 25.0 2.0
+    let k = C.Green
+    match k {
+        C.Red => println("red")
+        Color.Green => println("green")    // out: green
+    }
+
+    let s = Shape { corners: pts, origin: ORIGIN }
+    println("{s.corners.len()} {s.origin}")    // out: 3 (0.0, 0.0)
+    println("{first(s.corners) ?? (9.0, 9.0)} {first([]) ?? (9.0, 9.0)}")    // out: (0.0, 0.0) (9.0, 9.0)
+}

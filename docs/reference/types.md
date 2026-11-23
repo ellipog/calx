@@ -1,6 +1,6 @@
 ---
 title: Types
-description: The primitive types, arrays, strings, lists, structs, enums, optionals, tuples, the unit type, and which types are Copy.
+description: The primitive types, arrays, strings, lists, structs, enums, optionals, tuples, type aliases, the unit type, and which types are Copy.
 ---
 
 # Types
@@ -109,6 +109,38 @@ Methods that change the length, such as `push` and `remove`, are a list's only: 
 ## Optionals
 
 `T?` is a `T` that may be absent: `some(x)` or `none`. There's no null ([optionals](optionals.md)).
+
+## Type aliases
+
+`type Name = T` gives a type another name, and `pub type` exports it. The alias is the type it names, not a new one: values go between the two freely, a tuple's alias destructures, and a struct's alias has the struct's methods.
+
+```calx
+type Pt = (f64, f64)
+type Pair<T> = (T, T)
+
+fn mid(a: Pt, b: Pt) -> Pt {
+    return ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0)
+}
+
+fn swap<T: Copy>(p: Pair<T>) -> Pair<T> {
+    let (a, b) = p
+    return (b, a)
+}
+
+fn main() {
+    let raw: (f64, f64) = (2.0, 4.0)
+    let (x, y) = mid((0.0, 0.0), raw)
+    println("{x} {y}")                    // out: 1.0 2.0
+    let q: Pair<str> = swap(("a", "b"))
+    println("{q.0}")                      // out: b
+}
+```
+
+- A generic alias takes its arguments wherever it's written: `Pair<i32>` is `(i32, i32)`. Its parameters can have bounds, as in `type Keys<T: Hash> = Set<T>`, and it can take a length, as in `type Grid<const N: usize> = [[u8; N]; N]`.
+- A struct's or an enum's alias works where a value goes too: `V.new(...)`, `V { x: 1.0, y: 2.0 }` and `C.Red`, for `type V = Vec2` and `type C = Color`. A collection's alias makes an empty one as the collection's own name does: `Index()` for `type Index = Map<String, i32>`, and `Tagged<i32>()` for `type Tagged<T> = Map<String, T>`.
+- An attribute such as `@json` reads a field of an alias as the type the alias names.
+- An error about a value gives the type as its declaration wrote it, then what that is: ``expected `Pt`, which is `(f64, f64)`, found `f64` ``.
+- An alias can't name itself, directly or through another alias. A type that holds itself is a struct or an enum, through a `Box` or a `List` ([boxes](boxes.md)).
 
 ## `Copy` and owning types
 
