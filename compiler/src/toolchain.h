@@ -122,6 +122,10 @@ int run_parallel(const std::vector<std::vector<std::string>>& commands);
 
 bool read_file(const std::string& path, std::string& out);
 bool write_file_atomic(const std::string& path, const std::string& data);
+// Puts `data` at `path` in the shared cache, where other builds may be reading or putting the same
+// file at once: a file with the same bytes there already is kept, and one is never replaced while
+// another build may have it open.
+bool write_cache_file(const std::string& path, const std::string& data);
 bool file_exists(const std::string& path);
 
 // A name part no other build, in this process or another, uses at the same time, for the files a

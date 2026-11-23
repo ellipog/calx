@@ -1397,6 +1397,42 @@ constexpr std::size_t kKeepObjects = 1024;
 constexpr std::uintmax_t kObjectBytes = 256u << 20;
 }  // namespace
 
+// A static library's header beside it in the cache, `<hash>.lib.h`, was written with
+// write_file_atomic, whose rename replaces the file: on Windows that fails while another build has
+// it open, reading it to compare or putting its own there, so one of several builds of the same
+// library at once failed with "can't write". So it's put there as the cache's other files are, by
+// place_new, which never replaces one; a file there already is as good as this one when it holds
+// the same bytes, as it does, since the name is the hash of the library the header was made with.
+// One that differs, left by a build of a calx that wrote it otherwise, is replaced, again a few
+// times while another build has it open.
+bool write_cache_file(const std::string& path, const std::string& data) {
+    std::string there;
+    if (read_file(path, there) && there == data) return true;
+    std::string temp = path + ".tmp" + unique_stamp();
+    {
+        std::ofstream out(long_path(temp), std::ios::binary);
+        if (!out) return false;
+        out.write(data.data(), static_cast<std::streamsize>(data.size()));
+        if (!out) {
+            out.close();
+            std::error_code ec;
+            fs::remove(long_path(temp), ec);
+            return false;
+        }
+    }
+    switch (place_new(temp, path)) {
+    case Placed::placed: return true;
+    case Placed::failed: return false;
+    case Placed::already_there: break;
+    }
+    for (int attempt = 0; attempt < 50; attempt++) {
+        if (read_file(path, there) && there == data) return true;
+        if (write_file_atomic(path, data)) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
 const std::chrono::minutes kCacheGrace{10};
 
 namespace {

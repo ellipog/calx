@@ -1298,8 +1298,7 @@ int main(int argc, char** argv) {
     building.reset();
     if (!b.ok) return 1;
     if (opt.staticlib) {
-        std::string kept;
-        if ((!read_file(b.exe + ".h", kept) || kept != header) && !write_file_atomic(b.exe + ".h", header)) {
+        if (!write_cache_file(b.exe + ".h", header)) {
             std::fprintf(stderr, "calx: can't write %s.h\n", b.exe.c_str());
             return 1;
         }
