@@ -159,8 +159,9 @@ jobs:
       # The iOS simulator the tests that need one run on (CLX-408), started here, so a first boot's
       # setup is done before the tests start and its time shows on its own (CLX-424). The tests find
       # it running and leave it so. After `bootstatus` returns, the first program started on it can
-      # take over a minute to run, longer than a test on it may take, so programs are started on it
-      # until one runs in under 5 seconds (CLX-442).
+      # take over a minute to run, longer than a test on it may take, so a program built for it is
+      # run on it until it runs in under 5 seconds (CLX-442). The system's own programs can't be:
+      # simctl finds macOS's /usr/bin/true, which has no libSystem there.
       - name: Start the iOS simulator
         if: runner.os == 'macOS'
         shell: bash
@@ -169,12 +170,14 @@ jobs:
           if [ -z "$id" ]; then echo "this runner's Xcode has no iPhone simulator"; exit 1; fi
           xcrun simctl list devices available | grep "$id"
           time xcrun simctl bootstatus "$id" -b
+          "$CALX_BIN" build --target aarch64-ios-sim tests/basics/hello.calx -o build/hello-sim
           for i in $(seq 1 30); do
             start=$(date +%s)
-            xcrun simctl spawn "$id" /usr/bin/true
+            ran=yes
+            xcrun simctl spawn "$id" "$PWD/build/hello-sim" > /dev/null || ran=no
             took=$(( $(date +%s) - start ))
-            echo "a program started and ended on it in $took s"
-            if [ "$took" -lt 5 ]; then break; fi
+            echo "a program run on it: $ran, in $took s"
+            if [ "$ran" = yes ] && [ "$took" -lt 5 ]; then break; fi
           done
       - name: Tests
         shell: bash
@@ -551,12 +554,14 @@ jobs:
           if [ -z "$id" ]; then echo "this runner's Xcode has no iPhone simulator"; exit 1; fi
           xcrun simctl list devices available | grep "$id"
           time xcrun simctl bootstatus "$id" -b
+          build/release/calx build --target aarch64-ios-sim tests/basics/hello.calx -o build/hello-sim
           for i in $(seq 1 30); do
             start=$(date +%s)
-            xcrun simctl spawn "$id" /usr/bin/true
+            ran=yes
+            xcrun simctl spawn "$id" "$PWD/build/hello-sim" > /dev/null || ran=no
             took=$(( $(date +%s) - start ))
-            echo "a program started and ended on it in $took s"
-            if [ "$took" -lt 5 ]; then break; fi
+            echo "a program run on it: $ran, in $took s"
+            if [ "$ran" = yes ] && [ "$took" -lt 5 ]; then break; fi
           done
       - name: Try the release
         shell: bash
