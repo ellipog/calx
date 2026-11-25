@@ -9,7 +9,8 @@
 # installation up to date.
 #
 # CALX_INSTALL installs somewhere else, CALX_CHANNEL=nightly picks the nightly releases,
-# CALX_NO_MODIFY_PATH=1 leaves PATH alone, and CALX_RELEASES points at a mirror.
+# CALX_VERSION=0.1.0-nightly.202611231907 installs that version and no other, CALX_NO_MODIFY_PATH=1
+# leaves PATH alone, and CALX_RELEASES points at a mirror.
 
 $ErrorActionPreference = 'Stop'
 # Invoke-WebRequest is many times slower while it draws its progress bar.
@@ -199,10 +200,13 @@ if ($styled) {
     Write-Host ''
 }
 
-# The newest version: the latest stable release, or the nightly when asked for, or while there's
-# no stable release yet.
+# The version asked for, or the newest: the latest stable release, or the nightly when asked
+# for, or while there's no stable release yet.
 $version = $null
-if ($env:CALX_CHANNEL -ne 'nightly') {
+if ($env:CALX_VERSION) {
+    $version = $env:CALX_VERSION.Trim() -replace '^v', ''
+    if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+') { Stop-Install "CALX_VERSION is $env:CALX_VERSION, which isn't a version such as 0.1.0" }
+} elseif ($env:CALX_CHANNEL -ne 'nightly') {
     try {
         $version = Get-Text "$releases/latest/download/version.txt"
     } catch {
@@ -218,22 +222,44 @@ if (-not $version) {
     try { $version = Get-Text "$releases/download/nightly/version.txt" } catch { Stop-Install "$_" }
 }
 if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+') { Stop-Install "the release's version.txt doesn't hold a version" }
-$tag = if ($version -match '-nightly\.') { 'nightly' } else { "v$version" }
+
+# The release that has `file` of the version, by the .sha256 beside it, or $null if none has: its
+# own, vVERSION, or for a nightly from before nightlies had their own, the nightly
+# release, which keeps the newest two. A server that can't be reached stops the install.
+function Find-Release($file) {
+    $tags = @("v$version")
+    if ($version -match '-nightly\.') { $tags += 'nightly' }
+    foreach ($t in $tags) {
+        try {
+            Get-Bytes "$releases/download/$t/$file.sha256" | Out-Null
+            return $t
+        } catch {
+            if ("$_" -notmatch 'HTTP 40[34]') { Stop-Install "$_" }
+        }
+    }
+    return $null
+}
+
 # The native build on an Arm processor (CLX-276), which the registry names even to a PowerShell
 # that Windows runs by translating it, or else the x64 one, which Windows on Arm runs that way:
 # where the release has no Arm64 build, as releases before it don't.
 $cpu = 'x64'
+$tag = $null
 $native = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name PROCESSOR_ARCHITECTURE -ErrorAction SilentlyContinue).PROCESSOR_ARCHITECTURE
 if ($native -eq 'ARM64') {
-    try {
-        Get-Bytes "$releases/download/$tag/calx-$version-windows-arm64.zip.sha256" | Out-Null
+    $tag = Find-Release "calx-$version-windows-arm64.zip"
+    if ($tag) {
         $cpu = 'arm64'
-    } catch {
-        if ("$_" -notmatch 'HTTP 404') { Stop-Install "$_" }
+    } else {
         Write-Host "This release has no build for Arm64 Windows, so this installs the x64 one, which Windows runs by translating it."
     }
 }
 $file = "calx-$version-windows-$cpu.zip"
+if (-not $tag) { $tag = Find-Release $file }
+if (-not $tag) {
+    $nightly = if ($version -match '-nightly\.') { ' or nightly' } else { '' }
+    Stop-Install "neither the release v$version$nightly at $releases has $file, so there's no Calx $version for Windows"
+}
 $url = "$releases/download/$tag/$file"
 
 $temp = Join-Path ([IO.Path]::GetTempPath()) ("calx-install-" + [Guid]::NewGuid().ToString('N'))

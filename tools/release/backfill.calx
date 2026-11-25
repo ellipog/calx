@@ -1,0 +1,228 @@
+// Gives each nightly still in the `nightly` release a release of its own, as CI's publish job
+// gives every nightly now, so it stays installable by its version once `nightly` lets
+// it go. Run from a clone of the repository, with `gh` signed in to an account that can make
+// releases:
+//
+//     calx run tools/release/backfill.calx -- [--dry-run]
+//
+// For each version that `nightly` has archives of and that has no release `vVERSION` yet, it
+// downloads those archives and their .sha256 files, and the toolchains their toolchain.txt names,
+// checks each against its SHA-256, and makes the release as publish makes one: a prerelease that
+// isn't the latest, at the commit the nightly was built from, which is the commit on main whose
+// time, in UTC, the version's stamp is. A tag of an older commit runs that commit's CI, which
+// would fail for a tag that isn't a stable version, so the run it starts is cancelled.
+
+import std.env.{args}
+import std.fs.{list, read, remove_dir_all, temp_dir, write}
+import std.hash.{sha256}
+import std.process.{Command, Stdio, exit}
+import std.tar.{Tar}
+import std.thread.{sleep}
+import std.zip.{Zip}
+
+const REPO: str = "ellipog/calx"
+
+fn main() {
+    let a = args()
+    let dry = a.len() == 1 and a[0] == "--dry-run"
+    if a.len() > 1 or (a.len() == 1 and not dry) {
+        eprintln("usage: calx run tools/release/backfill.calx -- [--dry-run]")
+        exit(2)
+    }
+    if let err(e) = run(dry) {
+        eprintln("backfill: {e}")
+        exit(1)
+    }
+}
+
+fn run(dry: bool) ! String {
+    let names = (try sh(Command.new("gh").args(["release", "view", "nightly", "--repo", REPO, "--json", "assets", "--jq", ".assets[].name"]))).lines()
+    var versions = List<String>()
+    for n in names {
+        let v = version_of(n)
+        if not v.is_empty() and not versions.contains(v) {
+            versions.push(v)
+        }
+    }
+    if versions.is_empty() {
+        println("The nightly release has no archives.")
+    }
+    for v in versions {
+        let tag = "v{v}"
+        if let ok(_) = Command.new("gh").args(["release", "view", tag.copy(), "--repo", REPO, "--json", "tagName"]).stdout(Stdio.Null).stderr(Stdio.Null).read() {
+            println("{v}: has its own release, {tag}")
+            continue
+        }
+        let commit = try commit_of(v)
+        if dry {
+            println("{v}: would make {tag} at {commit}")
+            continue
+        }
+        try backfill(v, commit, names)
+    }
+}
+
+// The version in an archive's name, `calx-VERSION-OS-CPU.EXT`, if it's a nightly's.
+fn version_of(name: String) -> String {
+    if not name.starts_with("calx-") or name.starts_with("calx-toolchain-") or name.ends_with(".sha256") {
+        return String()
+    }
+    let rest = name[5..]
+    let at = (rest.find("-nightly.")) else return String()
+    var end = at + 9
+    while end < rest.len() and rest.byte_at(end) >= 48 and rest.byte_at(end) <= 57 {
+        end += 1
+    }
+    return rest[..end]
+}
+
+// The commit on main that the nightly `version` was built from: the one whose commit time, in UTC,
+// is its stamp, `YYYYMMDDHHMM`, as CI makes it.
+fn commit_of(version: String) -> String ! String {
+    let stamp = version[(version.find("-nightly.") ?? 0) + 9..]
+    _ = try sh(Command.new("git").args(["fetch", "--quiet", "origin", "main"]))
+    let log = try sh(Command.new("git").args(["log", "origin/main", "--format=%H %cd", "--date=format-local:%Y%m%d%H%M"]).env("TZ", "UTC"))
+    var found = List<String>()
+    for line in log.lines() {
+        if line.ends_with(" {stamp}") {
+            found.push(line[..40])
+        }
+    }
+    if found.len() != 1 {
+        fail "{found.len()} commits on main have the time {stamp}, so which {version} is from isn't clear"
+    }
+    return found[0].copy()
+}
+
+fn backfill(version: String, commit: String, names: List<String>) ! String {
+    let dir = try new_dir()
+    let failed = match files(version, commit, names, dir) {
+        ok => String(),
+        err(e) => e,
+    }
+    if let err(_) = remove_dir_all(dir) {
+    }
+    if not failed.is_empty() {
+        fail failed
+    }
+}
+
+fn files(version: String, commit: String, names: List<String>, dir: String) ! String {
+    _ = try sh(Command.new("gh").args(["release", "download", "nightly", "--repo", REPO, "--dir", dir.copy(), "--pattern", "calx-{version}-*"]))
+    // The toolchains the archives name.
+    var toolchains = List<String>()
+    for f in try names_in(dir) {
+        if f.ends_with(".sha256") {
+            continue
+        }
+        let bytes = try load("{dir}/{f}")
+        let note = if f.ends_with(".zip") {
+            try (try Zip.open(bytes)).read_named("calx/toolchain.txt")
+        } else {
+            try (try Tar.open(bytes)).read_named("calx/toolchain.txt")
+        }
+        let file = (String.from_utf8(note) ?? String()).lines()[0].trim()
+        if not toolchains.contains(file) {
+            toolchains.push(file)
+        }
+    }
+    for t in toolchains {
+        if not names.contains(t) {
+            fail "the nightly release hasn't {t}, which {version} names"
+        }
+        _ = try sh(Command.new("gh").args(["release", "download", "nightly", "--repo", REPO, "--dir", dir.copy(), "--pattern", t.copy(), "--pattern", "{t}.sha256"]))
+    }
+    // Each file against its .sha256, and SHA256SUMS of them all, as publish writes it.
+    var sums = String()
+    var upload = List<String>()
+    for f in try names_in(dir) {
+        if f.ends_with(".sha256") {
+            continue
+        }
+        let got = hex(sha256(try load("{dir}/{f}")))
+        let want = (String.from_utf8(try load("{dir}/{f}.sha256")) ?? String()).trim()
+        if not want.starts_with("{got} ") {
+            fail "{f}'s SHA-256 is {got}, but its .sha256 says {want}"
+        }
+        sums.push_str("{got}  {f}\n")
+        upload.push("{dir}/{f}")
+        upload.push("{dir}/{f}.sha256")
+    }
+    try save("{dir}/SHA256SUMS", sums.to_bytes())
+    try save("{dir}/version.txt", "{version}\n".to_bytes())
+    upload.push("{dir}/SHA256SUMS")
+    upload.push("{dir}/version.txt")
+
+    let tag = "v{version}"
+    let notes = "A nightly: the build of {commit}. `calx update --to {version}` installs it, as does CALX_VERSION={version} with the install scripts."
+    var create: List<String> = ["release", "create", tag.copy(), "--repo", REPO, "--prerelease", "--latest=false", "--target", commit.copy(), "--title", "Calx {version}", "--notes", notes]
+    for u in upload {
+        create.push(u.copy())
+    }
+    _ = try sh(Command.new("gh").args(create))
+    println("{version}: made {tag} at {commit}, with {upload.len()} files")
+    try cancel(tag)
+}
+
+// Cancels the CI run that pushing the tag `tag` starts, waiting up to a minute for it to start.
+fn cancel(tag: String) ! String {
+    for _ in 0..12 {
+        unsafe { sleep(5000000000) }
+        let ids = try sh(Command.new("gh").args(["run", "list", "--repo", REPO, "--branch", tag.copy(), "--json", "databaseId,status", "--jq", ".[] | select(.status != \"completed\") | .databaseId"]))
+        if not ids.trim().is_empty() {
+            for id in ids.lines() {
+                _ = try sh(Command.new("gh").args(["run", "cancel", id.trim(), "--repo", REPO]))
+                println("  cancelled the CI run {id.trim()} the tag started")
+            }
+            return
+        }
+    }
+    println("  no CI run started for {tag}")
+}
+
+fn sh(c: Command) -> String ! String {
+    return match c.copy().read() {
+        ok(text) => text,
+        err(e) => fail "{e}",
+    }
+}
+
+fn new_dir() -> String ! String {
+    return match temp_dir() {
+        ok(d) => d,
+        err(e) => fail "can't make a temporary folder: {e}",
+    }
+}
+
+fn names_in(dir: String) -> List<String> ! String {
+    return match list(dir) {
+        ok(n) => n,
+        err(e) => fail "can't list {dir}: {e}",
+    }
+}
+
+fn load(path: String) -> List<u8> ! String {
+    return match read(path) {
+        ok(b) => b,
+        err(e) => fail "can't read {path}: {e}",
+    }
+}
+
+fn save(path: String, bytes: List<u8>) ! String {
+    if let err(e) = write(path, bytes) {
+        fail "can't write {path}: {e}"
+    }
+}
+
+fn hex(bytes: List<u8>) -> String {
+    var out = String()
+    for b in bytes {
+        out.push(hex_digit(u32(b) >> 4))
+        out.push(hex_digit(u32(b) & 15))
+    }
+    return out
+}
+
+fn hex_digit(v: u32) -> rune {
+    return rune(u8.wrap(if v < 10 { 48 + v } else { 87 + v }))
+}

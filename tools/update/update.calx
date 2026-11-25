@@ -13,9 +13,12 @@
 // `calx-VERSION-OS-CPU.zip` or `.tar.gz`, CPU being `x64` or `arm64` (D612), with a `.sha256`
 // beside it. Stable releases are tagged `vVERSION` and are what `releases/latest` points to;
 // nightlies replace the `nightly` release on every push to main that passes CI, and upload
-// version.txt last, so the archive it names is already there. An x64 installation that Windows
-// or macOS translates on an Arm processor updates to the Arm build where the release has one,
-// even at the same version.
+// version.txt last, so the archive it names is already there. Each nightly is a release of its
+// own too, `vVERSION`, a prerelease that's never deleted, so `--to` finds any nightly however
+// old. A nightly from before that is only in `nightly`, which keeps the newest two, so that's
+// where it looks for a nightly without a release of its own. An x64 installation that Windows or
+// macOS translates on an Arm processor updates to the Arm build where the release has one, even
+// at the same version.
 //
 // A release's archive can name, in toolchain.txt, the toolchain it builds programs with: an
 // archive of its own in the release, `calx-toolchain-NAME-OS-CPU.tar.xz`, its SHA-256, and its
@@ -119,9 +122,8 @@ fn run(o: Options, l: Look) ! String {
         }
         return
     }
-    let tag = tag_of(target)
     let ext = if windows { "zip" } else { "tar.gz" }
-    let cpu = processor(target, tag, ext)
+    let (cpu, tag) = try processor(target, ext)
     // An x64 installation that the system translates on an Arm processor moves to the Arm build,
     // even to the same version.
     let moving = cpu != built_for()
@@ -221,25 +223,49 @@ fn archive_cpu(name: String) -> String {
     return if name == "aarch64" { "arm64" } else { "x64" }
 }
 
-// The processor the update's build is for: the installation's, unless Windows or macOS
-// translates it on an Arm processor and the release has an Arm build, which runs natively there
-// in its place (CLX-276). Not every release has one, so the Arm build's SHA-256 is asked for
-// first.
-fn processor(target: String, tag: String, ext: String) -> String {
+// The processor the update's build is for, and the release that has it: the installation's
+// processor, unless Windows or macOS translates it on an Arm processor and the release has an Arm
+// build, which runs natively there in its place (CLX-276). Not every release has one, so the Arm
+// build is looked for first.
+fn processor(target: String, ext: String) -> (String, String) ! String {
     let built = built_for()
-    if native_arch() == arch() {
-        return built
+    if native_arch() != arch() {
+        let native = archive_cpu(native_arch())
+        if let tag = try holder(target, "calx-{target}-{os()}-{native}.{ext}") {
+            return (native, tag)
+        }
     }
-    let native = archive_cpu(native_arch())
-    return match fetch("{releases()}/download/{tag}/calx-{target}-{os()}-{native}.{ext}.sha256", 30000, 4096) {
-        ok(_) => native,
-        err(_) => built,
-    }
+    let file = "calx-{target}-{os()}-{built}.{ext}"
+    let tag = (try holder(target, file)) else fail missing(target, file)
+    return (built, tag)
 }
 
-// The release a version is in: `nightly` for a nightly, `vVERSION` for the others.
-fn tag_of(version: String) -> String {
-    return if version.contains("-nightly.") { String("nightly") } else { "v{version}" }
+// The release that has `file` of `version`, as the .sha256 beside it shows, or none if none has:
+// its own, `vVERSION`, or for a nightly from before nightlies had their own, `nightly`,
+// which keeps the newest two. A server that can't be reached is an error, not a missing file.
+fn holder(version: String, file: String) -> String? ! String {
+    var tags = List<String>()
+    tags.push("v{version}")
+    if version.contains("-nightly.") {
+        tags.push(String("nightly"))
+    }
+    for tag in tags {
+        match fetch("{releases()}/download/{tag}/{file}.sha256", 30000, 4096) {
+            ok(_) => return some(tag.copy()),
+            err(e) => {
+                if not e.ends_with(" answered 404") and not e.ends_with(" answered 403") {
+                    fail e
+                }
+            },
+        }
+    }
+    return none
+}
+
+// Why `file` of `version` can't be had: no release has it.
+fn missing(version: String, file: String) -> String {
+    let nightly = if version.contains("-nightly.") { " or nightly" } else { "" }
+    return "neither the release v{version}{nightly} at {releases()} has {file}, so there's no calx {version} for this system"
 }
 
 // What a release's toolchain.txt says: the toolchain's archive, its SHA-256 and its VERSION.
@@ -344,7 +370,12 @@ fn install_toolchain(o: Options, l: Look) ! String {
         return
     }
     let work = "{o.home}/.update"
-    let dir = try fetch_toolchain(o.home, o.home, tag_of(o.current), work, l)
+    // Which release has it is asked only if it's needed.
+    var dir = String()
+    if installed_toolchain(o.home) != note.name {
+        let tag = (try holder(o.current, note.file)) else fail missing(o.current, note.file)
+        dir = try fetch_toolchain(o.home, o.home, tag, work, l)
+    }
     if dir.is_empty() {
         if installing() {
             return
