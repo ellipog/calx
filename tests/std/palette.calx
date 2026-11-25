@@ -498,6 +498,23 @@ fn at_once() {
     println("{p.palette} {loaded.counts()} {packs_by_hand(loaded, 4096, 4, 8)}")    // out: [5, 9, 3] [(5, 1024), (9, 1024), (5, 1024), (3, 1024)] true
 }
 
+// `recreate` keeps the palette's first value, unused or not, or ID 0 with no palette.
+fn recreated() {
+    let s = Strategy.biomes(64)
+    var c = PalettedContainer.new(3, s)
+    for i in 0usize..64 {
+        c.set_at(i, 9)
+    }
+    let r = c.recreate()
+    println("{r.counts()} {r.bits()}")    // out: [(3, 64)] 0
+    var g = PalettedContainer.new(1, s)
+    for i in 0usize..64 {
+        g.set_at(i, u32.wrap(i))
+    }
+    let h = g.recreate()
+    println("{g.bits()} {h.counts()} {h.bits()}")    // out: 6 [(0, 64)] 0
+}
+
 fn main() {
     storage()
     strategies()
@@ -508,4 +525,5 @@ fn main() {
     mapped()
     aligned()
     at_once()
+    recreated()
 }

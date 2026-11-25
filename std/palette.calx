@@ -528,6 +528,14 @@ impl PalettedContainer {
         return c
     }
 
+    /// A container of the same strategy with its palette's first value everywhere, ID 0 where
+    /// it has no palette, as vanilla's `recreate` makes one to be filled again, so the values set
+    /// after keep the palette's order vanilla's would.
+    pub fn recreate(self) -> PalettedContainer {
+        let first = if self.global { 0u32 } else { self.palette.entries[0] }
+        return PalettedContainer.new(first, self.strategy)
+    }
+
     /// The value at `x`, `y`, `z`. Panics as `Strategy.index` does.
     @track_caller
     pub fn get(self, x: i32, y: i32, z: i32) -> u32 {

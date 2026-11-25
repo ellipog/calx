@@ -57,6 +57,7 @@ fn main() {
 | `strategy.index(x: i32, y: i32, z: i32) -> usize` | Where a position is among the values: `y`, then `z`, then `x`, as Minecraft orders them. Panics unless each is inside the container |
 | `PalettedContainer.new(value: u32, strategy: Strategy) -> PalettedContainer` | A container of `value` everywhere |
 | `PalettedContainer.from_values(first: u32, strategy: Strategy, values: List<u32>) -> PalettedContainer` | The container `new(first, strategy)` becomes when `set_at` sets each index to its value in order: the same palette in the same order, at the same bits. It takes a pass to find the palette and one to pack the values, so it's much faster than setting them one by one. Panics unless there's a value for each index and each is in the registry |
+| `c.recreate() -> PalettedContainer` | A container of the same strategy with the palette's first value everywhere, used or not, or ID 0 with no palette, as vanilla's `recreate` makes one to fill again |
 | `c.get(x, y, z) -> u32`, `c.get_at(i: usize) -> u32` | The value at a position, or at an index |
 | `c.set(x, y, z, value: u32)`, `c.set_at(i: usize, value: u32)` | Sets a value, growing the palette if it's new |
 | `c.get_and_set(x, y, z, value: u32) -> u32`, `c.get_and_set_at(i, value) -> u32` | Sets a value, and gives the one it replaced |
