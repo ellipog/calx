@@ -257,8 +257,8 @@ if ($native -eq 'ARM64') {
 $file = "calx-$version-windows-$cpu.zip"
 if (-not $tag) { $tag = Find-Release $file }
 if (-not $tag) {
-    $nightly = if ($version -match '-nightly\.') { ' or nightly' } else { '' }
-    Stop-Install "neither the release v$version$nightly at $releases has $file, so there's no Calx $version for Windows"
+    $nightly = if ($version -match '-nightly\.') { ', nor in nightly' } else { '' }
+    Stop-Install "there's no Calx $version for Windows: $file isn't in the release v$version at $releases$nightly"
 }
 $url = "$releases/download/$tag/$file"
 

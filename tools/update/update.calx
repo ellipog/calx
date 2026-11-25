@@ -250,7 +250,8 @@ fn holder(version: String, file: String) -> String? ! String {
         tags.push(String("nightly"))
     }
     for tag in tags {
-        match fetch("{releases()}/download/{tag}/{file}.sha256", 30000, 4096) {
+        // GitHub answers a file that isn't there with a page of its own, bigger than a .sha256.
+        match fetch("{releases()}/download/{tag}/{file}.sha256", 30000, 1 << 22) {
             ok(_) => return some(tag.copy()),
             err(e) => {
                 if not e.ends_with(" answered 404") and not e.ends_with(" answered 403") {
@@ -264,8 +265,8 @@ fn holder(version: String, file: String) -> String? ! String {
 
 // Why `file` of `version` can't be had: no release has it.
 fn missing(version: String, file: String) -> String {
-    let nightly = if version.contains("-nightly.") { " or nightly" } else { "" }
-    return "neither the release v{version}{nightly} at {releases()} has {file}, so there's no calx {version} for this system"
+    let nightly = if version.contains("-nightly.") { ", nor in nightly" } else { "" }
+    return "there's no calx {version} for this system: {file} isn't in the release v{version} at {releases()}{nightly}"
 }
 
 // What a release's toolchain.txt says: the toolchain's archive, its SHA-256 and its VERSION.
