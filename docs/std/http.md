@@ -7,7 +7,7 @@ description: HTTP and HTTPS requests on the system's own client, WinHTTP on Wind
 
 GET and POST over HTTP and HTTPS, in HTTP/1.1 or [HTTP/2](#http2). An online-mode server uses it to ask Mojang's session server whether a player who's logging in has joined.
 
-Requests go through the system's own client, so the system checks certificates against the roots it trusts, as browsers do: WinHTTP on Windows, URLSession on iOS, and libcurl on Linux and macOS. To answer requests rather than make them, there's [std.http.server](http-server.md), and to talk to a WebSocket, [std.http.websocket](http-websocket.md).
+Requests go through the system's own client, so the system checks certificates against the roots it trusts, as browsers do: WinHTTP on Windows, URLSession on iOS, and libcurl on Linux and macOS. To answer requests rather than make them, there's [std.http.server](http-server.md), to talk to a WebSocket, [std.http.websocket](http-websocket.md), and to read server-sent events, [std.http.sse](http-sse.md), over the [streams](#reading-a-response-as-it-comes) below.
 
 A script that only wants what's at a URL calls `fetch`, which waits for the answer:
 
@@ -113,6 +113,69 @@ loop {
 ```
 
 It wakes it from the thread that finished the request, and at once if it had finished already. A later `wake_on` wakes the `Net` it's given instead. [`std.http.server`](http-server.md#clients-requests-and-programs-on-the-same-loop) has a whole loop.
+
+## Reading a response as it comes
+
+`get` and `post` give the body once it has all come, so a response that never ends, such as an event stream, can't be read with them. `stream_get` and `stream_post` start a request whose status and headers can be read first, then its body a part or a line at a time as it comes, until the server ends it or the program closes it, as Python's `httpx.stream` does. A GET of a live feed, which prints its first lines and stops:
+
+```calx
+import std.env.{args}
+import std.http.{Header, stream_get}
+
+fn main() {
+    let a = args()
+    if a.is_empty() {
+        println("give the URL of a feed, such as https://stream.wikimedia.org/v2/stream/recentchange")    // out: give the URL of a feed, such as https://stream.wikimedia.org/v2/stream/recentchange
+        return
+    }
+    var s = stream_get(a[0].copy(), [Header { name: "Accept", value: "text/event-stream" }])
+    match s.head() {
+        ok(head) => println("{head.status} {head.header("content-type") ?? "no type"}"),
+        err(e) => {
+            println("no response: {e}")
+            return
+        }
+    }
+    for _ in 0..5 {
+        match s.read_line() {
+            ok(some(line)) => println(line),
+            ok(none) => break,
+            err(e) => {
+                println("ended: {e}")
+                break
+            }
+        }
+    }
+    s.close()    // the server hears the connection close
+}
+```
+
+A POST is the same, with its body, as an MCP client's `subscriptions/listen` is answered with an event stream:
+
+```
+var s = stream_post(url, [Header { name: "Content-Type", value: "application/json" }], request.to_bytes())
+let head = try s.head()
+while let line = try s.read_line() {
+    ...
+}
+```
+
+| Item | Gives |
+| --- | --- |
+| `stream_get(url: String, headers: List<Header> = [], timeout_ms: u32 = 30000, read_timeout_ms: u32 = 0, version: Version = Version.Http1) -> Stream` | Starts a GET whose body is read as it comes, and gives it at once, while it connects on its own thread. The status and headers may take `timeout_ms` to come; after them there's no limit on how long the body takes or how long it is. With `read_timeout_ms`, a read that waits that long with nothing coming fails with `Timeout`, as httpx's read timeout does, and 0 waits as long as it takes. Panics as `get` does |
+| `stream_post(url: String, headers: List<Header>, body: List<u8>, timeout_ms: u32 = 30000, read_timeout_ms: u32 = 0, version: Version = Version.Http1) -> Stream` | Starts a POST of `body` whose answer is read as it comes |
+| `s.head() -> Head ! Error` | Waits for the status and header lines and gives them, or fails with why no response came: `Timeout` if they didn't come in `timeout_ms` |
+| `Head { status: u32, headers: List<Header>, version: String }`, `head.header(name) -> String?` | As a `Response` has them. On iOS, `version` is `HTTP/1.1` whichever it was, as URLSession says only at the end |
+| `s.read() -> List<u8>? ! Error` | All of the body that has come and hasn't been given, waiting for some, or `none` once it has ended |
+| `s.read_line() -> String? ! Error` | The next line, without the LF, CRLF or CR that ends it, waiting until it has all come, or `none` once the body has ended. A last line with no end is given as it is. Bytes that aren't UTF-8 are read as U+FFFD |
+| `s.ready() -> bool` | Whether `read` would give something, or say the body has ended, without waiting |
+| `s.line_ready() -> bool ! Error` | Whether `read_line` would give a line, or say the body has ended, without waiting |
+| `s.wake_on(waker: Waker)` | Wakes the `Net` as the headers come, each time some of the body does, and as it ends, for a loop that reads what's `ready` |
+| `s.close()` | Closes the connection, whether or not the body has ended, so the server hears the program has stopped. Dropping the stream does the same |
+
+- A read fails with `Protocol` if the connection ended before the body did, as when the server went away. After a `Timeout` from `read_timeout_ms`, it can be read again.
+- A stream keeps up to 1 MiB of the body that the program hasn't read, then stops reading from the server until it has, so the server waits for a program that reads slowly, as TCP's window makes it: on Windows its thread waits, and on Linux and macOS libcurl pauses the transfer. URLSession can't make a server wait, so on iOS the body is kept as it comes.
+- An HTTP/1.1 stream's connection isn't kept for other requests once it's closed, so closing it always closes the connection, rather than leaving the system's client to read on to the end of a body that may have none.
 
 ## HTTP/2
 
@@ -247,6 +310,8 @@ Header values that aren't ASCII are read as Latin-1, as Java reads them, and giv
 The [tests](../../tests/std/http.calx) run a server on [`std.net`](net.md) in the same program, and make requests to it on loopback. They check status codes, headers in both directions, POST bodies, a redirect, an empty 204, a body over the limit, a server that never answers, one that doesn't answer in HTTP, and URLs that aren't HTTP. They give the same results on Windows and Linux.
 
 [Others](../../tests/std/http_version.calx) check kept connections and timings over HTTP/1.1, that `Http2` is HTTP/1.1 over `http://`, and, with a server that speaks enough HTTP/2 to answer a GET, that two `Http2Only` requests go over one h2c connection at once, the server answering neither until both have come. WinHTTP has no h2c, so on Windows that part checks that the requests are `Unavailable`, and so does it on iOS.
+
+[tests/std/http_stream.calx](../../tests/std/http_stream.calx) checks streams against a server in the same program: a chunked body whose lines are split across chunks and end in CRLF, CR or LF, with a CRLF whose LF comes in the next chunk; a body with a Content-Length read as its parts come, with `ready`; a POST answered with a stream, which the client closes while the server is still sending, and the server hears the connection close; 8 MiB sent at once, which comes whole and in order while the stream holds 1 MiB of it at a time; headers that never come, which time out; and [server-sent events](http-sse.md). It gives the same results on Windows and Linux. Against the real services, Wikimedia's EventStreams feed was followed over TLS, in HTTP/1.1 and HTTP/2, and a POST to httpbin was read as it came, on both systems.
 
 [tests/std/http_ios.calx](../../tests/std/http_ios.calx) builds std.http's and std.net's tests for the iOS simulator and runs them there, on a Mac with Xcode. Each gives what it gives on the other systems, except for the `Accept` URLSession adds. From the simulator, `https://example.com` gave 200 over HTTP/2 with its timings, and `self-signed.badssl.com` gave `Tls`.
 

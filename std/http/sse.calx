@@ -1,0 +1,399 @@
+/// Server-sent events (the HTML standard's `text/event-stream`), read as they come over a
+/// `std.http` stream, as a browser's `EventSource` and Python's `httpx_sse` read them: each event's
+/// type, its data with its lines joined, its ID, and its retry time, with a reconnect that sends
+/// `Last-Event-ID` so the server can go on from the last event the program had.
+module std.http.sse
+
+import std.http.{Error as HttpError, Head, Header, Stream, Version, stream_get, stream_post}
+import std.net.waker.{Waker}
+import std.thread.{sleep}
+
+/// An event, as the server sent it: the lines from one blank line to the next.
+pub struct Event {
+    /// Its type, from its `event:` line, or `message` if it had none.
+    pub event: String,
+    /// Its `data:` lines, joined with line feeds.
+    pub data: String,
+    /// The last event ID the stream had given by this event, from this event's `id:` line or an
+    /// earlier one's, as a browser's `lastEventId`. Empty if none had one.
+    pub id: String,
+    /// Its `retry:` line's milliseconds, if it had one.
+    pub retry: u32?,
+}
+
+/// Why the events stopped, or didn't start.
+pub enum Error {
+    /// No answer came, or the connection ended with an error, as `std.http` says why.
+    Http(HttpError)
+    /// The server answered with something other than an event stream: a status other than 200,
+    /// or a Content-Type other than `text/event-stream`. Its headers and its body, up to 16 MiB,
+    /// are here, such as a JSON answer to a request that could have had either.
+    NotEvents(Head, List<u8>)
+}
+
+/// What went wrong, in words: `timed out`, or `the server answered 404 with text/html, not an
+/// event stream`.
+impl Display for Error {
+    fn show(self) {
+        match self {
+            Http(e) => print("{e}"),
+            NotEvents(head, _) => print("the server answered {head.status} with {head.header("content-type") ?? "no Content-Type"}, not an event stream"),
+        }
+    }
+}
+
+/// Events from a server, over a connection kept open, for as long as it sends them. It's a
+/// handle, as the stream it reads is: closing it, or dropping it, closes the connection.
+pub struct EventSource {
+    // `none` only while `reconnect` waits, the last one closed.
+    stream: Stream?,
+    answered: Head,
+    // What it asks for, to ask again in `reconnect`.
+    is_post: bool,
+    url: String,
+    headers: List<Header>,
+    body: List<u8>,
+    timeout_ms: u32,
+    read_timeout_ms: u32,
+    version: Version,
+    // The event being read: its data lines, each followed by a LF, its type and its retry.
+    data: String,
+    has_data: bool,
+    event: String,
+    retry: u32?,
+    // The ID buffer, which lines set, and the last event ID, which the end of an event sets.
+    id: String,
+    last: String,
+    wait_ms: u32,
+    // The next line is the stream's first, which may start with a byte order mark.
+    first: bool,
+    // Events `ready` read that `next` hasn't given.
+    queued: List<Event>,
+    ended: bool,
+}
+
+// Whether a Content-Type is text/event-stream, with any parameters after it.
+fn is_event_stream(content_type: String) -> bool {
+    let t = content_type.to_lower_root()
+    let end = t.find(";") ?? t.len()
+    return t[..end].trim() == "text/event-stream"
+}
+
+// The digits as milliseconds, or none if they aren't all ASCII digits, as the standard reads a
+// retry line. More than u32 holds is the most it holds.
+fn digits(value: String) -> u32? {
+    if value.is_empty() {
+        return none
+    }
+    var n: u64 = 0
+    for i in 0..value.len() {
+        let b = value.byte_at(i)
+        if b < 48 or b > 57 {
+            return none
+        }
+        n = (n * 10 + u64(b - 48)).min(4294967295)
+    }
+    return some(u32.wrap(n))
+}
+
+// The request's header lines, with an Accept and a Cache-Control that ask for events unless the
+// program gave its own, and the Last-Event-ID.
+fn asking(headers: List<Header>, last_id: String) -> List<Header> {
+    var all = List<Header>()
+    var accept = false
+    var cache = false
+    for h in headers {
+        let name = h.name.to_lower_root()
+        if name == "accept" {
+            accept = true
+        }
+        if name == "cache-control" {
+            cache = true
+        }
+        if name != "last-event-id" {
+            all.push(Header { name: h.name.copy(), value: h.value.copy() })
+        }
+    }
+    if not accept {
+        all.push(Header { name: "Accept", value: "text/event-stream" })
+    }
+    if not cache {
+        all.push(Header { name: "Cache-Control", value: "no-cache" })
+    }
+    if not last_id.is_empty() {
+        all.push(Header { name: "Last-Event-ID", value: last_id.copy() })
+    }
+    return all
+}
+
+// Opens the stream and checks that its answer is an event stream.
+@track_caller
+fn start(is_post: bool, url: String, headers: List<Header>, body: List<u8>, timeout_ms: u32, read_timeout_ms: u32, version: Version) -> (Stream, Head) ! Error {
+    var s = if is_post {
+        stream_post(url, headers, body, timeout_ms, read_timeout_ms, version)
+    } else {
+        stream_get(url, headers, timeout_ms, read_timeout_ms, version)
+    }
+    let head = match s.head() {
+        ok(h) => h,
+        err(e) => fail Error.Http(e),
+    }
+    if head.status != 200 or not is_event_stream(head.header("content-type") ?? String()) {
+        var rest = List<u8>()
+        loop {
+            match s.read() {
+                ok(some(part)) => {
+                    rest.extend(part)
+                    if rest.len() >= 16777216 {
+                        rest.truncate(16777216)
+                        break
+                    }
+                }
+                ok(none) => break,
+                err(_) => break,
+            }
+        }
+        s.close()
+        fail Error.NotEvents(head, rest)
+    }
+    return (s, head)
+}
+
+@track_caller
+fn source(is_post: bool, url: String, headers: List<Header>, body: List<u8>, timeout_ms: u32, read_timeout_ms: u32, version: Version) -> EventSource ! Error {
+    let (s, head) = try start(is_post, url, asking(headers, String()), body, timeout_ms, read_timeout_ms, version)
+    var kept = List<Header>()
+    for h in headers {
+        kept.push(Header { name: h.name.copy(), value: h.value.copy() })
+    }
+    return EventSource {
+        stream: some(s),
+        answered: head,
+        is_post: is_post,
+        url: url.copy(),
+        headers: kept,
+        body: body.copy(),
+        timeout_ms: timeout_ms,
+        read_timeout_ms: read_timeout_ms,
+        version: version,
+        data: String(),
+        has_data: false,
+        event: String(),
+        retry: none,
+        id: String(),
+        last: String(),
+        wait_ms: 3000,
+        first: true,
+        queued: List<Event>(),
+        ended: false,
+    }
+}
+
+/// GETs `url` for its events, with the header lines, and waits for the server to answer, as a
+/// browser's `new EventSource(url)` does. It sends `Accept: text/event-stream` and
+/// `Cache-Control: no-cache` unless `headers` has its own. Fails with `NotEvents` if the answer
+/// isn't an event stream, and with `Http` if none came within `timeout_ms`. With
+/// `read_timeout_ms`, `next` fails with `Timeout` once nothing has come for that long, which a
+/// server that sends comments to keep the connection open never lets happen. Panics as
+/// `std.http.get` does.
+@track_caller
+pub fn connect(url: String, headers: List<Header> = [], timeout_ms: u32 = 30000, read_timeout_ms: u32 = 0, version: Version = Version.Http1) -> EventSource ! Error {
+    return try source(false, url, headers, List<u8>(), timeout_ms, read_timeout_ms, version)
+}
+
+/// POSTs `body` to `url` and reads the events it's answered with, as `connect` does, as MCP's
+/// `subscriptions/listen` is answered. Give a Content-Type header for the body. A server that
+/// may answer with JSON instead gives it in `NotEvents`.
+@track_caller
+pub fn connect_post(url: String, headers: List<Header>, body: List<u8>, timeout_ms: u32 = 30000, read_timeout_ms: u32 = 0, version: Version = Version.Http1) -> EventSource ! Error {
+    return try source(true, url, headers, body, timeout_ms, read_timeout_ms, version)
+}
+
+impl EventSource {
+    /// The status and header lines the server answered with, the last time it connected.
+    pub fn head(self) -> Head {
+        return Head { status: self.answered.status, headers: self.answered.headers.copy(), version: self.answered.version.copy() }
+    }
+
+    /// The ID of the last event, from the last `id:` line before it, which `reconnect` sends in
+    /// `Last-Event-ID`. Empty if there's been none.
+    pub fn last_id(self) -> String {
+        return self.last.copy()
+    }
+
+    /// How long `reconnect` waits before it connects again: 3000 milliseconds, as browsers wait,
+    /// until a `retry:` line says otherwise.
+    pub fn retry_ms(self) -> u32 {
+        return self.wait_ms
+    }
+
+    // Reads one line of the stream, as the standard's event stream interpretation does, and
+    // gives the event it ends, if it ends one.
+    fn line(mut self, text: own String) -> Event? {
+        var line = text
+        if self.first {
+            self.first = false
+            if line.starts_with("\u{FEFF}") {
+                line = line[3..]
+            }
+        }
+        if line.is_empty() {
+            self.last = self.id.copy()
+            let retry = self.retry
+            self.retry = none
+            if not self.has_data {
+                self.event = String()
+                return none
+            }
+            var data = self.data.copy()
+            data.truncate(data.len() - 1)
+            let kind = if self.event.is_empty() { String("message") } else { self.event.copy() }
+            self.data = String()
+            self.has_data = false
+            self.event = String()
+            return some(Event { event: kind, data: data, id: self.last.copy(), retry: retry })
+        }
+        if line.starts_with(":") {
+            return none
+        }
+        let colon = line.find(":") ?? line.len()
+        let field = line[..colon]
+        var value = if colon < line.len() { line[colon + 1..] } else { String() }
+        if value.starts_with(" ") {
+            value = value[1..]
+        }
+        if field == "event" {
+            self.event = value
+        } else if field == "data" {
+            self.data.push_str(value)
+            self.data.push_str("\n")
+            self.has_data = true
+        } else if field == "id" {
+            if not value.contains("\0") {
+                self.id = value
+            }
+        } else if field == "retry" {
+            match digits(value) {
+                some(ms) => {
+                    self.wait_ms = ms
+                    self.retry = some(ms)
+                }
+                none => {}
+            }
+        }
+        return none
+    }
+
+    // The stream's next line, or none once it has ended.
+    fn read_line(mut self) -> String? ! Error {
+        let taken = self.stream.take() else return none
+        var s = taken
+        match s.read_line() {
+            ok(line) => {
+                self.stream = some(s)
+                return line
+            }
+            err(e) => {
+                self.stream = some(s)
+                fail Error.Http(e)
+            }
+        }
+    }
+
+    // Whether the stream's next line has come, or it has ended.
+    fn line_ready(mut self) -> bool ! Error {
+        let taken = self.stream.take() else return true
+        var s = taken
+        match s.line_ready() {
+            ok(ready) => {
+                self.stream = some(s)
+                return ready
+            }
+            err(e) => {
+                self.stream = some(s)
+                fail Error.Http(e)
+            }
+        }
+    }
+
+    /// The next event, waiting for it, or `none` once the server has ended the stream. An event
+    /// cut off by the end isn't given, as the standard says. Fails if the connection ended with
+    /// an error, or nothing came for `read_timeout_ms`; `reconnect` connects again after either.
+    pub fn next(mut self) -> Event? ! Error {
+        if not self.queued.is_empty() {
+            return some(self.queued.remove(0))
+        }
+        while not self.ended {
+            match try self.read_line() {
+                some(text) => {
+                    match self.line(text) {
+                        some(ev) => return some(ev),
+                        none => {}
+                    }
+                }
+                none => self.ended = true,
+            }
+        }
+        return none
+    }
+
+    /// Whether `next` would give an event, or say the stream has ended, without waiting: for a
+    /// loop that does other work, with `wake_on`. It reads what has come, so it can fail as
+    /// `next` does.
+    pub fn ready(mut self) -> bool ! Error {
+        while self.queued.is_empty() and not self.ended {
+            if not try self.line_ready() {
+                return false
+            }
+            match try self.read_line() {
+                some(text) => {
+                    match self.line(text) {
+                        some(ev) => self.queued.push(ev),
+                        none => {}
+                    }
+                }
+                none => self.ended = true,
+            }
+        }
+        return true
+    }
+
+    /// Wakes `waker`'s `Net` as events come, as `Stream.wake_on` does, so a loop hears of them
+    /// and takes each that's `ready` with `next`.
+    pub fn wake_on(self, waker: Waker) {
+        match self.stream {
+            some(s) => s.wake_on(waker),
+            none => {}
+        }
+    }
+
+    /// Closes the connection, waits `retry_ms`, and makes the request again, with the last
+    /// event's ID in `Last-Event-ID` if there's been one, so the server can send what came after
+    /// it, as a browser does once a stream ends. It's the same request, a POST's body and all.
+    /// Events that had come and weren't read are dropped. Fails as `connect` does.
+    pub fn reconnect(mut self) ! Error {
+        self.queued.clear()
+        self.stream = none
+        unsafe {
+            sleep(u64(self.wait_ms) * 1000000)
+        }
+        let (s, head) = try start(self.is_post, self.url, asking(self.headers, self.last), self.body.copy(), self.timeout_ms, self.read_timeout_ms, self.version)
+        self.stream = some(s)
+        self.answered = head
+        self.data = String()
+        self.has_data = false
+        self.event = String()
+        self.retry = none
+        self.id = self.last.copy()
+        self.first = true
+        self.ended = false
+    }
+
+    /// Closes the connection, so the server hears the program has stopped. Dropping it does the
+    /// same.
+    pub fn close(own self) {
+        var es = self
+        let s = es.stream.take() else return
+        s.close()
+    }
+}

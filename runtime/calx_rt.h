@@ -1142,6 +1142,20 @@ CX_FN(cx_u64, cx_http_expected, (cx_u64 h));
 /* Wakes the poller `net`, through the hooks `cx_net_hooks` gave, once the request has finished, or
  * at once if it has (CLX-440). A request that was freed is left alone. */
 CX_FN(void, cx_http_wake_on, (cx_u64 h, cx_usize hooks, cx_u64 net));
+/* Streams, whose body is read as it comes (CLX-459): `cx_http_open` starts one as `cx_http_start`
+ * does, its timeout for the headers alone. `cx_http_stream_head` waits for its headers, which the
+ * getters then give, and gives 0 or what went wrong. `cx_http_stream_read` takes what has come of
+ * the body into `cx_http_taken`, waiting up to `timeout_ms`, or forever if it's negative: 1 if it
+ * took some, 0 if none came in the time, 2 once the body has ended, or an error negated.
+ * `cx_http_stream_close` closes one and frees it; it's the only way a stream is freed. */
+CX_FN(cx_u64, cx_http_open, (cx_bool post, const cx_u8* url, cx_usize url_len, const cx_u8* head, cx_usize head_len, const cx_u8* body,
+                             cx_usize body_len, cx_u32 timeout_ms, cx_u32 version));
+CX_FN(cx_i32, cx_http_stream_head, (cx_u64 h));
+CX_FN(cx_i32, cx_http_stream_read, (cx_u64 h, cx_i64 timeout_ms));
+CX_FN(cx_bool, cx_http_stream_ready, (cx_u64 h));
+CX_FN(cx_usize, cx_http_taken_len, (cx_u64 h));
+CX_FN(void, cx_http_taken, (cx_u64 h, cx_u8* out));
+CX_FN(void, cx_http_stream_close, (cx_u64 h));
 /* WebSockets, behind std.http.websocket (CLX-320), in calx_http.c: a connection on a thread of its
  * own, its messages taken from a queue. `cx_http_ws_receive` gives a message's opcode, 1 for text
  * and 2 for binary, with its bytes for `cx_http_ws_taken`; 0 if none came in the time; or what the

@@ -1,0 +1,321 @@
+// Responses read as they come (CLX-459), from a server on std.net in the same program, on
+// loopback: bodies in chunks that split lines, a body that ends, a POST answered with a stream,
+// a stream the client closes while the server is still sending, and server-sent events with
+// multi-line data, IDs and retry times, read on until the server ends them, and then again from
+// where they stopped, with Last-Event-ID.
+
+import std.http.{Error as HttpError, Header, Stream, stream_get, stream_post}
+import std.http.sse.{Event, Error as SseError, connect, connect_post}
+import std.net.{Conn, Event as NetEvent, Net}
+import std.thread.{Task}
+
+// The value of a header in a request the server got, or "none".
+fn asked(head: String, name: String) -> String {
+    let lower = head.to_lower_root()
+    let at = lower.find("\r\n{name}:") ?? lower.len()
+    if at == lower.len() {
+        return "none"
+    }
+    let rest = head[at + name.len() + 3..]
+    let end = rest.find("\r\n") ?? rest.len()
+    var value = rest[..end]
+    while value.starts_with(" ") {
+        value = value[1..]
+    }
+    return value
+}
+
+// Whether the bytes are a whole request: the head, and as much body as it says.
+fn whole(text: String) -> bool {
+    let head_end = text.find("\r\n\r\n") ?? text.len()
+    if head_end == text.len() {
+        return false
+    }
+    let n = asked(text[..head_end + 2], "content-length")
+    var want: usize = 0
+    if n != "none" {
+        for i in 0..n.len() {
+            want = want * 10 + usize(n.byte_at(i) - 48)
+        }
+    }
+    return text.len() >= head_end + 4 + want
+}
+
+// The server's side: its `Net`, and the connections that have closed, which any poll can hear of.
+struct Wire {
+    net: Net
+    gone: List<usize>
+    got: List<u8>
+}
+
+impl Wire {
+    // Polls once, keeping the closes it hears of, and gives the connections bytes came on.
+    fn poll(mut self, timeout_ms: i64) -> List<Conn> {
+        var events = List<NetEvent>()
+        var came = List<Conn>()
+        self.net.poll(timeout_ms, mut events)
+        for e in events {
+            match e {
+                Received(c) => came.push(c),
+                Closed(c) => self.gone.push(c.slot()),
+                _ => {}
+            }
+        }
+        return came
+    }
+
+    // Polls until a whole request has come on a connection, and gives the connection and the
+    // request.
+    fn request(mut self) -> (Conn, String) {
+        for _ in 0..4000 {
+            for c in self.poll(5) {
+                _ = self.net.read(c, mut self.got)
+                let text = String.from_utf8(self.got.copy()) ?? String()
+                if whole(text) {
+                    self.got.clear()
+                    self.gone.retain(|s| s != c.slot())
+                    return (c, text)
+                }
+            }
+        }
+        panic("no request came")
+    }
+
+    // Polls until the connection has closed.
+    fn closed(mut self, conn: Conn) -> bool {
+        for _ in 0..4000 {
+            if self.gone.contains(conn.slot()) {
+                return true
+            }
+            _ = self.poll(5)
+        }
+        return false
+    }
+
+    // Sends the text, polling until the system has taken it all, since the client may read on
+    // this thread next, which would leave what's queued waiting for a poll.
+    fn send(mut self, conn: Conn, text: String) {
+        self.net.write(conn, text.to_bytes())
+        self.net.flush()
+        var polls = 0
+        while self.net.queued(conn) > 0 and polls < 4000 {
+            _ = self.poll(1)
+            polls += 1
+        }
+    }
+}
+
+// The text as one chunk of a chunked body.
+fn chunk(text: String) -> String {
+    let digits = "0123456789abcdef"
+    var hex = String()
+    var n = text.len()
+    while n > 0 or hex.is_empty() {
+        hex = "{digits[n % 16..n % 16 + 1]}{hex}"
+        n /= 16
+    }
+    return "{hex}\r\n{text}\r\n"
+}
+
+fn line(s: mut Stream) -> String {
+    return match s.read_line() {
+        ok(some(l)) => "[{l}]",
+        ok(none) => String("end"),
+        err(e) => "{e}",
+    }
+}
+
+fn bytes(s: mut Stream) -> String {
+    return match s.read() {
+        ok(some(b)) => String.from_utf8(b) ?? String("not UTF-8"),
+        ok(none) => String("end"),
+        err(e) => "{e}",
+    }
+}
+
+fn show(ev: Event) -> String {
+    let retry = match ev.retry {
+        some(ms) => "{ms}",
+        none => String("-"),
+    }
+    return "{ev.event} [{ev.data.replace("\n", "|")}] id={ev.id} retry={retry}"
+}
+
+// Serves events on a thread of its own, since connecting again waits for the answer: a first
+// stream that ends, then the stream the client asks for again, which the client closes. What it
+// heard goes back to the main thread, which prints it.
+struct Events {
+    wire: Wire
+    heard: Sender<String>
+}
+
+impl Task for Events {
+    fn run(own self) {
+        var wire = self.wire
+        var heard = self.heard
+        let (first, req) = wire.request()
+        heard.send("accept={asked(req, "accept")} cache={asked(req, "cache-control")} last={asked(req, "last-event-id")}")
+        wire.send(first, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nTransfer-Encoding: chunked\r\n\r\n")
+        // A byte order mark, a comment, a retry time, then an event of two data lines.
+        wire.send(first, chunk("\u{FEFF}: hello\n\nretry: 5\nid: 1\nevent: greet\ndata: hello\ndata:  world\n\n"))
+        // An event split across chunks, with CRLF, then one with CR alone, with an empty data line.
+        wire.send(first, chunk("data: sec"))
+        wire.send(first, chunk("ond\r\n\r"))
+        wire.send(first, chunk("\nid: 2\rdata\r\r"))
+        // An ID alone sets the last event ID, and an event the stream ends in the middle of is
+        // dropped.
+        wire.send(first, chunk("id: 3\n\ndata: cut off\n"))
+        wire.send(first, "0\r\n\r\n")
+        let (second, again) = wire.request()
+        heard.send("again: last={asked(again, "last-event-id")}")
+        wire.send(second, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+        wire.send(second, chunk("id: 4\ndata: four\n\n"))
+        heard.send("closed={wire.closed(second)}")
+        // A POST answered with JSON rather than events.
+        let (third, posted) = wire.request()
+        let at = posted.find("\r\n\r\n") ?? 0
+        let json = "\{\"echo\":{posted[at + 4..]}\}"
+        wire.send(third, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {json.len()}\r\n\r\n{json}")
+    }
+}
+
+fn main() {
+    var wire = Wire { net: Net.new()!, gone: List<usize>(), got: List<u8>() }
+    let port = wire.net.listen("127.0.0.1", 0)!
+    let base = "http://127.0.0.1:{port}"
+
+    // A chunked body read a line at a time, its lines split across chunks and ended by CRLF, CR or
+    // LF, with a CRLF whose LF comes in the next chunk.
+    var s = stream_get("{base}/lines", [Header { name: "Accept", value: "text/plain" }])
+    let (c, req) = wire.request()
+    println("{req[..req.find("\r\n") ?? 0]} accept={asked(req, "accept")}")    // out: GET /lines HTTP/1.1 accept=text/plain
+    wire.send(c, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n")
+    let head = s.head()!
+    println("{head.status} {head.header("content-type") ?? "none"} {head.version}")    // out: 200 text/plain HTTP/1.1
+    wire.send(c, chunk("one\r\ntw"))
+    println(line(mut s))    // out: [one]
+    wire.send(c, chunk("o\rthree\r"))
+    println("{line(mut s)} {line(mut s)}")    // out: [two] [three]
+    wire.send(c, chunk("\n\nfive"))
+    println(line(mut s))    // out: []
+    wire.send(c, "0\r\n\r\n")
+    println("{line(mut s)} {line(mut s)} {line(mut s)}")    // out: [five] end end
+    s.close()
+
+    // A body with a Content-Length, read as its parts come, and `ready` saying when one has.
+    var parts = stream_get("{base}/parts")
+    let (pc, _) = wire.request()
+    wire.send(pc, "HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nabc")
+    println("{parts.head()!.status} {bytes(mut parts)} {parts.ready()}")    // out: 200 abc false
+    wire.send(pc, "def")
+    var waited = 0
+    while not parts.ready() and waited < 4000 {
+        _ = wire.poll(1)
+        waited += 1
+    }
+    println("{bytes(mut parts)} {bytes(mut parts)} {parts.ready()}")    // out: def end true
+
+    // A body of 8 MiB, eight times what a stream keeps unread, which the server queues at once:
+    // the client holds 1 MiB until it's read, the server waits, and every byte comes, in order.
+    var big = stream_get("{base}/big")
+    let (bc, _) = wire.request()
+    let size: usize = 8 << 20
+    var answer = "HTTP/1.1 200 OK\r\nContent-Length: {size}\r\n\r\n".to_bytes()
+    for i in 0..size {
+        answer.push(u8.wrap(i % 251))
+    }
+    wire.net.write(bc, answer)
+    wire.net.flush()
+    var seen: usize = 0
+    var right = true
+    var done = false
+    var polls = 0
+    while not done and polls < 100000 {
+        _ = wire.poll(1)
+        polls += 1
+        while big.ready() and not done {
+            match big.read() {
+                ok(some(part)) => {
+                    for b in part {
+                        right = right and b == u8.wrap(seen % 251)
+                        seen += 1
+                    }
+                }
+                ok(none) => done = true,
+                err(e) => {
+                    println("{e}")
+                    done = true
+                }
+            }
+        }
+    }
+    println("{seen == size} {right}")    // out: true true
+
+    // A POST whose answer is a stream, which the client closes while the server is still sending,
+    // and the server hears it.
+    var listen = stream_post("{base}/listen", [Header { name: "Content-Type", value: "application/json" }], "\{\"x\":1\}".to_bytes())
+    let (lc, posted) = wire.request()
+    let at = posted.find("\r\n\r\n") ?? 0
+    println("{posted[..posted.find(" ") ?? 0]} {posted[at + 4..]}")    // out: POST {"x":1}
+    wire.send(lc, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+    wire.send(lc, chunk("tick\n"))
+    println(line(mut listen))    // out: [tick]
+    listen.close()
+    println("closed={wire.closed(lc)}")    // out: closed=true
+
+    // A stream whose headers never come times out.
+    let slow = stream_get("{base}/slow", timeout_ms: 300)
+    let (_, _) = wire.request()
+    match slow.head() {
+        ok(_) => println("ok"),
+        err(e) => println("{e}"),    // out: timed out
+    }
+    slow.close()
+
+    // A URL that isn't HTTP fails at the head and at the first read.
+    var bad = stream_get("ftp://example.com/")
+    match bad.head() {
+        ok(_) => println("ok"),
+        err(e) => println("{e} {line(mut bad)}"),    // out: not a valid URL not a valid URL
+    }
+
+    // Server-sent events, from a server on a thread of its own.
+    var heard = Receiver<String>()
+    let t = unsafe { Thread.spawn(Events { wire: wire, heard: heard.sender() }) }
+    var es = connect("{base}/events")!
+    println(heard.wait() ?? "nothing")    // out: accept=text/event-stream cache=no-cache last=none
+    println(es.head().header("content-type") ?? "none")    // out: text/event-stream; charset=utf-8
+    loop {
+        match es.next() {
+            ok(some(ev)) => println(show(ev)),
+            ok(none) => break,
+            err(e) => {
+                println("{e}")
+                break
+            }
+        }
+    }
+    // out: greet [hello| world] id=1 retry=5
+    // out: message [second] id=1 retry=-
+    // out: message [] id=2 retry=-
+    println("{es.last_id()} {es.retry_ms()}")    // out: 3 5
+    es.reconnect()!
+    println(heard.wait() ?? "nothing")    // out: again: last=3
+    println(show(es.next()! ?? panic("no event")))    // out: message [four] id=4 retry=-
+    es.close()
+    println(heard.wait() ?? "nothing")    // out: closed=true
+
+    // A POST that could be answered with events or JSON, answered with JSON.
+    match connect_post("{base}/rpc", [Header { name: "Content-Type", value: "application/json" }], "[1]".to_bytes()) {
+        ok(_) => println("events"),
+        err(e) => {
+            match e {
+                NotEvents(h, body) => println("{h.status} {String.from_utf8(body) ?? "?"}"),    // out: 200 {"echo":[1]}
+                Http(he) => println("{he}"),
+            }
+        }
+    }
+    t.join()
+    let shown: SseError = SseError.Http(HttpError.Timeout)
+    println("{shown}")    // out: timed out
+}
