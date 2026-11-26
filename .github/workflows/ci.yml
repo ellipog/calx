@@ -100,11 +100,10 @@ jobs:
       CCACHE_SLOPPINESS: incbin
     steps:
       - uses: actions/checkout@v7
-      # The iOS simulator the tests that need one run on (CLX-408), which on macOS are all the
-      # first part has. It's started first, so it has the whole setup to boot and settle: one
-      # booted just before the tests was slow enough that a request to itself in http_wake_on took
-      # over 2 s. "Wait for the iOS simulator" waits for it, and says how long the boot took
-      # (CLX-424).
+      # The iOS simulator the tests that need one run on (CLX-408), all of them in the first part.
+      # It's started first, so it has the whole setup to boot and settle: one booted just before
+      # the tests was slow enough that a request to itself in http_wake_on took over 2 s. "Wait for
+      # the iOS simulator" waits for it, and says how long the boot took (CLX-424).
       - name: Start the iOS simulator
         if: runner.os == 'macOS' && matrix.shard == 1
         shell: bash
