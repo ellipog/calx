@@ -85,7 +85,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 11. [std.hash](std/hash.md): MD5, SHA-1, SHA-256, SHA-384, SHA-512 and HMAC with any of them, as Java's `MessageDigest` and `Mac` and Python's `hashlib` give them, with SHA-1 and SHA-256 on the processor's SHA instructions, and BLAKE2b and BLAKE2s
 12. [std.crypto](std/crypto.md): random bytes from the system, AES-CFB8, RSA, argon2id password hashing in PHC strings, Ed25519 signatures, ES256 (ECDSA P-256) signatures, X25519 key exchange, Noise handshakes, and authenticated encryption: ChaCha20-Poly1305, XChaCha20-Poly1305 and AES-GCM
 13. [std.zlib](std/zlib.md): zlib, gzip and raw deflate, as Java's `Deflater`, `Inflater` and GZIP streams write and read them
-14. [std.http](std/http.md): HTTP and HTTPS requests on the system's own client, each on a thread of its own, `fetch`, which waits for one, for scripts, and `multipart/form-data` forms for uploads
+14. [std.http](std/http.md): HTTP and HTTPS requests on the system's own client, each on a thread of its own, `fetch`, which waits for one, for scripts, `multipart/form-data` forms for uploads, and responses read as they come, a part or a line at a time
 15. [std.lz4](std/lz4.md): LZ4 block streams, as lz4-java's `LZ4BlockOutputStream` and `LZ4BlockInputStream` write and read them
 16. [std.thread](std/thread.md): threads for services, which only `unsafe` code starts, the typed queues they talk through, and sleeping
 17. [std.meta](std/meta.md): declarations as data, and the code an attribute gives back
@@ -139,6 +139,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 65. [std.keyring](std/keyring.md): passwords and tokens kept in the system's own credential store, Credential Manager, the Keychain or the Secret Service, by service and account, as Python's `keyring` keeps them, with `Unavailable` where there's none, as on a headless server
 66. [std.bz2](std/bz2.md): bzip2 files decompressed as Python's `bz2.decompress` reads them, every stream in a file and randomised blocks too, with the same errors, and compressed byte for byte as `bz2.compress` writes them, several blocks at once
 67. [std.net.mdns](std/net-mdns.md): services announced and found on the local network with mDNS and DNS-SD, as Python's `zeroconf` and Bonjour do, beside the system's own responder, so Bonjour, avahi and Windows find what it announces
+68. [std.http.sse](std/http-sse.md): server-sent events read as they come over a `std.http` stream, as a browser's `EventSource` and Python's `httpx_sse` read them, with multi-line data, IDs, retry times, and reconnects that send `Last-Event-ID`
 
 ### Java compatibility
 

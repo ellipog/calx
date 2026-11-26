@@ -22,6 +22,12 @@
  * it's built with nghttp2, as Debian's, Ubuntu's, Fedora's and macOS's are, over TLS or as h2c. A
  * connection is kept for the requests after it, and HTTP/2 ones to a host go over one at once.
  *
+ * A stream (CLX-459) is a request whose body the program takes as it comes, under the request's
+ * own lock, rather than whole at the end. Its timeout is for its headers, and it keeps at most
+ * STREAM_KEEP bytes the program hasn't taken: WinHTTP's thread stops reading, and libcurl's
+ * transfer pauses, until the program takes them. The program closes it whenever it likes, which
+ * ends the transfer and closes its connection.
+ *
  * WebSockets, behind std.http.websocket, are at the end of the file: on libcurl's connections on
  * Linux and macOS, on Network.framework's on iOS, and on Winsock and Schannel on Windows. */
 #include "calx_rt.h"
@@ -149,19 +155,153 @@ typedef struct request {
      * wake it with, set and read atomically. */
     cx_usize wake_hooks;
     cx_u64 wake_net;
+    /* A stream, whose body the program reads as it comes (CLX-459). Its status, header lines and
+     * version are set before `head_ready`, and not changed after. `data` is what has come that
+     * the program hasn't taken, under `mu`, and `taken` what it took last, on its thread. */
+    int stream;
+    cx_u32 head_ready;
+    cx_u32 cancel; /* the program closed it */
+    bytes taken;
+#ifdef _WIN32
+    SRWLOCK mu;
+    CONDITION_VARIABLE cv;
+    HINTERNET live; /* the WinHTTP request while it runs, under `mu`, for closing it */
+#else
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    int paused;                /* libcurl's transfer is paused, `data` being full, under `mu` */
+    struct request* poked;     /* the next request its transfer thread is to look at again */
+    cx_u32 poke;               /* in that queue, or being looked at */
+    struct request* waiting;   /* the next stream whose headers haven't come */
+    cx_u64 head_deadline;      /* when its headers are due, in now_ms's milliseconds */
+    struct pool* pool;
+#ifdef CX_IOS
+    void* task; /* its NSURLSessionDataTask, retained */
+#endif
+#endif
 } request;
 
 /* Wakes the poller a program asked to be woken as the request finished, if it asked, from the
  * thread that finished it, after `state` says so (CLX-440). The program's thread can't free the
- * request meanwhile: it waits for this thread first, or for `done_lock`, which this holds there. */
+ * request meanwhile: it waits for this thread first, or for `done_lock`, which this holds there.
+ * A stream wakes it too as its headers come and each time some of its body does. */
 static void request_tell(request* r) {
     cx_u64 net = __atomic_load_n(&r->wake_net, __ATOMIC_SEQ_CST);
     if (net) ((const cx_net_hooks_t*)__atomic_load_n(&r->wake_hooks, __ATOMIC_ACQUIRE))->wake(net);
 }
 
+/* --- streams' locks ------------------------------------------------------------------------- */
+
+/* What a stream keeps of its body before it stops reading from the server until the program
+ * takes some, so a program that reads slowly holds this much and the server waits, as TCP's
+ * window makes it. */
+#define STREAM_KEEP ((size_t)1 << 20)
+
+static cx_u64 now_ms(void) {
+#ifdef _WIN32
+    return GetTickCount64();
+#else
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (cx_u64)t.tv_sec * 1000 + (cx_u64)t.tv_nsec / 1000000;
+#endif
+}
+
+#define FOREVER ((cx_u64)-1)
+
+#ifdef _WIN32
+static void stream_init(request* r) {
+    InitializeSRWLock(&r->mu);
+    InitializeConditionVariable(&r->cv);
+}
+static void stream_lock(request* r) { AcquireSRWLockExclusive(&r->mu); }
+static void stream_unlock(request* r) { ReleaseSRWLockExclusive(&r->mu); }
+static void stream_signal(request* r) { WakeAllConditionVariable(&r->cv); }
+/* Waits, holding `mu`, for a signal or `deadline`, in now_ms's milliseconds: 0 once it's past. */
+static int stream_sleep(request* r, cx_u64 deadline) {
+    DWORD ms = INFINITE;
+    if (deadline != FOREVER) {
+        cx_u64 now = now_ms();
+        if (now >= deadline) return 0;
+        ms = deadline - now > 0x7FFFFFFF ? 0x7FFFFFFF : (DWORD)(deadline - now);
+    }
+    SleepConditionVariableSRW(&r->cv, &r->mu, ms, 0);
+    return 1;
+}
+#else
+static void stream_init(request* r) {
+    pthread_mutex_init(&r->mu, NULL);
+    pthread_condattr_t a;
+    pthread_condattr_init(&a);
+#ifndef __APPLE__
+    pthread_condattr_setclock(&a, CLOCK_MONOTONIC);
+#endif
+    pthread_cond_init(&r->cv, &a);
+    pthread_condattr_destroy(&a);
+}
+static void stream_lock(request* r) { pthread_mutex_lock(&r->mu); }
+static void stream_unlock(request* r) { pthread_mutex_unlock(&r->mu); }
+static void stream_signal(request* r) { pthread_cond_broadcast(&r->cv); }
+static int stream_sleep(request* r, cx_u64 deadline) {
+    if (deadline == FOREVER) {
+        pthread_cond_wait(&r->cv, &r->mu);
+        return 1;
+    }
+    cx_u64 now = now_ms();
+    if (now >= deadline) return 0;
+    cx_u64 ms = deadline - now;
+#ifdef __APPLE__
+    struct timespec rel = {(time_t)(ms / 1000), (long)(ms % 1000) * 1000000};
+    pthread_cond_timedwait_relative_np(&r->cv, &r->mu, &rel);
+#else
+    struct timespec at;
+    clock_gettime(CLOCK_MONOTONIC, &at);
+    at.tv_sec += (time_t)(ms / 1000);
+    at.tv_nsec += (long)(ms % 1000) * 1000000;
+    if (at.tv_nsec >= 1000000000) at.tv_sec++, at.tv_nsec -= 1000000000;
+    pthread_cond_timedwait(&r->cv, &r->mu, &at);
+#endif
+    return 1;
+}
+#endif
+
+/* Says, from the request's thread, that something the program may be waiting for has happened:
+ * the headers came, some of the body did, or it finished, which `state` says first. */
+static void stream_tell(request* r) {
+    stream_lock(r);
+    stream_signal(r);
+    stream_unlock(r);
+    request_tell(r);
+}
+
+/* Says the stream's status, header lines and version are set. */
+static void stream_head(request* r) {
+    __atomic_store_n(&r->head_ready, 1, __ATOMIC_RELEASE);
+    stream_tell(r);
+}
+
+/* Keeps `n` bytes of the body for the program to take. */
+static void stream_add(request* r, const void* p, size_t n) {
+    stream_lock(r);
+    if (!add(&r->data, p, n)) cx_panic_capacity();
+    __atomic_store_n(&r->received, __atomic_load_n(&r->received, __ATOMIC_RELAXED) + n, __ATOMIC_RELAXED);
+    stream_signal(r);
+    stream_unlock(r);
+    request_tell(r);
+}
+
 static void request_free(request* r) {
     free(r->url), free(r->host), free(r->target), free(r->head), free(r->body);
-    free(r->raw.p), free(r->lines.p), free(r->data.p);
+    free(r->raw.p), free(r->lines.p), free(r->data.p), free(r->taken.p);
+#ifndef _WIN32
+    if (r->stream) {
+        pthread_mutex_destroy(&r->mu);
+        pthread_cond_destroy(&r->cv);
+    }
+#endif
+#ifdef CX_IOS
+    if (r->task) [(id)r->task release];
+#endif
     free(r);
 }
 
@@ -580,6 +720,18 @@ static int attempt(request* r, ULONGLONG deadline, LONGLONG t0, int require_h2, 
     q = WinHttpOpenRequest(c, r->post ? L"POST" : L"GET", target, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                            r->https ? WINHTTP_FLAG_SECURE : 0);
     if (!q) goto failed;
+    if (r->stream) {
+        /* Closing the handle from the program's thread ends a call on it that's waiting here. */
+        stream_lock(r);
+        int closed = __atomic_load_n(&r->cancel, __ATOMIC_ACQUIRE);
+        if (!closed) r->live = q;
+        stream_unlock(r);
+        if (closed) goto done;
+        /* Its connection isn't kept, so closing the stream closes it, rather than WinHTTP keeping
+         * it and reading on to the end of a body that may have none. */
+        DWORD off = WINHTTP_DISABLE_KEEP_ALIVE;
+        WinHttpSetOption(q, WINHTTP_OPTION_DISABLE_FEATURE, &off, sizeof off);
+    }
     if (r->version != V_HTTP1) {
         /* Offered in the TLS handshake, so it's HTTP/1.1 on http://. Windows 10 1607 and later
          * have it. Where WinHTTP can't require it, HTTP/2 alone is checked when the response
@@ -651,6 +803,37 @@ static int attempt(request* r, ULONGLONG deadline, LONGLONG t0, int require_h2, 
     }
     if (!tidy_headers(r, 0)) cx_panic_capacity();
     note_progress(r);
+    if (r->stream) {
+        /* The timeout was for the headers. The body comes for as long as the server sends it,
+         * which for an event stream is until one side closes it. */
+        stream_head(r);
+        ms = 0;
+        WinHttpSetOption(q, WINHTTP_OPTION_RECEIVE_TIMEOUT, &ms, sizeof ms);
+        char chunk[65536];
+        for (;;) {
+            stream_lock(r);
+            while (r->data.len >= STREAM_KEEP && !__atomic_load_n(&r->cancel, __ATOMIC_ACQUIRE)) stream_sleep(r, FOREVER);
+            stream_unlock(r);
+            if (__atomic_load_n(&r->cancel, __ATOMIC_ACQUIRE)) break;
+            /* WinHttpQueryDataAvailable waits until some of the body has come and says how much,
+             * and that much is read, so a small part of an event stream is given as it comes
+             * rather than once more has come after it. 0 is the end. */
+            DWORD ready = 0, got = 0;
+            if (!WinHttpQueryDataAvailable(q, &ready)) {
+                if (__atomic_load_n(&r->cancel, __ATOMIC_ACQUIRE)) break;
+                goto failed;
+            }
+            if (ready == 0) break;
+            if (!WinHttpReadData(q, chunk, ready < sizeof chunk ? ready : (DWORD)sizeof chunk, &got)) {
+                if (__atomic_load_n(&r->cancel, __ATOMIC_ACQUIRE)) break;
+                goto failed;
+            }
+            if (got == 0) break;
+            stream_add(r, chunk, got);
+        }
+        win_times(r, q, t0);
+        goto done;
+    }
     for (;;) {
         if (GetTickCount64() >= deadline) {
             r->error = E_TIMEOUT;
@@ -681,6 +864,13 @@ failed:
         r->error = win_error(e), r->code = (cx_i32)e;
     }
 done:
+    if (q && r->stream) {
+        /* Unless the program closed it already. */
+        stream_lock(r);
+        if (r->live != q) q = NULL;
+        r->live = NULL;
+        stream_unlock(r);
+    }
     if (q) WinHttpCloseHandle(q);
     if (c) WinHttpCloseHandle(c);
     free(host), free(target), free(head);
@@ -736,7 +926,8 @@ static pthread_cond_t done_cond = PTHREAD_COND_INITIALIZER;
 static void transfer_done(request* r) {
     pthread_mutex_lock(&done_lock);
     __atomic_store_n(&r->state, 1, __ATOMIC_SEQ_CST);
-    request_tell(r);
+    if (r->stream) stream_tell(r);
+    else request_tell(r);
     pthread_cond_broadcast(&done_cond);
     pthread_mutex_unlock(&done_lock);
 }
@@ -816,6 +1007,12 @@ static void task_fail(NSURLSessionTask* task, request* r, int error) {
         long long length = response.expectedContentLength;
         r->sized = 1;
         __atomic_store_n(&r->expected, length >= 0 ? (cx_u64)length + 1 : 0, __ATOMIC_RELAXED);
+        if (r->stream) {
+            /* URLSession says which HTTP it was only in the task's metrics, once it's done. */
+            r->used = 11;
+            if (!tidy_headers(r, 0)) cx_panic_capacity();
+            stream_head(r);
+        }
     }
     done(NSURLSessionResponseAllow);
 }
@@ -823,6 +1020,14 @@ static void task_fail(NSURLSessionTask* task, request* r, int error) {
 - (void)URLSession:(NSURLSession*)session dataTask:(NSURLSessionDataTask*)task didReceiveData:(NSData*)data {
     request* r = task_request(task);
     if (!r || r->error) return;
+    if (r->stream) {
+        /* URLSession has no way to make the server wait, short of suspending the task, so what
+         * comes is kept until the program takes it. */
+        [data enumerateByteRangesUsingBlock:^(const void* bytes_at, NSRange range, BOOL* stop) {
+            stream_add(r, bytes_at, range.length);
+        }];
+        return;
+    }
     __block int too_long = 0;
     [data enumerateByteRangesUsingBlock:^(const void* bytes_at, NSRange range, BOOL* stop) {
         if (r->data.len + range.length > r->limit) {
@@ -857,7 +1062,10 @@ static void task_fail(NSURLSessionTask* task, request* r, int error) {
     NSURLSessionTaskTransactionMetrics* t = metrics.transactionMetrics.lastObject;
     if (!r || !t) return;
     NSString* protocol = t.networkProtocolName.lowercaseString;
-    r->used = [protocol isEqualToString:@"h2"] ? 20 : [protocol isEqualToString:@"h3"] ? 30 : [protocol isEqualToString:@"http/1.0"] ? 10 : 11;
+    /* A stream's version was given with its headers, which the program may be reading. */
+    if (!r->stream) {
+        r->used = [protocol isEqualToString:@"h2"] ? 20 : [protocol isEqualToString:@"h3"] ? 30 : [protocol isEqualToString:@"http/1.0"] ? 10 : 11;
+    }
     r->reused = t.reusedConnection;
     NSDate* start = t.fetchStartDate;
     if (!r->reused) {
@@ -886,6 +1094,8 @@ static void task_fail(NSURLSessionTask* task, request* r, int error) {
     } else if (error) {
         int e = [error.domain isEqualToString:NSURLErrorDomain] ? url_error(error.code) : E_OS;
         r->error = e, r->code = (cx_i32)error.code;
+    } else if (r->stream) {
+        /* its headers were taken as they came, and the program may be reading them */
     } else if (r->version == V_HTTP2_ONLY && r->used != 20) {
         r->error = E_PROTOCOL;
     } else if (!tidy_headers(r, 0)) {
@@ -954,14 +1164,16 @@ static int transfer(request* r) {
         if (!has_header(r->head, "accept-encoding")) [q setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"];
         NSURLSessionDataTask* task = [http_session dataTaskWithRequest:q];
         cx_u32 timeout_ms = r->timeout_ms;
+        if (r->stream) r->task = [task retain];
         [http_queue addOperationWithBlock:^{
             running_tasks[@(task.taskIdentifier)] = [NSValue valueWithPointer:r];
             [task resume];
         }];
+        /* A stream's timeout is for its headers. */
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)timeout_ms * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             [http_queue addOperationWithBlock:^{
                 request* still = task_request(task);
-                if (still) task_fail(task, still, E_TIMEOUT);
+                if (still && !(still->stream && __atomic_load_n(&still->head_ready, __ATOMIC_ACQUIRE))) task_fail(task, still, E_TIMEOUT);
             }];
         });
     }
@@ -982,7 +1194,7 @@ enum {
     O_WRITEDATA = 10001, O_URL = 10002, O_PROXY = 10004, O_POSTFIELDS = 10015, O_USERAGENT = 10018,
     O_HTTPHEADER = 10023, O_HEADERDATA = 10029, O_PRIVATE = 10103, O_WRITEFUNCTION = 20011, O_HEADERFUNCTION = 20079,
     O_POST = 47, O_FOLLOWLOCATION = 52, O_MAXREDIRS = 68, O_HTTPGET = 80, O_HTTP_VERSION = 84,
-    O_NOSIGNAL = 99, O_TIMEOUT_MS = 155, O_PROTOCOLS = 181, O_REDIR_PROTOCOLS = 182, O_PIPEWAIT = 237,
+    O_NOSIGNAL = 99, O_TIMEOUT_MS = 155, O_CONNECTTIMEOUT_MS = 156, O_PROTOCOLS = 181, O_REDIR_PROTOCOLS = 182, O_PIPEWAIT = 237,
     O_POSTFIELDSIZE_LARGE = 30120, M_PIPELINING = 3,
     I_RESPONSE_CODE = 0x200002, I_NUM_CONNECTS = 0x200000 + 26, I_PRIVATE = 0x100000 + 21,
     /* In microseconds, from libcurl 7.61; before, in seconds, as doubles. */
@@ -1038,6 +1250,8 @@ static struct {
     int (*multi_wait)(void*, curl_waitfd*, unsigned, int, int*);
     curl_msg* (*multi_info_read)(void*, int*);
     curl_version* (*version_info)(int);
+    /* For streams, from libcurl 7.18; NULL before. */
+    int (*easy_pause)(void*, int);
 } curl;
 static int curl_loaded;
 static int curl_http2; /* whether it's built with HTTP/2, nghttp2 */
@@ -1074,6 +1288,7 @@ static void curl_load(void) {
         all = all && *multi[i];
     }
     if (!all) curl.multi_init = NULL;
+    *(void**)&curl.easy_pause = dlsym(lib, "curl_easy_pause");
     *(void**)&curl.version_info = dlsym(lib, "curl_version_info");
     if (curl.version_info) {
         curl_version* v = curl.version_info(0);
@@ -1129,9 +1344,60 @@ static int curl_error(int e) {
     }
 }
 
+/* CURL_WRITEFUNC_PAUSE, and CURLPAUSE_CONT for curl_easy_pause. */
+enum { WRITE_PAUSE = 0x10000001, PAUSE_CONT = 0 };
+
+/* The status of the response whose header lines are in `raw`, from its status line. */
+static cx_u32 raw_status(const bytes* raw) {
+    size_t i = 0;
+    while (i < raw->len && raw->p[i] != ' ' && raw->p[i] != '\n') i++;
+    cx_u32 s = 0;
+    for (i++; i < raw->len && raw->p[i] >= '0' && raw->p[i] <= '9' && s < 1000; i++) s = s * 10 + (cx_u32)(raw->p[i] - '0');
+    return s;
+}
+
+/* Gives the program the stream's status, header lines and version, from `raw`. */
+static void stream_publish(request* r) {
+    r->status = raw_status(&r->raw);
+    r->used = line_version(r->raw.p, r->raw.len);
+    if (!tidy_headers(r, 1)) cx_panic_capacity();
+    stream_head(r);
+}
+
+/* A stream's headers are the response's once the blank line after them has come, unless it's a
+ * 100 Continue, whose response comes after, or a redirect libcurl follows. */
+static void stream_headers_end(request* r) {
+    cx_u32 status = raw_status(&r->raw);
+    if (status < 200) return;
+    if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+        for (size_t i = 0; i < r->raw.len; i++) {
+            if ((i == 0 || r->raw.p[i - 1] == '\n') && starts_ci(r->raw.p + i, r->raw.len - i, "location:")) return;
+        }
+    }
+    stream_publish(r);
+}
+
+/* Some of a stream's body: kept for the program, or, once it holds STREAM_KEEP bytes the program
+ * hasn't taken, the transfer pauses, to go on once the program takes them, and libcurl gives
+ * these again then. */
+static size_t stream_body(request* r, char* p, size_t k) {
+    if (!__atomic_load_n(&r->head_ready, __ATOMIC_ACQUIRE)) stream_publish(r);
+    if (__atomic_load_n(&r->cancel, __ATOMIC_ACQUIRE)) return 0;
+    stream_lock(r);
+    if (r->data.len >= STREAM_KEEP && curl.easy_pause) {
+        r->paused = 1;
+        stream_unlock(r);
+        return WRITE_PAUSE;
+    }
+    stream_unlock(r);
+    stream_add(r, p, k);
+    return k;
+}
+
 static size_t on_body(char* p, size_t size, size_t n, void* user) {
     request* r = user;
     size_t k = size * n;
+    if (r->stream) return stream_body(r, p, k);
     if (r->data.len + k > r->limit) {
         r->error = E_TOO_LONG;
         return 0;
@@ -1144,6 +1410,12 @@ static size_t on_body(char* p, size_t size, size_t n, void* user) {
 static size_t on_header(char* p, size_t size, size_t n, void* user) {
     request* r = user;
     size_t k = size * n;
+    /* A stream's trailers, after its body, aren't kept: its headers are the program's by then. */
+    if (r->stream && __atomic_load_n(&r->head_ready, __ATOMIC_ACQUIRE)) return k;
+    if (r->stream && ((k == 2 && p[0] == '\r' && p[1] == '\n') || (k == 1 && p[0] == '\n'))) {
+        stream_headers_end(r);
+        return k;
+    }
     /* Each response's status line starts its headers: a redirect's, or a 100 Continue's, are
      * dropped for the next. */
     if (k >= 5 && memcmp(p, "HTTP/", 5) == 0) {
@@ -1199,7 +1471,10 @@ static void* curl_begin(request* r) {
     curl.easy_setopt(h, O_REDIR_PROTOCOLS, r->https ? 2L : 3L);
     curl.easy_setopt(h, O_FOLLOWLOCATION, 1L);
     curl.easy_setopt(h, O_MAXREDIRS, 10L);
-    curl.easy_setopt(h, O_TIMEOUT_MS, (long)r->timeout_ms);
+    /* A stream's timeout is for its headers, which its transfer thread keeps to, since libcurl's
+     * is for the whole transfer. */
+    if (r->stream) curl.easy_setopt(h, O_CONNECTTIMEOUT_MS, (long)r->timeout_ms);
+    else curl.easy_setopt(h, O_TIMEOUT_MS, (long)r->timeout_ms);
     curl.easy_setopt(h, O_HTTPHEADER, list);
     curl.easy_setopt(h, O_WRITEFUNCTION, on_body);
     curl.easy_setopt(h, O_WRITEDATA, r);
@@ -1223,6 +1498,9 @@ static void curl_end(request* r, void* h, int e) {
         /* on_body's or on_header's, which ended the transfer */
     } else if (e != 0) {
         r->error = curl_error(e), r->code = e;
+    } else if (r->stream) {
+        /* A response with no body gives its headers here, and one with a body gave them already. */
+        if (!__atomic_load_n(&r->head_ready, __ATOMIC_ACQUIRE)) stream_publish(r);
     } else {
         long status = 0;
         curl.easy_getinfo(h, I_RESPONSE_CODE, &status);
@@ -1267,7 +1545,7 @@ static void run(request* r) {
  * call on its requests' handles. `cx_http_start` puts a request in its queue, and a byte down a
  * pipe wakes it; it says a request has finished by `done_cond`. */
 
-typedef struct {
+typedef struct pool {
     void* multi;
     int running;
     cx_u32 state;
@@ -1275,18 +1553,88 @@ typedef struct {
     request* head;
     request** tail;
     pthread_mutex_t lock;
+    /* Under `lock`: streams the program closed, or took some of the body of while their transfer
+     * was paused, for the thread to look at again. */
+    request* poked;
+    /* The thread's own: streams whose headers haven't come, which it holds to their timeout. */
+    request* waiting;
 } pool;
 
-static pool pools[3] = {{NULL, 0, 0, {-1, -1}, NULL, &pools[0].head, PTHREAD_MUTEX_INITIALIZER},
-                        {NULL, 0, 0, {-1, -1}, NULL, &pools[1].head, PTHREAD_MUTEX_INITIALIZER},
-                        {NULL, 0, 0, {-1, -1}, NULL, &pools[2].head, PTHREAD_MUTEX_INITIALIZER}};
+static pool pools[3] = {{NULL, 0, 0, {-1, -1}, NULL, &pools[0].head, PTHREAD_MUTEX_INITIALIZER, NULL, NULL},
+                        {NULL, 0, 0, {-1, -1}, NULL, &pools[1].head, PTHREAD_MUTEX_INITIALIZER, NULL, NULL},
+                        {NULL, 0, 0, {-1, -1}, NULL, &pools[2].head, PTHREAD_MUTEX_INITIALIZER, NULL, NULL}};
 static pthread_mutex_t done_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t done_cond = PTHREAD_COND_INITIALIZER;
 
 static void transfer_done(request* r) {
     pthread_mutex_lock(&done_lock);
     __atomic_store_n(&r->state, 1, __ATOMIC_SEQ_CST);
-    request_tell(r);
+    if (r->stream) stream_tell(r);
+    else request_tell(r);
+    pthread_cond_broadcast(&done_cond);
+    pthread_mutex_unlock(&done_lock);
+}
+
+static void pool_wake(pool* p) {
+    char b = 1;
+    if (write(p->wake[1], &b, 1) < 0) {
+        /* The pipe is full, so the thread will wake anyway. */
+    }
+}
+
+/* Has the stream's transfer thread look at it again, from the program's thread. */
+static void stream_poke(request* r) {
+    pool* p = r->pool;
+    pthread_mutex_lock(&p->lock);
+    if (!__atomic_load_n(&r->poke, __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&r->poke, 1, __ATOMIC_RELEASE);
+        r->poked = p->poked;
+        p->poked = r;
+    }
+    pthread_mutex_unlock(&p->lock);
+    pool_wake(p);
+}
+
+/* Takes the stream off the list of those whose headers haven't come, if it's there. */
+static void unwait(pool* p, request* r) {
+    for (request** at = &p->waiting; *at; at = &(*at)->waiting) {
+        if (*at == r) {
+            *at = r->waiting;
+            r->waiting = NULL;
+            return;
+        }
+    }
+}
+
+/* Ends a running transfer before libcurl has, with `error`. */
+static void transfer_end(pool* p, request* r, int error) {
+    unwait(p, r);
+    curl.multi_remove_handle(p->multi, r->easy);
+    if (!r->error) r->error = error;
+    curl_end(r, r->easy, 0);
+    r->easy = NULL;
+    transfer_done(r);
+}
+
+/* What a stream on the list was poked for: the program closed it, or it's paused and the program
+ * has taken what it held. A stream that's finished, or not begun, needs nothing; one not begun is
+ * ended as it's taken from the queue. */
+static void poked(pool* p, request* r) {
+    if (r->easy && !__atomic_load_n(&r->state, __ATOMIC_ACQUIRE)) {
+        if (__atomic_load_n(&r->cancel, __ATOMIC_ACQUIRE)) {
+            transfer_end(p, r, E_OS);
+        } else {
+            stream_lock(r);
+            int go = r->paused && r->data.len < STREAM_KEEP;
+            if (go) r->paused = 0;
+            stream_unlock(r);
+            /* This may give the body it paused on to on_body at once. */
+            if (go) curl.easy_pause(r->easy, PAUSE_CONT);
+        }
+    }
+    /* Off the list now, so the program, waiting in cx_http_stream_close, may free it. */
+    pthread_mutex_lock(&done_lock);
+    __atomic_store_n(&r->poke, 0, __ATOMIC_RELEASE);
     pthread_cond_broadcast(&done_cond);
     pthread_mutex_unlock(&done_lock);
 }
@@ -1300,15 +1648,35 @@ static void* transfers(void* arg) {
         pthread_mutex_unlock(&p->lock);
         while (r) {
             request* next = r->queued;
+            if (r->stream && __atomic_load_n(&r->cancel, __ATOMIC_ACQUIRE)) {
+                /* closed before it began */
+                transfer_done(r);
+                r = next;
+                continue;
+            }
             r->easy = curl_begin(r);
             int e = r->easy ? curl.multi_add_handle(p->multi, r->easy) : 0;
             if (!r->easy || e != 0) {
+                r->error = E_OS, r->code = r->easy ? e : ENOMEM;
                 if (r->easy) curl.easy_cleanup(r->easy);
+                r->easy = NULL;
                 curl.slist_free_all(r->list);
                 r->list = NULL;
-                r->error = E_OS, r->code = r->easy ? e : ENOMEM;
                 transfer_done(r);
+            } else if (r->stream) {
+                r->head_deadline = now_ms() + r->timeout_ms;
+                r->waiting = p->waiting;
+                p->waiting = r;
             }
+            r = next;
+        }
+        pthread_mutex_lock(&p->lock);
+        r = p->poked;
+        p->poked = NULL;
+        pthread_mutex_unlock(&p->lock);
+        while (r) {
+            request* next = r->poked;
+            poked(p, r);
             r = next;
         }
         int running = 0, left = 0;
@@ -1322,12 +1690,30 @@ static void* transfers(void* arg) {
             curl.easy_getinfo(h, I_PRIVATE, &q);
             curl.multi_remove_handle(p->multi, h);
             if (q) {
+                unwait(p, q);
                 curl_end(q, h, e);
+                q->easy = NULL;
                 transfer_done(q);
             }
         }
+        /* Streams whose headers came are off the list, and those whose time for them is up
+         * end. The wait is until the next is due, at most a second. */
+        cx_u64 now = now_ms();
+        int wait_ms = 1000;
+        for (request** at = &p->waiting; *at;) {
+            request* s = *at;
+            if (__atomic_load_n(&s->head_ready, __ATOMIC_ACQUIRE)) {
+                *at = s->waiting;
+                s->waiting = NULL;
+            } else if (now >= s->head_deadline) {
+                transfer_end(p, s, E_TIMEOUT);
+            } else {
+                if (s->head_deadline - now < (cx_u64)wait_ms) wait_ms = (int)(s->head_deadline - now);
+                at = &s->waiting;
+            }
+        }
         curl_waitfd wake = {p->wake[0], POLLIN, 0};
-        curl.multi_wait(p->multi, &wake, 1, 1000, NULL);
+        curl.multi_wait(p->multi, &wake, 1, wait_ms, NULL);
         char drain[64];
         while (read(p->wake[0], drain, sizeof drain) > 0) {
         }
@@ -1361,15 +1747,13 @@ static int transfer(request* r) {
     once(&p->state, which == 2 ? pool_open_3 : which == 1 ? pool_open_2 : pool_open_1);
     if (!p->running) return 0;
     r->started = 2;
+    r->pool = p;
     pthread_mutex_lock(&p->lock);
     r->queued = NULL;
     *p->tail = r;
     p->tail = &r->queued;
     pthread_mutex_unlock(&p->lock);
-    char b = 1;
-    if (write(p->wake[1], &b, 1) < 0) {
-        /* The pipe is full, so the thread will wake anyway. */
-    }
+    pool_wake(p);
     return 1;
 }
 
@@ -1381,7 +1765,8 @@ static int transfer(request* r) {
 static void finish(request* r) {
     run(r);
     __atomic_store_n(&r->state, 1, __ATOMIC_SEQ_CST);
-    request_tell(r);
+    if (r->stream) stream_tell(r);
+    else request_tell(r);
 }
 
 #ifdef _WIN32
@@ -1397,11 +1782,13 @@ static void* thread_main(void* p) {
 #endif
 
 /* Starts a request: a GET, or a POST of the body. `head` is the caller's header lines, each
- * ending in "\r\n", which std.http has checked. */
-cx_u64 cx_http_start(cx_bool post, const cx_u8* url, cx_usize url_len, const cx_u8* head, cx_usize head_len, const cx_u8* body,
-                     cx_usize body_len, cx_u32 timeout_ms, cx_usize limit, cx_u32 version) {
+ * ending in "\r\n", which std.http has checked. A stream's body is read as it comes. */
+static cx_u64 begin(int stream, cx_bool post, const cx_u8* url, cx_usize url_len, const cx_u8* head, cx_usize head_len,
+                    const cx_u8* body, cx_usize body_len, cx_u32 timeout_ms, cx_usize limit, cx_u32 version) {
     request* r = calloc(1, sizeof(request));
     if (!r) cx_panic_capacity();
+    r->stream = stream;
+    if (stream) stream_init(r);
     r->post = post;
     r->version = version <= V_HTTP2_ONLY ? (int)version : V_HTTP1;
     r->timeout_ms = timeout_ms;
@@ -1440,6 +1827,11 @@ cx_u64 cx_http_start(cx_bool post, const cx_u8* url, cx_usize url_len, const cx_
     }
 #else
     if (transfer(r)) return table_add(&requests, r);
+    if (stream) {
+        /* A libcurl older than 7.28, with no transfer thread to close a stream on. */
+        r->error = E_UNAVAILABLE, r->state = 1;
+        return table_add(&requests, r);
+    }
     int e = cx_os_thread(&r->thread, thread_main, r);
     if (e == 0) {
         r->started = 1;
@@ -1448,6 +1840,124 @@ cx_u64 cx_http_start(cx_bool post, const cx_u8* url, cx_usize url_len, const cx_
     }
 #endif
     return table_add(&requests, r);
+}
+
+cx_u64 cx_http_start(cx_bool post, const cx_u8* url, cx_usize url_len, const cx_u8* head, cx_usize head_len, const cx_u8* body,
+                     cx_usize body_len, cx_u32 timeout_ms, cx_usize limit, cx_u32 version) {
+    return begin(0, post, url, url_len, head, head_len, body, body_len, timeout_ms, limit, version);
+}
+
+/* --- streams (CLX-459) --------------------------------------------------------------------- */
+
+/* Starts a request whose body the program reads as it comes, as `cx_http_start` starts one, with
+ * no limit on its body, and `timeout_ms` for its headers alone. */
+cx_u64 cx_http_open(cx_bool post, const cx_u8* url, cx_usize url_len, const cx_u8* head, cx_usize head_len, const cx_u8* body,
+                    cx_usize body_len, cx_u32 timeout_ms, cx_u32 version) {
+    return begin(1, post, url, url_len, head, head_len, body, body_len, timeout_ms, (cx_usize)-1, version);
+}
+
+/* Waits for the stream's headers, and gives 0 once they've come, or what went wrong if it
+ * finished without them. */
+cx_i32 cx_http_stream_head(cx_u64 h) {
+    request* r = request_of(h);
+    stream_lock(r);
+    while (!__atomic_load_n(&r->head_ready, __ATOMIC_ACQUIRE) && !__atomic_load_n(&r->state, __ATOMIC_ACQUIRE)) stream_sleep(r, FOREVER);
+    stream_unlock(r);
+    if (__atomic_load_n(&r->head_ready, __ATOMIC_ACQUIRE)) return 0;
+    return r->error ? r->error : E_PROTOCOL;
+}
+
+/* Takes what has come of the stream's body, waiting up to `timeout_ms` for some, forever if it's
+ * negative: 1 if it took some, which `cx_http_taken` gives; 0 if none came in the time; 2 if the
+ * body has ended; or, if it ended with an error, that error, negated. */
+cx_i32 cx_http_stream_read(cx_u64 h, cx_i64 timeout_ms) {
+    request* r = request_of(h);
+    cx_u64 deadline = timeout_ms < 0 ? FOREVER : now_ms() + (cx_u64)timeout_ms;
+    stream_lock(r);
+    while (!r->data.len && !__atomic_load_n(&r->state, __ATOMIC_ACQUIRE)) {
+        if (!stream_sleep(r, deadline)) break;
+    }
+    if (r->data.len) {
+        bytes t = r->taken;
+        r->taken = r->data;
+        r->data = t;
+        r->data.len = 0;
+#if defined(_WIN32)
+        /* Its thread may be waiting for room. */
+        stream_signal(r);
+        stream_unlock(r);
+#elif defined(CX_IOS)
+        stream_unlock(r);
+#else
+        int resume = r->paused;
+        stream_unlock(r);
+        if (resume) stream_poke(r);
+#endif
+        return 1;
+    }
+    stream_unlock(r);
+    if (!__atomic_load_n(&r->state, __ATOMIC_ACQUIRE)) return 0;
+    return r->error ? -r->error : 2;
+}
+
+/* Whether some of the stream's body is waiting, or it has ended, so cx_http_stream_read won't
+ * wait. */
+cx_bool cx_http_stream_ready(cx_u64 h) {
+    request* r = request_of(h);
+    stream_lock(r);
+    int ready = r->data.len > 0 || __atomic_load_n(&r->state, __ATOMIC_ACQUIRE);
+    stream_unlock(r);
+    return ready;
+}
+
+cx_usize cx_http_taken_len(cx_u64 h) { return request_of(h)->taken.len; }
+
+void cx_http_taken(cx_u64 h, cx_u8* out) {
+    request* r = request_of(h);
+    if (r->taken.len) memcpy(out, r->taken.p, r->taken.len);
+}
+
+/* Closes the stream, whether or not it has finished, and lets it go: the connection is closed,
+ * so the server hears that the program has stopped reading. */
+void cx_http_stream_close(cx_u64 h) {
+    request* r = request_of(h);
+    if (!r) return;
+    __atomic_store_n(&r->cancel, 1, __ATOMIC_RELEASE);
+#ifdef _WIN32
+    stream_lock(r);
+    HINTERNET q = r->live;
+    r->live = NULL;
+    stream_signal(r);
+    stream_unlock(r);
+    /* Ends a WinHttpReadData, or any call on it, that its thread is waiting in. */
+    if (q) WinHttpCloseHandle(q);
+    if (r->started) {
+        WaitForSingleObject(r->thread, INFINITE);
+        CloseHandle(r->thread);
+        r->started = 0;
+    }
+#else
+    if (r->started == 2) {
+#ifdef CX_IOS
+        NSURLSessionDataTask* task = (NSURLSessionDataTask*)r->task;
+        if (task) {
+            [http_queue addOperationWithBlock:^{
+                if (task_request(task)) [task cancel];
+            }];
+        }
+#else
+        stream_poke(r);
+#endif
+        pthread_mutex_lock(&done_lock);
+        while (!__atomic_load_n(&r->state, __ATOMIC_ACQUIRE) || __atomic_load_n(&r->poke, __ATOMIC_ACQUIRE)) {
+            pthread_cond_wait(&done_cond, &done_lock);
+        }
+        pthread_mutex_unlock(&done_lock);
+        r->started = 0;
+    }
+#endif
+    table_remove(&requests, h);
+    request_free(r);
 }
 
 /* 1 if the request has finished, 0 if it's still running, and -1 if its response was taken. */

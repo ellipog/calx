@@ -4,10 +4,13 @@
 /// A request runs off the program's thread, and `done` says when it has finished, so a server's
 /// loop goes on while it waits, as vanilla's login waits for Mojang's session server on a thread of
 /// its own. A connection is kept for the requests after it to the same host, and HTTP/2 ones,
-/// which `Version.Http2` asks for, go over one connection at once (CLX-383).
+/// which `Version.Http2` asks for, go over one connection at once (CLX-383). A `Stream`, from
+/// `stream_get` or `stream_post`, gives its body as it comes, for a response that may never end,
+/// as an event stream's doesn't (CLX-459).
 module std.http
 
 import std.net.waker.{Waker}
+import std.text.utf8.{decode_lossy_unicode}
 
 extern "C" {
     fn cx_http_start(post: bool, url: *const u8, url_len: usize, head: *const u8, head_len: usize, body: *const u8, body_len: usize, timeout_ms: u32, limit: usize, version: u32) -> u64
@@ -25,6 +28,13 @@ extern "C" {
     fn cx_http_version(h: u64) -> u32
     fn cx_http_times(h: u64, out: *u64)
     fn cx_http_wake_on(h: u64, hooks: usize, net: u64)
+    fn cx_http_open(post: bool, url: *const u8, url_len: usize, head: *const u8, head_len: usize, body: *const u8, body_len: usize, timeout_ms: u32, version: u32) -> u64
+    fn cx_http_stream_head(h: u64) -> i32
+    fn cx_http_stream_read(h: u64, timeout_ms: i64) -> i32
+    fn cx_http_stream_ready(h: u64) -> bool
+    fn cx_http_taken_len(h: u64) -> usize
+    fn cx_http_taken(h: u64, out: *u8)
+    fn cx_http_stream_close(h: u64)
     fn cx_crypto_random(p: *u8, n: usize)
 }
 
@@ -127,17 +137,22 @@ pub struct Response {
     pub timings: Timings,
 }
 
+// The value of the first of the headers named `name`, compared without regard to case.
+fn first_header(headers: List<Header>, name: String) -> String? {
+    let want = name.to_lower_root()
+    for h in headers {
+        if h.name.to_lower_root() == want {
+            return some(h.value.copy())
+        }
+    }
+    return none
+}
+
 impl Response {
     /// The value of the first header named `name`, compared without regard to case, as HTTP
     /// compares header names.
     pub fn header(self, name: String) -> String? {
-        let want = name.to_lower_root()
-        for h in self.headers {
-            if h.name.to_lower_root() == want {
-                return some(h.value.copy())
-            }
-        }
-        return none
+        return first_header(self.headers, name)
     }
 }
 
@@ -207,54 +222,331 @@ impl Request {
         }
         self.handle = 0
         if kind != 0 {
-            let code = unsafe { cx_http_code(h) }
+            let e = error_of(h, kind)
             unsafe { cx_http_free(h) }
-            fail match kind {
-                1 => Error.BadUrl,
-                2 => Error.Resolve,
-                3 => Error.Connect,
-                4 => Error.Tls,
-                5 => Error.Timeout,
-                6 => Error.Protocol,
-                7 => Error.TooLong,
-                8 => Error.Unavailable,
-                _ => Error.Os(code),
-            }
+            fail e
         }
-        var head = List<u8>()
+        let head = head_of(h)
         var body = List<u8>()
-        var status: u32 = 0
-        var used: u32 = 0
         var t: List<u64> = [0; 6]
         unsafe {
-            let hn = cx_http_head_len(h)
-            head.reserve(hn)
-            cx_http_head(h, head.as_mut_ptr())
-            head.set_len(hn)
             let bn = cx_http_body_len(h)
             body.reserve(bn)
             cx_http_body(h, body.as_mut_ptr())
             body.set_len(bn)
-            status = cx_http_status(h)
-            used = cx_http_version(h)
             cx_http_times(h, t.as_mut_ptr())
             cx_http_free(h)
         }
-        let version = match used {
-            10 => "HTTP/1.0",
-            20 => "HTTP/2",
-            30 => "HTTP/3",
-            _ => "HTTP/1.1",
-        }
         return Response {
-            status: status,
-            headers: header_list(String.from_utf8(head) ?? String()),
+            status: head.status,
+            headers: head.headers,
             body: body,
-            version: String(version),
+            version: head.version,
             reused: t[5] != 0,
             timings: Timings { resolve_ns: t[0], connect_ns: t[1], tls_ns: t[2], first_byte_ns: t[3], total_ns: t[4] },
         }
     }
+}
+
+// The runtime's error number `kind` as an Error.
+fn error_of(h: u64, kind: i32) -> Error {
+    return match kind {
+        1 => Error.BadUrl,
+        2 => Error.Resolve,
+        3 => Error.Connect,
+        4 => Error.Tls,
+        5 => Error.Timeout,
+        6 => Error.Protocol,
+        7 => Error.TooLong,
+        8 => Error.Unavailable,
+        _ => Error.Os(unsafe { cx_http_code(h) }),
+    }
+}
+
+// The status, header lines and version of a request whose response has come, or a stream's whose
+// headers have.
+fn head_of(h: u64) -> Head {
+    var head = List<u8>()
+    var status: u32 = 0
+    var used: u32 = 0
+    unsafe {
+        let hn = cx_http_head_len(h)
+        head.reserve(hn)
+        cx_http_head(h, head.as_mut_ptr())
+        head.set_len(hn)
+        status = cx_http_status(h)
+        used = cx_http_version(h)
+    }
+    let version = match used {
+        10 => "HTTP/1.0",
+        20 => "HTTP/2",
+        30 => "HTTP/3",
+        _ => "HTTP/1.1",
+    }
+    return Head { status: status, headers: header_list(String.from_utf8(head) ?? String()), version: String(version) }
+}
+
+/// The status and header lines of a stream's response, which come before its body.
+pub struct Head {
+    /// The status code, such as 200.
+    pub status: u32,
+    /// The header lines, as `Response.headers` has them.
+    pub headers: List<Header>,
+    /// The HTTP it came in, as `Response.version` says. On iOS, `HTTP/1.1` whichever it was, as
+    /// URLSession says only once the body has ended.
+    pub version: String,
+}
+
+impl Head {
+    /// The value of the first header named `name`, compared without regard to case.
+    pub fn header(self, name: String) -> String? {
+        return first_header(self.headers, name)
+    }
+}
+
+/// A request whose body is read as it comes, as httpx's `stream` reads one: an event stream that
+/// stays open until one side closes it, or a download too big to hold. It runs on a thread of its
+/// own, as a `Request` does, which keeps up to 1 MiB of the body that the program hasn't read and
+/// then stops reading until it has, so the server waits. Closing it, or dropping it, closes the
+/// connection, so the server hears the program has stopped.
+@handle
+pub struct Stream {
+    handle: u64,
+    // How long `read`, `read_line` and `line_ready`'s reads wait for bytes, -1 for no limit.
+    wait_ms: i64,
+    // What has come and isn't given yet, from `at`.
+    buf: List<u8>,
+    at: usize,
+    // How far from `at` has no line end, so `read_line` doesn't look there again.
+    scanned: usize,
+    // The last line ended with CR, so a LF first in what comes next ends it too.
+    skip_lf: bool,
+    // The body has ended, and `buf` holds the last of it.
+    ended: bool,
+    // What it ended with, 0 for nothing.
+    fault: i32,
+}
+
+impl Stream {
+    /// Waits for the response's status and header lines, and gives them, or fails with why no
+    /// response came. A stream whose headers didn't come within its `timeout_ms` fails with
+    /// `Timeout`. It can be asked again, and gives them again.
+    pub fn head(self) -> Head ! Error {
+        let kind = unsafe { cx_http_stream_head(self.handle) }
+        if kind != 0 {
+            fail error_of(self.handle, kind)
+        }
+        return head_of(self.handle)
+    }
+
+    // Takes what has come into `buf`, waiting up to `timeout_ms` for something, -1 for no limit:
+    // true if anything came or the body ended, false if nothing came in the time.
+    fn take(mut self, timeout_ms: i64) -> bool ! Error {
+        if self.ended {
+            if self.fault != 0 {
+                fail error_of(self.handle, self.fault)
+            }
+            return true
+        }
+        let kind = unsafe { cx_http_stream_read(self.handle, timeout_ms) }
+        if kind == 0 {
+            return false
+        }
+        if kind == 1 {
+            if self.at > 0 and self.at == self.buf.len() {
+                self.buf.clear()
+                self.at = 0
+            } else if self.at > 65536 and self.at * 2 > self.buf.len() {
+                self.buf = self.buf[self.at..]
+                self.at = 0
+            }
+            unsafe {
+                let n = cx_http_taken_len(self.handle)
+                let len = self.buf.len()
+                self.buf.reserve(n)
+                cx_http_taken(self.handle, self.buf.as_mut_ptr().add(len))
+                self.buf.set_len(len + n)
+            }
+            return true
+        }
+        self.ended = true
+        if kind < 0 {
+            self.fault = -kind
+            fail error_of(self.handle, self.fault)
+        }
+        return true
+    }
+
+    // Drops the LF that ends a line whose CR ended it already, once what comes next is here.
+    fn after_cr(mut self) {
+        if self.skip_lf and self.at < self.buf.len() {
+            if self.buf[self.at] == 10 {
+                self.at += 1
+            }
+            self.skip_lf = false
+        }
+    }
+
+    /// The next bytes of the body, all that have come that weren't given yet, waiting for some,
+    /// or `none` once the body has ended. Fails if the connection ended with an error, as when the
+    /// server went away mid-body (`Protocol`), or if nothing came for `read_timeout_ms`
+    /// (`Timeout`), after which it can be read again.
+    pub fn read(mut self) -> List<u8>? ! Error {
+        self.after_cr()
+        while self.at == self.buf.len() {
+            if self.ended and self.fault == 0 {
+                return none
+            }
+            let wait = self.wait_ms
+            if not try self.take(wait) {
+                fail Error.Timeout
+            }
+            self.after_cr()
+        }
+        let out = if self.at == 0 { self.buf.copy() } else { self.buf[self.at..] }
+        self.buf.clear()
+        self.at = 0
+        self.scanned = 0
+        return some(out)
+    }
+
+    // The offset in `buf` of the next CR or LF from `at`, if one has come.
+    fn line_end(mut self) -> usize? {
+        var i = self.at + self.scanned
+        while i < self.buf.len() {
+            let b = self.buf[i]
+            if b == 10 or b == 13 {
+                return some(i)
+            }
+            i += 1
+        }
+        self.scanned = self.buf.len() - self.at
+        return none
+    }
+
+    /// The next line of the body, without the LF, CRLF or CR that ends it, as Python's
+    /// `iter_lines` gives them, waiting until it has all come, or `none` once the body has ended.
+    /// A last line with no end is given as it is. The bytes are read as UTF-8, with U+FFFD for
+    /// any that aren't. Fails as `read` does.
+    pub fn read_line(mut self) -> String? ! Error {
+        loop {
+            self.after_cr()
+            match self.line_end() {
+                some(end) => {
+                    let line = decode_lossy_unicode(self.buf, self.at, end)
+                    self.at = end + 1
+                    self.scanned = 0
+                    if self.buf[end] == 13 {
+                        self.skip_lf = true
+                        self.after_cr()
+                    }
+                    return some(line)
+                }
+                none => {
+                    if self.ended and self.fault == 0 {
+                        if self.at == self.buf.len() {
+                            return none
+                        }
+                        let last = decode_lossy_unicode(self.buf, self.at, self.buf.len())
+                        self.at = self.buf.len()
+                        self.scanned = 0
+                        return some(last)
+                    }
+                    let wait = self.wait_ms
+                    if not try self.take(wait) {
+                        fail Error.Timeout
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether `read` would give something, or say the body has ended, without waiting: for a
+    /// loop that does other work, with `wake_on`.
+    pub fn ready(self) -> bool {
+        return self.at < self.buf.len() or self.ended or unsafe { cx_http_stream_ready(self.handle) }
+    }
+
+    /// Whether `read_line` would give a line, or say the body has ended, without waiting. It takes
+    /// what has come, so it can fail as `read` does.
+    pub fn line_ready(mut self) -> bool ! Error {
+        loop {
+            self.after_cr()
+            if self.ended or self.line_end() != none {
+                return true
+            }
+            if not try self.take(0) {
+                return false
+            }
+        }
+    }
+
+    /// Wakes `waker`'s `Net` as the headers come, each time some of the body does, and as it ends,
+    /// so a loop waiting on a server's `next_event`, or a `Net`'s `poll`, hears of it then and
+    /// reads what's `ready`. Wakes that come before a poll are one. A later call wakes the `Net`
+    /// it's given instead.
+    pub fn wake_on(self, waker: Waker) {
+        let (net, hooks) = unsafe { waker.parts() }
+        unsafe {
+            cx_http_wake_on(self.handle, hooks, net)
+        }
+    }
+
+    /// Closes it, whether or not its body has ended, as leaving httpx's `with stream(...)` does:
+    /// the connection is closed, so the server hears the program has stopped reading. Dropping it
+    /// does the same.
+    pub fn close(own self) {
+        var s = self
+        s.end()
+    }
+
+    fn end(mut self) {
+        if self.handle != 0 {
+            unsafe {
+                cx_http_stream_close(self.handle)
+            }
+            self.handle = 0
+        }
+    }
+
+    fn drop(mut self) {
+        self.end()
+    }
+}
+
+@track_caller
+fn open(is_post: bool, url: String, headers: List<Header>, body: List<u8>, timeout_ms: u32, read_timeout_ms: u32, version: Version) -> Stream {
+    if timeout_ms == 0 {
+        panic("a stream's timeout is at least 1 ms")
+    }
+    let head = header_lines(headers)
+    let v: u32 = match version {
+        Http1 => 0,
+        Http2 => 1,
+        Http2Only => 2,
+    }
+    let h = unsafe { cx_http_open(is_post, url.as_ptr(), url.len(), head.as_ptr(), head.len(), body.as_ptr(), body.len(), timeout_ms, v) }
+    let wait: i64 = if read_timeout_ms == 0 { -1 } else { i64(read_timeout_ms) }
+    return Stream { handle: h, wait_ms: wait, buf: List<u8>(), at: 0, scanned: 0, skip_lf: false, ended: false, fault: 0 }
+}
+
+/// Starts a GET of `url` whose body is read as it comes, and gives it at once, while it connects
+/// on its own thread, as httpx's `stream("GET", url)`. Its status and headers may take
+/// `timeout_ms` milliseconds to come, and after them there's no limit on how long the body takes
+/// or how long it is. With `read_timeout_ms`, a read that waits that long with nothing coming
+/// fails with `Timeout`, as httpx's read timeout does; with 0 it waits as long as it takes. Panics
+/// as `get` does.
+@track_caller
+pub fn stream_get(url: String, headers: List<Header> = [], timeout_ms: u32 = 30000, read_timeout_ms: u32 = 0, version: Version = Version.Http1) -> Stream {
+    return open(false, url, headers, List<u8>(), timeout_ms, read_timeout_ms, version)
+}
+
+/// Starts a POST of `body` to `url` whose answer is read as it comes, as `stream_get` does, as
+/// MCP's `subscriptions/listen` is answered with an event stream. Give a Content-Type header for
+/// the body.
+@track_caller
+pub fn stream_post(url: String, headers: List<Header>, body: List<u8>, timeout_ms: u32 = 30000, read_timeout_ms: u32 = 0, version: Version = Version.Http1) -> Stream {
+    return open(true, url, headers, body, timeout_ms, read_timeout_ms, version)
 }
 
 // The runtime's header lines, each "name:value\r\n".
