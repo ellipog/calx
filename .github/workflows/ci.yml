@@ -298,7 +298,7 @@ jobs:
       # it runs as root, since the runner's programs haven't the permission for the local network
       # that macOS asks for (TN3179), and root needs none.
       - name: mDNS with avahi and Bonjour
-        if: matrix.shard == 2 && ((runner.os == 'Linux' && runner.arch == 'X64') || runner.os == 'macOS')
+        if: matrix.shard == 3 && ((runner.os == 'Linux' && runner.arch == 'X64') || runner.os == 'macOS')
         shell: bash
         run: |
           set -eu
@@ -343,7 +343,7 @@ jobs:
       # A handoff between threads that's missing its ordering fails only now and then, so on Arm
       # the parallel and thread tests run 20 more times (CLX-274).
       - name: Threads, again and again
-        if: matrix.shard == 2 && runner.arch == 'ARM64'
+        if: matrix.shard == 3 && runner.arch == 'ARM64'
         shell: bash
         run: for i in $(seq 1 20); do "$CALX_BIN" run --release tests/run.calx -- --modes release tests/parallel tests/thread || exit 1; done
       - name: Check the release tools and the art script
@@ -358,20 +358,20 @@ jobs:
       # A full run must print the expected checksum, with one thread and with several. The
       # times on a shared runner are only a rough guide.
       - name: Tick benchmark
-        if: matrix.shard == 3
+        if: matrix.shard == 2
         shell: bash
         run: '"$CALX_BIN" run bench/run.calx -- calx --threads 1,4 --runs 1'
       - name: Build times
-        if: matrix.shard == 3
+        if: matrix.shard == 2
         shell: bash
         run: '"$CALX_BIN" run bench/build.calx -- --runs 3'
       # The VS Code extension, packaged as a .vsix, kept as an artifact, so it can be installed
       # without a checkout. The vscode job tests it.
       - name: Package the VS Code extension
-        if: matrix.shard == 3 && runner.os == 'Linux' && runner.arch == 'X64'
+        if: matrix.shard == 2 && runner.os == 'Linux' && runner.arch == 'X64'
         run: '"$CALX_BIN" run tools/vscode/package.calx'
       - uses: actions/upload-artifact@v7
-        if: matrix.shard == 3 && runner.os == 'Linux' && runner.arch == 'X64'
+        if: matrix.shard == 2 && runner.os == 'Linux' && runner.arch == 'X64'
         with:
           name: calx-vscode
           path: build/vscode/*.vsix
