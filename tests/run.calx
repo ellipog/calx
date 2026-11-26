@@ -365,6 +365,15 @@ struct Job {
     main_cmd: usize
     json_cmd: usize
     problems: List<String>
+    sim: bool            // main_cmd is in the simulator's runs
+}
+
+// A round's commands, run `at_once` at a time, and what they gave.
+struct Batch {
+    cmds: List<Command>
+    at_once: usize
+    outs: List<Output>
+    error: String?
 }
 
 fn calx_cmd(calx: String, root: String, words: List<String>) -> Command {
@@ -467,6 +476,10 @@ fn main() {
     var jobs: List<Job> = []
     var lib_cmds: List<Command> = []
     var cmds: List<Command> = []
+    // The runs on the iOS simulator, one at a time beside the rest: a build cache lets them all
+    // start at once, and with the simulator that busy, http_ios's connections sat idle past their
+    // limit and closed.
+    var sim_cmds: List<Command> = []
     var folders: List<Folder> = []
     var ti: usize = 0
     for t in tests {
@@ -489,7 +502,7 @@ fn main() {
             folders.push(folder)
             var job = Job {
                 test: ti, release: modes[mi] == "release", dir: dir.copy(), source: source.copy(), libs: [], lib_cmds: [],
-                main_cmd: 0, json_cmd: 0, problems: [],
+                main_cmd: 0, json_cmd: 0, problems: [], sim: false,
             }
             let lib_flag: List<String> = if t.kind == "library" { ["--lib"] } else if t.kind == "staticlib" { ["--staticlib"] } else { [] }
             // A static library has no `main` to run, so it's checked, for no errors if none are expected.
@@ -542,15 +555,17 @@ fn main() {
                 }
                 // The system's temporary folder, for the program, is one of its own in its test's
                 // folder, so what it leaves there is seen, and removed with the test's folder.
-                var run = calx_cmd(calx.copy(), root.copy(), words).env("CALX", calx.copy()).input_text(input).timeout(limit(t) * 1000)
+                let run = calx_cmd(calx.copy(), root.copy(), words).env("CALX", calx.copy()).input_text(input).timeout(limit(t) * 1000)
                 if t.simulator != none {
-                    run = run.env("CALX_SIMULATOR", sim_id.copy())
-                }
-                job.main_cmd = cmds.len()
-                if windows {
+                    job.sim = true
+                    job.main_cmd = sim_cmds.len()
+                    sim_cmds.push(run.env("CALX_SIMULATOR", sim_id.copy()).env("TMPDIR", "{dir}/tmp"))
+                } else if windows {
+                    job.main_cmd = cmds.len()
                     let temp = "{dir}/tmp".replace("/", "\\")
                     cmds.push(run.env("TMP", temp.copy()).env("TEMP", temp))
                 } else {
+                    job.main_cmd = cmds.len()
                     cmds.push(run.env("TMPDIR", "{dir}/tmp"))
                 }
             }
@@ -610,8 +625,27 @@ fn main() {
         broken.push(failed)
     }
 
-    // Round two: every program and check.
-    let outs = output_all(cmds, at_once)!
+    // Round two: every program and check, and beside them the simulator's runs, one at a time.
+    var batches = [
+        Batch { cmds: cmds, at_once: at_once, outs: [], error: none },
+        Batch { cmds: sim_cmds, at_once: 1, outs: [], error: none },
+    ]
+    parallel for b in mut batches {
+        if not b.cmds.is_empty() {
+            match output_all(b.cmds.copy(), b.at_once) {
+                ok(o) => b.outs = o,
+                err(e) => b.error = some("{e}"),
+            }
+        }
+    }
+    for b in batches {
+        if let e = b.error {
+            panic(e)
+        }
+    }
+    var listed = batches.to_list()
+    let sim_outs = listed.pop()!.outs
+    let outs = listed.pop()!.outs
 
     // Round three: what each did against what its test expects.
     var failed: usize = 0
@@ -622,7 +656,11 @@ fn main() {
             if not tests[job.test].errors.is_empty() {
                 check_errors(tests[job.test], job, outs[job.main_cmd], outs[job.json_cmd], mut p, mut problems)
             } else {
-                check_run(tests[job.test], job, outs[job.main_cmd], mut p, mut problems)
+                if job.sim {
+                    check_run(tests[job.test], job, sim_outs[job.main_cmd], mut p, mut problems)
+                } else {
+                    check_run(tests[job.test], job, outs[job.main_cmd], mut p, mut problems)
+                }
                 // A folder `fs.temp_dir()` gave is the program's to remove (CLX-317).
                 match fs.list("{job.dir}/tmp") {
                     ok(left) => if not left.is_empty() {
@@ -644,7 +682,11 @@ fn main() {
     // The slowest, which the run can't end before, for splitting the tests between machines.
     var slow: List<(u64, String)> = []
     for job in jobs {
-        let ns = unsafe { outs[job.main_cmd].status.usage() }.wall_ns
+        let ns = if job.sim {
+            unsafe { sim_outs[job.main_cmd].status.usage() }.wall_ns
+        } else {
+            unsafe { outs[job.main_cmd].status.usage() }.wall_ns
+        }
         slow.push((ns, "{tests[job.test].name} [{if job.release { "release" } else { "debug" }}]"))
     }
     slow.sort_by(|x, y| y.0.cmp(x.0))
