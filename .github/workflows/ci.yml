@@ -308,11 +308,24 @@ jobs:
             if [ "$ran" = yes ] && [ "$took" -lt 5 ]; then break; fi
           done
       # A part takes 2 to 8 minutes. The step's own limit, unlike the job's, leaves its log when
-      # a test hangs.
+      # a test hangs. On macOS the step's shell is in the runner's own process group, and three
+      # runs' macOS jobs stopped answering mid-tests with no log, so there the tests run in a
+      # session of their own, and a signal that ends the runner is said.
       - name: Tests
         shell: bash
         timeout-minutes: 20
-        run: '"$CALX_BIN" run --release tests/run.calx -- --modes debug,release --shard "$SHARD"'
+        run: |
+          set -- "$CALX_BIN" run --release tests/run.calx -- --modes debug,release --shard "$SHARD"
+          if [ "$RUNNER_OS" != macOS ]; then
+            exec "$@"
+          fi
+          exec perl -MPOSIX -e '
+            my $pid = fork() // die "fork: $!";
+            if ($pid == 0) { POSIX::setsid() or die "setsid: $!"; exec(@ARGV) or die "exec: $!"; }
+            waitpid($pid, 0);
+            if ($? & 127) { print STDERR "tests/run.calx was ended by signal ", $? & 127, "\n"; exit 1; }
+            exit($? >> 8);
+          ' "$@"
       # std.net.mdns beside the system's own responder (CLX-412): it finds a service avahi or
       # Bonjour announces, and avahi-browse or dns-sd finds and resolves one it announces, with
       # its TXT record. On Windows the tests run beside Windows' own responder already. On macOS
