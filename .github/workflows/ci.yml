@@ -376,7 +376,7 @@ jobs:
       # seen only by its own branch, and crowd main's out of the repository's 10 GB. Programs are
       # left out: they're most of the cache, and linking one again is quick.
       - name: Trim the build cache
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main' || github.head_ref == 'ci-speed')
         shell: bash
         run: |
           set -eu
@@ -386,13 +386,13 @@ jobs:
           esac
           du -sh "$CALX_CACHE"
       - name: Save the build cache
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main' || github.head_ref == 'ci-speed')
         uses: actions/cache/save@v6
         with:
           path: ${{ runner.temp }}/calx-cache
           key: calx-tests-${{ matrix.os }}-${{ matrix.shard }}-${{ github.run_id }}
       - name: Save the compiler's objects
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.shard == 1
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main' || github.head_ref == 'ci-speed') && matrix.shard == 1
         uses: actions/cache/save@v6
         with:
           path: ${{ runner.temp }}/ccache
@@ -407,7 +407,7 @@ jobs:
   # beside the tests, and publish waits for both.
   package:
     name: package (${{ matrix.platform }}-${{ matrix.cpu }})
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || github.head_ref == 'ci-speed'
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -770,7 +770,7 @@ jobs:
           path: ${{ runner.temp }}/toolchain-archives
           key: toolchain-archive-${{ matrix.platform }}-${{ matrix.cpu }}-${{ github.run_id }}
       - name: Save the compiler's objects
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.head_ref == 'ci-speed'
         uses: actions/cache/save@v6
         with:
           path: ${{ runner.temp }}/ccache
@@ -851,7 +851,7 @@ jobs:
           # Reaches GitHub over HTTPS. Before the first nightly is published there's nothing to find.
           "$calx" update --check || echo "(no release to compare with yet)"
       - name: Trim the build cache
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.head_ref == 'ci-speed'
         shell: bash
         env:
           CALX_CACHE: ${{ runner.temp }}/calx-cache
@@ -863,7 +863,7 @@ jobs:
           esac
           du -sh "$CALX_CACHE"
       - name: Save the build cache
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.head_ref == 'ci-speed'
         uses: actions/cache/save@v6
         with:
           path: ${{ runner.temp }}/calx-cache
