@@ -13,6 +13,8 @@ on:
       - main
     tags:
       - 'v*'
+      # A nightly's own release, which publish makes.
+      - '!v*-nightly.*'
     paths-ignore:
       - 'site/**'
   pull_request:
@@ -350,6 +352,12 @@ jobs:
         if: matrix.shard == 1
         shell: bash
         run: for f in tools/update/update.calx tools/release/package.calx tools/release/toolchain.calx tools/mdns/interop.calx assets/logo/banner.calx; do "$CALX_BIN" check "$f"; done
+      # `calx update --to` and the install script with CALX_VERSION, from a mirror on loopback: a
+      # nightly from its own release, and an older one from the nightly release.
+      - name: Install a version by its own release
+        if: matrix.shard == 1
+        shell: bash
+        run: '"$CALX_BIN" run tools/install/test.calx -- "$CALX_BIN"'
       # Calx's own code in its one format (CLX-160). The suite checks the tests' files.
       - name: Formatting
         if: matrix.shard == 1
@@ -783,10 +791,10 @@ jobs:
         shell: bash
         run: |
           # The release as GitHub will serve it, from here, by the calx just built, on loopback.
+          # Each version is in its own release, and the nightly release's version.txt names it.
           version=$(head -n1 build/dist/version.txt)
-          case "$version" in *-nightly.*) tag=nightly ;; *) tag="v$version" ;; esac
-          mkdir -p "build/mirror/download/$tag" build/mirror/download/nightly
-          cp build/dist/* "build/mirror/download/$tag/"
+          mkdir -p "build/mirror/download/v$version" build/mirror/download/nightly
+          cp build/dist/* "build/mirror/download/v$version/"
           cp build/dist/version.txt build/mirror/download/nightly/version.txt
           exe=""
           if [[ "$RUNNER_OS" == Windows ]]; then exe=".exe"; fi
@@ -878,10 +886,12 @@ jobs:
           path: build/dist/*
 
   # Publishes what the package jobs made, once every part of the tests has passed too. A tag
-  # becomes a release of its own. A push to main replaces the nightly release's files: the archives
-  # first, then version.txt, which names the newest, so it never points at one that isn't there
-  # yet. The archives of all but the last two nightlies go, the one before staying for a download
-  # that started before this one. A
+  # becomes a release of its own. A push to main becomes a release of its own too, vVERSION, a
+  # prerelease that's never the latest and never deleted, so a nightly can be pinned and installed
+  # by its version later. Then it replaces the nightly release's files: the archives first, then
+  # version.txt, which names the newest, so it never points at one that isn't there yet. The
+  # archives of all but the last two nightlies go, the one before staying for a download that
+  # started before this one. A
   # toolchain's archive is the same bytes from the same toolchain, so one the nightly has is left
   # as it is, and none goes, since an older nightly may name it.
   publish:
@@ -921,6 +931,14 @@ jobs:
             echo "::notice::main has moved on with changes to the workflows, so its own run publishes the nightly"
             exit 0
           fi
+          # The nightly's own release, with everything it names, toolchains too, before the
+          # nightly release's version.txt names it. A run that's tried again adds what's missing.
+          own="v$version"
+          if ! gh release view "$own" > /dev/null 2>&1; then
+            gh release create "$own" --prerelease --latest=false --target "$GITHUB_SHA" --title "Calx $version" \
+              --notes "A nightly: the build of $GITHUB_SHA. \`calx update --to $version\` installs it, as does CALX_VERSION=$version with the install scripts."
+          fi
+          gh release upload "$own" calx-* SHA256SUMS version.txt --clobber
           # Runs of main overlap and reach this in any order, so one whose commit the nightly has
           # already moved past leaves it, rather than putting an older build back (CLX-286).
           if current=$(gh api "repos/$GH_REPO/git/ref/tags/nightly" --jq .object.sha 2> /dev/null); then

@@ -10,7 +10,8 @@
 # Apple's SDK, from the Command Line Tools, which `xcode-select --install` installs.
 #
 # CALX_INSTALL installs somewhere else, CALX_CHANNEL=nightly picks the nightly releases,
-# CALX_NO_MODIFY_PATH=1 leaves PATH alone, and CALX_RELEASES points at a mirror.
+# CALX_VERSION=0.1.0-nightly.202611231907 installs that version and no other, CALX_NO_MODIFY_PATH=1
+# leaves PATH alone, and CALX_RELEASES points at a mirror.
 
 set -eu
 
@@ -276,10 +277,11 @@ if [ -n "$styled" ]; then
     echo
 fi
 
-# The newest version: the latest stable release, or the nightly when asked for, or while there's
-# no stable release yet.
-version=""
-if [ "${CALX_CHANNEL:-}" != nightly ]; then
+# The version asked for, or the newest: the latest stable release, or the nightly when asked
+# for, or while there's no stable release yet.
+version=${CALX_VERSION:-}
+version=${version#v}
+if [ -z "$version" ] && [ "${CALX_CHANNEL:-}" != nightly ]; then
     version=$(get "$releases/latest/download/version.txt" 2> /dev/null | head -n1 | tr -d '\r') || version=""
     if [ -z "$version" ]; then
         if [ -n "$styled" ]; then
@@ -294,19 +296,21 @@ if [ -z "$version" ]; then
 fi
 case "$version" in
     [0-9]*.[0-9]*.[0-9]*) ;;
-    *) stop "the release's version.txt doesn't hold a version" ;;
-esac
-case "$version" in
-    *-nightly.*) tag=nightly ;;
-    *) tag="v$version" ;;
+    *) if [ -n "${CALX_VERSION:-}" ]; then stop "CALX_VERSION is $CALX_VERSION, which isn't a version such as 0.1.0"; else stop "the release's version.txt doesn't hold a version"; fi ;;
 esac
 file="calx-$version-$os-$cpu.tar.gz"
+# Each version is a release of its own, vVERSION. A nightly from before nightlies had their own
+# is only in the nightly release, while it's one of the newest two.
+tag="v$version"
+case "$version" in
+    *-nightly.*) get "$releases/download/$tag/$file.sha256" > /dev/null 2>&1 || tag=nightly ;;
+esac
 url="$releases/download/$tag/$file"
 
 temp=$(mktemp -d)
 trap 'rm -rf "$temp"' EXIT
 if [ -z "$styled" ]; then echo "Downloading Calx $version..."; fi
-get_shown "$url" "$temp/$file" "$file" || stop "can't download $url"
+get_shown "$url" "$temp/$file" "$file" || stop "can't download $url${CALX_VERSION:+; is $version a version of Calx?}"
 want=$(get "$url.sha256" | cut -d' ' -f1) || stop "can't download $url.sha256"
 got=$(sha256 "$temp/$file")
 if [ "$got" != "$want" ]; then
