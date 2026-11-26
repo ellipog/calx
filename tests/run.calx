@@ -107,17 +107,19 @@ struct Args {
 
 // Which part of the tests, from 0, a test is in when they're split into `n`, by its name, so a test
 // stays in one part however the others change. The iOS simulator's tests are all in the first, so
-// only the run of that part needs a simulator.
+// only the run of that part needs a simulator. On macOS, where they take minutes, the first part
+// has nothing else.
 fn shard_of(t: Test, n: u64) -> u64 {
     if t.simulator != none {
         return 0
     }
+    let first: u64 = if env.os() == "macos" and n > 1 { 1 } else { 0 }
     // FNV-1a.
     var h: u64 = 0xcbf29ce484222325
     for i in 0..t.name.len() {
         h = (h ^ u64(t.name.byte_at(i))) * 0x100000001b3
     }
-    return h % n
+    return first + h % (n - first)
 }
 
 // K/N as (K - 1, N), or none for an empty one. Anything else ends the run.
