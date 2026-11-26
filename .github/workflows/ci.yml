@@ -261,6 +261,12 @@ jobs:
           echo "SIMULATOR=$id" >> "$GITHUB_ENV"
           nohup bash -c 'start=$(date +%s); xcrun simctl bootstatus "$1" -b > "$2/simulator-boot.txt" 2>&1; s=$?; echo "booted in $(( $(date +%s) - start )) s, status $s" >> "$2/simulator-boot.txt"; echo "$s" > "$2/simulator-booted"' \
             _ "$id" "$RUNNER_TEMP" > /dev/null 2>&1 &
+          # Swift's first compile for the simulator builds its caches of the iOS SDK's modules,
+          # which on a fresh runner whose Xcode isn't the image's default takes minutes. Done here,
+          # beside the compiler's build, staticlib_ios's app builds within its minute (CLX-424).
+          printf 'import Foundation\n' > "$RUNNER_TEMP/warm.swift"
+          nohup xcrun -sdk iphonesimulator swiftc -target arm64-apple-ios18.0-simulator -typecheck "$RUNNER_TEMP/warm.swift" \
+            > "$RUNNER_TEMP/swift-warm.txt" 2>&1 &
       - name: Toolchain
         shell: bash
         run: |
@@ -749,6 +755,11 @@ jobs:
           echo "SIMULATOR=$id" >> "$GITHUB_ENV"
           nohup bash -c 'start=$(date +%s); xcrun simctl bootstatus "$1" -b > "$2/simulator-boot.txt" 2>&1; s=$?; echo "booted in $(( $(date +%s) - start )) s, status $s" >> "$2/simulator-boot.txt"; echo "$s" > "$2/simulator-booted"' \
             _ "$id" "$RUNNER_TEMP" > /dev/null 2>&1 &
+          # As in the test job: Swift's caches of the iOS SDK's modules, built beside the release's
+          # build, so staticlib_ios's app builds within its minute (CLX-424).
+          printf 'import Foundation\n' > "$RUNNER_TEMP/warm.swift"
+          nohup xcrun -sdk iphonesimulator swiftc -target arm64-apple-ios18.0-simulator -typecheck "$RUNNER_TEMP/warm.swift" \
+            > "$RUNNER_TEMP/swift-warm.txt" 2>&1 &
       - name: Build and package
         id: build
         shell: bash
