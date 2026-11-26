@@ -100,19 +100,6 @@ jobs:
       CCACHE_SLOPPINESS: incbin
     steps:
       - uses: actions/checkout@v7
-      # The iOS simulator the tests that need one run on (CLX-408), all of them in the first part.
-      # It's started here and boots while the compiler builds; "Wait for the iOS simulator" waits
-      # for it, and says how long the boot took (CLX-424).
-      - name: Start the iOS simulator
-        if: runner.os == 'macOS' && matrix.shard == 1
-        shell: bash
-        run: |
-          id=$(xcrun simctl list devices available | grep -m1 -E '^ +iPhone' | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}')
-          if [ -z "$id" ]; then echo "this runner's Xcode has no iPhone simulator"; exit 1; fi
-          xcrun simctl list devices available | grep "$id"
-          echo "SIMULATOR=$id" >> "$GITHUB_ENV"
-          nohup bash -c 'start=$(date +%s); xcrun simctl bootstatus "$1" -b > "$2/simulator-boot.txt" 2>&1; s=$?; echo "booted in $(( $(date +%s) - start )) s, status $s" >> "$2/simulator-boot.txt"; echo "$s" > "$2/simulator-booted"' \
-            _ "$id" "$RUNNER_TEMP" > /dev/null 2>&1 &
       # clang, lld and Ninja from Ubuntu's archive. On 2026-11-11 the runners couldn't resolve its
       # mirrors for over an hour, so if apt can't install them this takes the image's own: its
       # newest clang, with lld from the same LLVM if the image has it, or else from the toolchain
@@ -253,6 +240,21 @@ jobs:
           path: ${{ runner.temp }}/calx-cache
           key: calx-tests-${{ matrix.os }}-${{ matrix.shard }}-${{ github.run_id }}
           restore-keys: calx-tests-${{ matrix.os }}-${{ matrix.shard }}-
+      # The iOS simulator the tests that need one run on (CLX-408), all of them in the first part.
+      # It boots while the compiler builds and the part's other checks run, and only after the
+      # caches are restored, which take minutes rather than seconds beside a boot on macOS's
+      # three cores. "Wait for the iOS simulator" waits for it, and says how long the boot took
+      # (CLX-424).
+      - name: Start the iOS simulator
+        if: runner.os == 'macOS' && matrix.shard == 1
+        shell: bash
+        run: |
+          id=$(xcrun simctl list devices available | grep -m1 -E '^ +iPhone' | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}')
+          if [ -z "$id" ]; then echo "this runner's Xcode has no iPhone simulator"; exit 1; fi
+          xcrun simctl list devices available | grep "$id"
+          echo "SIMULATOR=$id" >> "$GITHUB_ENV"
+          nohup bash -c 'start=$(date +%s); xcrun simctl bootstatus "$1" -b > "$2/simulator-boot.txt" 2>&1; s=$?; echo "booted in $(( $(date +%s) - start )) s, status $s" >> "$2/simulator-boot.txt"; echo "$s" > "$2/simulator-booted"' \
+            _ "$id" "$RUNNER_TEMP" > /dev/null 2>&1 &
       - name: Toolchain
         shell: bash
         run: |
@@ -267,6 +269,21 @@ jobs:
           cmake -S compiler -B "$dir" -G Ninja -DCMAKE_CXX_COMPILER=clang++ "${launcher[@]}" > /dev/null
           ninja -C "$dir"
           if command -v ccache > /dev/null; then ccache -s; fi
+      - name: Check the release tools and the art script
+        if: matrix.shard == 1
+        shell: bash
+        run: for f in tools/update/update.calx tools/release/package.calx tools/release/toolchain.calx tools/mdns/interop.calx assets/logo/banner.calx; do "$CALX_BIN" check "$f"; done
+      # `calx update --to` and the install script with CALX_VERSION, from a mirror on loopback: a
+      # nightly from its own release, and an older one from the nightly release.
+      - name: Install a version by its own release
+        if: matrix.shard == 1
+        shell: bash
+        run: '"$CALX_BIN" run tools/install/test.calx -- "$CALX_BIN"'
+      # Calx's own code in its one format (CLX-160). The suite checks the tests' files.
+      - name: Formatting
+        if: matrix.shard == 1
+        shell: bash
+        run: '"$CALX_BIN" fmt --check std tools bench assets tests/run.calx'
       # The tests find the simulator running and leave it so. After `bootstatus` returns, the
       # first program started on it can take over a minute to run, longer than a test on it may
       # take, so a program built for it is run on it until it runs in under 5 seconds (CLX-442).
@@ -348,21 +365,6 @@ jobs:
         if: matrix.shard == 3 && runner.arch == 'ARM64'
         shell: bash
         run: for i in $(seq 1 20); do "$CALX_BIN" run --release tests/run.calx -- --modes release tests/parallel tests/thread || exit 1; done
-      - name: Check the release tools and the art script
-        if: matrix.shard == 1
-        shell: bash
-        run: for f in tools/update/update.calx tools/release/package.calx tools/release/toolchain.calx tools/mdns/interop.calx assets/logo/banner.calx; do "$CALX_BIN" check "$f"; done
-      # `calx update --to` and the install script with CALX_VERSION, from a mirror on loopback: a
-      # nightly from its own release, and an older one from the nightly release.
-      - name: Install a version by its own release
-        if: matrix.shard == 1
-        shell: bash
-        run: '"$CALX_BIN" run tools/install/test.calx -- "$CALX_BIN"'
-      # Calx's own code in its one format (CLX-160). The suite checks the tests' files.
-      - name: Formatting
-        if: matrix.shard == 1
-        shell: bash
-        run: '"$CALX_BIN" fmt --check std tools bench assets tests/run.calx'
       # A full run must print the expected checksum, with one thread and with several. The
       # times on a shared runner are only a rough guide.
       - name: Tick benchmark
