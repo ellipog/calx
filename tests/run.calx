@@ -106,11 +106,16 @@ struct Args {
 }
 
 // Which part of the tests, from 0, a test is in when they're split into `n`, by its name, so a test
-// stays in one part however the others change. The iOS simulator's tests are all in the first, so
-// only the run of that part needs a simulator.
-fn shard_of(t: Test, n: u64) -> u64 {
+// stays in one part however the others change. The iOS simulator's tests, `sims` by name, take
+// turns from the first part, so each part that has one has a simulator of its own, and runs on it
+// one at a time, as two at once on one simulator make http_ios fail.
+fn shard_of(t: Test, n: u64, sims: List<String>) -> u64 {
     if t.simulator != none {
-        return 0
+        for i in 0..sims.len() {
+            if sims[i] == t.name {
+                return u64(i) % n
+            }
+        }
     }
     // FNV-1a.
     var h: u64 = 0xcbf29ce484222325
@@ -408,7 +413,14 @@ fn main() {
     let asks = windows and env.variable("CI") == none
     var tests = all
     if let s = shard {
-        tests.retain(|t| shard_of(t, s.1) == s.0)
+        var sims: List<String> = []
+        for t in tests {
+            if t.simulator != none {
+                sims.push(t.name.copy())
+            }
+        }
+        sims.sort()
+        tests.retain(|t| shard_of(t, s.1, sims) == s.0)
     }
     var skipped: usize = 0
     for t in tests {

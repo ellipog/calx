@@ -100,20 +100,6 @@ jobs:
       CCACHE_SLOPPINESS: incbin
     steps:
       - uses: actions/checkout@v7
-      # The iOS simulator the tests that need one run on (CLX-408), all of them in the first part.
-      # It's started first, so it has the whole setup to boot and settle: one booted just before
-      # the tests was slow enough that a request to itself in http_wake_on took over 2 s. "Wait for
-      # the iOS simulator" waits for it, and says how long the boot took (CLX-424).
-      - name: Start the iOS simulator
-        if: runner.os == 'macOS' && matrix.shard == 1
-        shell: bash
-        run: |
-          id=$(xcrun simctl list devices available | grep -m1 -E '^ +iPhone' | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}')
-          if [ -z "$id" ]; then echo "this runner's Xcode has no iPhone simulator"; exit 1; fi
-          xcrun simctl list devices available | grep "$id"
-          echo "SIMULATOR=$id" >> "$GITHUB_ENV"
-          nohup bash -c 'start=$(date +%s); xcrun simctl bootstatus "$1" -b > "$2/simulator-boot.txt" 2>&1; s=$?; echo "booted in $(( $(date +%s) - start )) s, status $s" >> "$2/simulator-boot.txt"; echo "$s" > "$2/simulator-booted"' \
-            _ "$id" "$RUNNER_TEMP" > /dev/null 2>&1 &
       # clang, lld and Ninja from Ubuntu's archive. On 2026-11-11 the runners couldn't resolve its
       # mirrors for over an hour, so if apt can't install them this takes the image's own: its
       # newest clang, with lld from the same LLVM if the image has it, or else from the toolchain
@@ -254,6 +240,20 @@ jobs:
           path: ${{ runner.temp }}/calx-cache
           key: calx-tests-${{ matrix.os }}-${{ matrix.shard }}-${{ github.run_id }}
           restore-keys: calx-tests-${{ matrix.os }}-${{ matrix.shard }}-
+      # The iOS simulator the tests that need one run on (CLX-408): the first part's and the
+      # second's each have one. It boots while the compiler builds, after the caches are restored,
+      # which take a minute or more each beside a boot and seconds without. "Wait for the iOS
+      # simulator" waits for it, and says how long the boot took (CLX-424).
+      - name: Start the iOS simulator
+        if: runner.os == 'macOS' && matrix.shard <= 2
+        shell: bash
+        run: |
+          id=$(xcrun simctl list devices available | grep -m1 -E '^ +iPhone' | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}')
+          if [ -z "$id" ]; then echo "this runner's Xcode has no iPhone simulator"; exit 1; fi
+          xcrun simctl list devices available | grep "$id"
+          echo "SIMULATOR=$id" >> "$GITHUB_ENV"
+          nohup bash -c 'start=$(date +%s); xcrun simctl bootstatus "$1" -b > "$2/simulator-boot.txt" 2>&1; s=$?; echo "booted in $(( $(date +%s) - start )) s, status $s" >> "$2/simulator-boot.txt"; echo "$s" > "$2/simulator-booted"' \
+            _ "$id" "$RUNNER_TEMP" > /dev/null 2>&1 &
       - name: Toolchain
         shell: bash
         run: |
@@ -289,7 +289,7 @@ jobs:
       # The system's own programs can't be: simctl finds macOS's /usr/bin/true, which has no
       # libSystem there.
       - name: Wait for the iOS simulator
-        if: runner.os == 'macOS' && matrix.shard == 1
+        if: runner.os == 'macOS' && matrix.shard <= 2
         shell: bash
         run: |
           for i in $(seq 1 900); do
