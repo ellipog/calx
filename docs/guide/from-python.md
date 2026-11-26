@@ -116,7 +116,7 @@ fn main() ! Error {
 
 | Python | Calx |
 | --- | --- |
-| `f"{name} has {n}"`, `f"{x:.2f}"` | `"{name} has {n}"`, `"{x:.2}"`: every string literal interpolates ([printing](../reference/printing.md)). Write `\{` for a brace, or use a raw string `#"..."#` |
+| `f"{name} has {n}"`, `f"{x:.2f}"` | `"{name} has {n}"`, `"{x:.2}"`: every string literal interpolates ([printing](../reference/printing.md)). Write `\{` for a brace, as in `s.contains("\{")` for Python's `"{" in s`, or use a raw string `#"..."#` |
 | `len(s)` | `s.len()` in bytes of UTF-8, or count the runes with `for r in s.runes()` |
 | `s.split(",")`, `s.split()` | `s.split(",")`, `s.split_whitespace()` |
 | `s.strip()`, `s.removeprefix("x")` | `s.trim()`, `s.trim_prefix("x")` |

@@ -1,0 +1,12 @@
+// Braces in strings, and interpolations with strings in them, which may start or end with one but
+// not both (CLX-460).
+fn main() {
+    let s = String("a\{b\}")
+    let k = 7
+    println("{s.contains("\{") or s.contains("\}")}")    // out: true
+    println("\{{k}\}")    // out: {7}
+    println("{("apple" < "apples")} {(s == "b")}")    // out: true false
+    println("[{"":>4}] [{"ab":<4}]")    // out: [    ] [ab  ]
+    println("{"-".repeat(3)} {s.replace("a", "x")} {k > 1 and s.len() == 4}")    // out: --- x{b} true
+    println(#"{"#{"a" < "b"}"}"#)    // out: {"true"}
+}

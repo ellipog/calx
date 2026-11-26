@@ -52,7 +52,7 @@ fn biggest<T: Order>(xs: List<T>) -> usize {
 fn main() {
     // Strings compare byte by byte, which for UTF-8 is code point by code point, and a string that
     // runs out first is less.
-    println("{"apple" < "banana"} {"app" < "apple"} {"Zebra" < "apple"} {"é" > "z"}")    // out: true true true true
+    println("{("apple" < "banana")} {("app" < "apple")} {("Zebra" < "apple")} {("é" > "z")}")    // out: true true true true
     let s = String("pear")
     println("{s > "peach"} {s <= String("pear")} {name(s.cmp("pears"))}")             // out: true true less
 
