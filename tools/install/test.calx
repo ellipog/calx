@@ -1,0 +1,249 @@
+// Tests that a version is found and installed by its own release, from the repository's root:
+//
+//     calx run tools/install/test.calx -- CALX
+//
+// CALX is the calx to test with: it builds calx-update from tools/update/update.calx and serves a
+// mirror laid out as GitHub's releases are, of made-up releases for this system and processor.
+// One nightly has a release of its own, `vVERSION`, as every nightly has now, and the
+// `nightly` release's version.txt names it; an older one is only in `nightly`, as a nightly from
+// before that is. Then `calx update --to` and the install script, install.sh or install.ps1, with
+// CALX_VERSION, each install the one asked for, toolchain and all, and fail on a version there's
+// no release of.
+
+import std.env.{arch, args, os}
+import std.fs.{make_dir_all, read, remove_dir_all, temp_dir, write}
+import std.hash.{sha256}
+import std.http.{get}
+import std.process.{Command, Output, Stdio, exit}
+import std.tar.{Writer as TarWriter}
+import std.thread.{sleep}
+import std.zip.{Writer as ZipWriter}
+
+// The newest nightly, with a release of its own; an older one, only in `nightly`; and one that
+// isn't anywhere.
+const NEW: str = "0.1.0-nightly.209901010000"
+const OLD: str = "0.1.0-nightly.209801010000"
+const GONE: str = "0.1.0-nightly.209701010000"
+const TOOLCHAIN: str = "Test toolchain 1"
+const PORT: str = "18768"
+
+fn main() {
+    let a = args()
+    if a.len() != 1 {
+        eprintln("usage: calx run tools/install/test.calx -- CALX")
+        exit(2)
+    }
+    let dir = temp_dir()!
+    let failed = match run(a[0], dir) {
+        ok => String(),
+        err(e) => e,
+    }
+    if let err(_) = remove_dir_all(dir) {
+    }
+    if not failed.is_empty() {
+        eprintln("install test: {failed}")
+        exit(1)
+    }
+    println("install test: every version installed from the release it's in")
+}
+
+fn run(calx: String, dir: String) ! String {
+    let windows = os() == "windows"
+    let exe = if windows { ".exe" } else { "" }
+    let updater = "{dir}/calx-update{exe}"
+    _ = try call(Command.new(calx).args(["build", "tools/update/update.calx", "-o", updater.copy()]))
+    let mirror = "{dir}/mirror/download"
+    try release(calx, updater, "{mirror}/v{NEW}", NEW)
+    try release(calx, updater, "{mirror}/nightly", OLD)
+    try save("{mirror}/nightly/version.txt", "{NEW}\n".to_bytes())
+
+    var server = match Command.new(calx).args(["serve", "{dir}/mirror", "--port", PORT]).stdout(Stdio.Null).stderr(Stdio.Null).spawn() {
+        ok(c) => c,
+        err(e) => fail "can't start calx serve: {e}",
+    }
+    let failed = match cases(updater, dir) {
+        ok => String(),
+        err(e) => e,
+    }
+    server.kill()
+    _ = server.wait()
+    if not failed.is_empty() {
+        fail failed
+    }
+}
+
+fn cases(updater: String, dir: String) ! String {
+    let releases = "http://127.0.0.1:{PORT}"
+    try wait_for("{releases}/download/nightly/version.txt")
+
+    // calx update --to, for a nightly in its own release, one only in `nightly`, and one in neither.
+    for (version, n) in [(NEW, 1), (OLD, 2)] {
+        let home = "{dir}/update-{n}"
+        let out = try call(Command.new(updater).args(["--home", home.copy(), "--current", GONE, "--to", String(version)]).env("CALX_RELEASES", releases))
+        try installed(home, version, out)
+        println("ok: calx update --to {version}")
+    }
+    let missing = try call_failing(Command.new(updater).args(["--home", "{dir}/update-3", "--current", NEW, "--to", GONE]).env("CALX_RELEASES", releases))
+    try says(missing, "no calx {GONE}")
+    println("ok: calx update --to {GONE} says there's none")
+
+    // The install script, with CALX_VERSION, for the same three.
+    for (version, n) in [(NEW, 1), (OLD, 2)] {
+        let home = "{dir}/install-{n}"
+        let out = try call(script(releases, home, version))
+        try installed(home, version, out)
+        println("ok: CALX_VERSION={version} with the install script")
+    }
+    let none_out = try call_failing(script(releases, "{dir}/install-3", GONE))
+    try says(none_out, GONE)
+    println("ok: CALX_VERSION={GONE} with the install script says there's none")
+}
+
+// The install script for this system, installing `version` from `releases` into `home`.
+fn script(releases: String, home: String, version: String) -> Command {
+    let c = if os() == "windows" {
+        Command.new("powershell").args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/install/install.ps1"])
+    } else {
+        Command.new("sh").arg("tools/install/install.sh")
+    }
+    return c.env("CALX_RELEASES", releases).env("CALX_INSTALL", home).env("CALX_VERSION", version).env("CALX_NO_MODIFY_PATH", "1").env("NO_COLOR", "1").env_remove("CALX_CHANNEL")
+}
+
+// A made-up release of `version` in `at`, as package.calx lays one out: the archive for this
+// system and processor, holding the calx given, the calx-update built, VERSION and a toolchain.txt
+// that names a toolchain in the same release, each archive with its .sha256, and version.txt.
+fn release(calx: String, updater: String, at: String, version: String) ! String {
+    let windows = os() == "windows"
+    let exe = if windows { ".exe" } else { "" }
+    let cpu = if arch() == "aarch64" { "arm64" } else { "x64" }
+
+    var tc = TarWriter.new()
+    tc.add_dir("toolchain")
+    tc.add_dir("toolchain/bin")
+    tc.add("toolchain/bin/clang{exe}", "not clang".to_bytes(), mode: 0o755)
+    tc.add("toolchain/VERSION", "{TOOLCHAIN}\n".to_bytes())
+    let tc_file = "calx-toolchain-test-1-{os()}-{cpu}.tar.xz"
+    let tc_bytes = tc.finish_xz(0)
+    let tc_sum = hex(sha256(tc_bytes))
+    try save("{at}/{tc_file}", tc_bytes)
+    try save("{at}/{tc_file}.sha256", "{tc_sum}  {tc_file}\n".to_bytes())
+
+    var files = List<(String, List<u8>, u32)>()
+    files.push(("calx/bin/calx{exe}", try load(calx), 0o755))
+    files.push(("calx/bin/calx-update{exe}", try load(updater), 0o755))
+    files.push((String("calx/runtime/calx_rt.h"), "// not the runtime\n".to_bytes(), 0o644))
+    files.push((String("calx/VERSION"), "{version}\n".to_bytes(), 0o644))
+    files.push((String("calx/toolchain.txt"), "{tc_file}\n{tc_sum}\n{TOOLCHAIN}\n".to_bytes(), 0o644))
+    var name = String()
+    var bytes = List<u8>()
+    if windows {
+        var z = ZipWriter.new()
+        for (path, b, mode) in files {
+            z.add(path, b.copy(), level: 1, mode: mode)
+        }
+        name = "calx-{version}-windows-{cpu}.zip"
+        bytes = z.finish()
+    } else {
+        var t = TarWriter.new()
+        for (path, b, mode) in files {
+            t.add(path, b.copy(), mode: mode)
+        }
+        name = "calx-{version}-{os()}-{cpu}.tar.gz"
+        bytes = t.finish_gz(1)
+    }
+    let sum = hex(sha256(bytes))
+    try save("{at}/{name}", bytes)
+    try save("{at}/{name}.sha256", "{sum}  {name}\n".to_bytes())
+    try save("{at}/version.txt", "{version}\n".to_bytes())
+}
+
+// That `home` holds `version` and the toolchain it names.
+fn installed(home: String, version: String, out: String) ! String {
+    let got = (try load_text("{home}/VERSION")).trim()
+    if got != version {
+        fail "{home} holds {got}, not {version}. It said:\n{out}"
+    }
+    let tc = (try load_text("{home}/toolchain/VERSION")).trim()
+    if tc != TOOLCHAIN {
+        fail "{home}'s toolchain is {tc}, not {TOOLCHAIN}. It said:\n{out}"
+    }
+}
+
+fn says(out: String, text: String) ! String {
+    if not out.contains(text) {
+        fail "it didn't say {text}. It said:\n{out}"
+    }
+}
+
+// Runs `c` and gives what it wrote, failing if it fails.
+fn call(c: Command) -> String ! String {
+    let out = try ran(c)
+    if not out.status.success() {
+        fail "{c} {out.status}:\n{out.text()}{out.error_text()}"
+    }
+    return "{out.text()}{out.error_text()}"
+}
+
+// Runs `c` and gives what it wrote, failing if it succeeds.
+fn call_failing(c: Command) -> String ! String {
+    let out = try ran(c)
+    if out.status.success() {
+        fail "{c} succeeded, but shouldn't have:\n{out.text()}{out.error_text()}"
+    }
+    return "{out.text()}{out.error_text()}"
+}
+
+fn ran(c: Command) -> Output ! String {
+    return match c.copy().timeout(300000).output() {
+        ok(o) => o,
+        err(e) => fail "can't run {c}: {e}",
+    }
+}
+
+// Waits up to 60 seconds for `url` to answer.
+fn wait_for(url: String) ! String {
+    for _ in 0..120 {
+        var r = get(url.copy(), [], 2000, 4096)
+        if let ok(resp) = r.wait() {
+            if resp.status == 200 {
+                return
+            }
+        }
+        unsafe { sleep(500000000) }
+    }
+    fail "calx serve didn't answer at {url}"
+}
+
+fn save(path: String, bytes: List<u8>) ! String {
+    let folder = path[..path.find_last("/") ?? 0]
+    if let err(e) = make_dir_all(folder) {
+        fail "can't make {folder}: {e}"
+    }
+    if let err(e) = write(path, bytes) {
+        fail "can't write {path}: {e}"
+    }
+}
+
+fn load(path: String) -> List<u8> ! String {
+    return match read(path) {
+        ok(b) => b,
+        err(e) => fail "can't read {path}: {e}",
+    }
+}
+
+fn load_text(path: String) -> String ! String {
+    return String.from_utf8(try load(path)) ?? String()
+}
+
+fn hex(bytes: List<u8>) -> String {
+    var out = String()
+    for b in bytes {
+        out.push(hex_digit(u32(b) >> 4))
+        out.push(hex_digit(u32(b) & 15))
+    }
+    return out
+}
+
+fn hex_digit(v: u32) -> rune {
+    return rune(u8.wrap(if v < 10 { 48 + v } else { 87 + v }))
+}

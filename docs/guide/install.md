@@ -35,7 +35,25 @@ Calx is pre-release, so until the first stable release, the scripts install the 
 | --- | --- |
 | `CALX_INSTALL` | Installs somewhere else than `~/.calx` |
 | `CALX_CHANNEL=nightly` | Installs the newest nightly even once there are stable releases |
+| `CALX_VERSION` | Installs that version, such as `0.1.0-nightly.202611231907`, and no other |
 | `CALX_NO_MODIFY_PATH=1` | Leaves PATH alone |
+| `CALX_RELEASES` | Downloads from a mirror laid out as [GitHub's releases](https://github.com/ellipog/calx/releases) are, in place of them |
+
+### Pinning a version
+
+A project that builds with one version of Calx, in CI or on each developer's machine, names it in `CALX_VERSION`:
+
+```sh
+curl -fsSL https://calxlang.com/install.sh | CALX_VERSION=0.1.0-nightly.202611231907 sh
+```
+
+```powershell
+$env:CALX_VERSION = '0.1.0-nightly.202611231907'; irm https://calxlang.com/install.ps1 | iex
+```
+
+Every release stays installable by its version, nightlies too: each is a release of its own on GitHub, tagged `v` and its version, such as `v0.1.0-nightly.202611231907`, with its archives, their SHA-256s and its toolchain. The script installs exactly that one, toolchain and all, and fails if there's no such version. On an installation, `calx update --to VERSION` does the same ([Updating](../reference/command.md#updating)).
+
+A mirror for `CALX_RELEASES` serves each release's files at `download/TAG/FILE`, as GitHub does, and the newest nightly's version in `download/nightly/version.txt`. For a nightly from before nightlies had releases of their own, the scripts and `calx update` look in `download/nightly/`, which on GitHub keeps only the newest two.
 
 ## clang
 
