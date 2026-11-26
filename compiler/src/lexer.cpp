@@ -547,6 +547,16 @@ private:
                 StringPart p;
                 p.is_expr = true;
                 p.span = span(expr_start, pos_ - 1);
+                if (quoted_at_both_ends(expr_start, pos_ - 1)) {
+                    diags_.error(span(expr_start - 1, pos_), "an interpolation can't start and end with a string, which is how "
+                                                             "`\"{\"` and `\"}\"` on one line read; write `\\{` for a brace, "
+                                                             "or put the expression in parentheses");
+                    // Parsed as nothing, as an empty one is, so the code it swallowed gets no
+                    // errors of its own.
+                    p.span = span(expr_start, expr_start);
+                    parts.push_back(p);
+                    continue;
+                }
                 split_spec(p);
                 if (p.span.begin == p.span.end) diags_.error(span(expr_start - 1, pos_), "empty `{}` in a string");
                 parts.push_back(p);
@@ -712,6 +722,17 @@ private:
         pos_ = close + 1 + hashes;
         Token& t = push(Tok::string_lit, start, pos_);
         t.parts = arena_.copy(parts);
+    }
+
+    // Whether the interpolation in `src_[b, e)` starts with a `"` and ends with one, format and all
+    // (CLX-460). That's what `"{"` and `"}"` on one line make of the code between them: in
+    // `s.contains("{") or s.contains("}")`, the `{` opens an interpolation of the string
+    // `") or s.contains("`, and the one literal runs to the last quote. Code such as `{"a" < "b"}`
+    // has the same shape, so it goes in parentheses. `{"":>8}` and `{"-".repeat(n)}` don't.
+    bool quoted_at_both_ends(std::uint32_t b, std::uint32_t e) const {
+        while (b < e && (src_[b] == ' ' || src_[b] == '\t')) b++;
+        while (e > b && (src_[e - 1] == ' ' || src_[e - 1] == '\t')) e--;
+        return e - b >= 2 && src_[b] == '"' && src_[e - 1] == '"';
     }
 
     // `{x:spec}`: the expression ends at the first `:` outside brackets, strings and runes, and
