@@ -373,14 +373,6 @@ struct Job {
     sim: bool            // main_cmd is in the simulator's runs
 }
 
-// A round's commands, run `at_once` at a time, and what they gave.
-struct Batch {
-    cmds: List<Command>
-    at_once: usize
-    outs: List<Output>
-    error: String?
-}
-
 fn calx_cmd(calx: String, root: String, words: List<String>) -> Command {
     return Command.new(calx).args(words).dir(root)
 }
@@ -488,9 +480,9 @@ fn main() {
     var jobs: List<Job> = []
     var lib_cmds: List<Command> = []
     var cmds: List<Command> = []
-    // The runs on the iOS simulator, one at a time beside the rest: a build cache lets them all
-    // start at once, and with the simulator that busy, http_ios's connections sat idle past their
-    // limit and closed.
+    // The runs on the iOS simulator, one at a time once the rest are done: a build cache lets them
+    // all start at once, and with the simulator that busy, http_ios's connections sat idle past
+    // their limit and closed.
     var sim_cmds: List<Command> = []
     var folders: List<Folder> = []
     var ti: usize = 0
@@ -637,27 +629,12 @@ fn main() {
         broken.push(failed)
     }
 
-    // Round two: every program and check, and beside them the simulator's runs, one at a time.
-    var batches = [
-        Batch { cmds: cmds, at_once: at_once, outs: [], error: none },
-        Batch { cmds: sim_cmds, at_once: 1, outs: [], error: none },
-    ]
-    parallel for b in mut batches {
-        if not b.cmds.is_empty() {
-            match output_all(b.cmds.copy(), b.at_once) {
-                ok(o) => b.outs = o,
-                err(e) => b.error = some("{e}"),
-            }
-        }
-    }
-    for b in batches {
-        if let e = b.error {
-            panic(e)
-        }
-    }
-    var listed = batches.to_list()
-    let sim_outs = listed.pop()!.outs
-    let outs = listed.pop()!.outs
+    // Round two: every program and check, and after them the simulator's runs, one at a time.
+    // Run beside the rest, which keep every core busy, http_ios's servers and clients waited
+    // seconds to run: requests took 3 to 12 s, pings went unanswered, and connections weren't
+    // kept. Alone, the simulator has the machine.
+    let outs = output_all(cmds, at_once)!
+    let sim_outs = if sim_cmds.is_empty() { List<Output>() } else { output_all(sim_cmds, 1)! }
 
     // Round three: what each did against what its test expects.
     var failed: usize = 0
