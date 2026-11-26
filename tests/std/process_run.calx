@@ -38,7 +38,7 @@ fn child(a: List<String>) {
         for _ in 0..1024 {
             write_out(chunk)
             flush()
-            eprint("{"e"}")
+            eprint("e")
         }
     } else if what == "sleep" {
         println("started")

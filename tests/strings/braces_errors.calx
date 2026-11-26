@@ -1,0 +1,17 @@
+// `"{"` and `"}"` on one line read as one string, whose `{` opens an interpolation of the code
+// between them, so an interpolation can't start and end with a string (CLX-460).
+fn main() {
+    let s = String("a\{b\}")
+    let k = 1
+    let v = 2
+    let open = s.contains("{") or s.contains("}")    // error: an interpolation can't start and end with a string
+    let one = "{" + k + "}"    // error: an interpolation can't start and end with a string
+    let pair = "{" + k + ", " + v + "}"    // error: an interpolation can't start and end with a string
+    let field = "{" + k + ":" + v + "}"    // error: an interpolation can't start and end with a string
+    let spaced = "{ " + k + " }"    // error: an interpolation can't start and end with a string
+    if s == "{" { println("open") } else if s == "}" { println("close") }    // error: an interpolation can't start and end with a string
+    println("{"a" < "b"}")    // error: an interpolation can't start and end with a string
+    println("{s.contains("{") or s.contains("}")}")    // error: an interpolation can't start and end with a string
+    println(#"#{s.contains("{") or s.contains("}")}"#)    // error: an interpolation can't start and end with a string
+    println("{open}{one}{pair}{field}{spaced}")
+}

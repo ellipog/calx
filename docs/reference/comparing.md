@@ -114,7 +114,7 @@ fn main() {
     let a = Version { major: 1, minor: 20 }
     let b = Version { major: 2, minor: 0 }
     println("{a < b} {name(a.cmp(b))} {name(b.cmp(b))}")    // out: true less equal
-    println("{Rank.Admin > Rank.Member} {"apple" < "apples"}")    // out: true true
+    println("{Rank.Admin > Rank.Member} {("apple" < "apples")}")    // out: true true
     var ranks: List<Rank> = [Rank.Admin, Rank.Guest, Rank.Member]
     ranks.sort()
     println("{ranks}")    // out: [Guest, Member, Admin]

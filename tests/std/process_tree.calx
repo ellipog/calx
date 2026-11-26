@@ -162,7 +162,7 @@ fn main() {
     match sig.signal(9) {
         ok => println("signal: {windows == false} {sig.wait().status.signal == some(9)}"),
         err(e) => {
-            println("signal: {windows} {"{e}" == "Windows has no signals: stop() sends Ctrl+Break"}")
+            println("signal: {windows} {("{e}" == "Windows has no signals: stop() sends Ctrl+Break")}")
             sig.kill_tree()
             _ = sig.wait()
         },

@@ -85,8 +85,8 @@ fn main() {
 
     // Nested building, and a string in an optional.
     let inner = "<{n}>"
-    let outer = "[{inner}{"!"}]"
-    println(outer)                               // out: [<42>!]
+    let outer = "[{inner}{"!".repeat(2)}]"
+    println(outer)                               // out: [<42>!!]
     let maybe: String? = some(String("here"))
     if let m = maybe {
         println("got {m}")                       // out: got here
