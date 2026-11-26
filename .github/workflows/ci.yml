@@ -403,28 +403,31 @@ jobs:
       # Main's caches, for the runs after it, pull requests' too; a pull request's own would be
       # seen only by its own branch, and crowd main's out of the repository's 10 GB. Programs are
       # left out: they're most of the cache, and linking one again is quick.
+      # Saved when the tests fail too: a part that fails cold and saves nothing starts cold again
+      # on main's next run, and fails the same way. The attempt is in the key so a rerun saves.
       - name: Trim the build cache
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main'"
         shell: bash
         run: |
           set -eu
+          [ -d "$CALX_CACHE" ] || exit 0
           case "$CALX_CACHE" in
             */calx-cache) rm -rf -- "$CALX_CACHE/bin" ;;
             *) echo "CALX_CACHE is $CALX_CACHE"; exit 1 ;;
           esac
           du -sh "$CALX_CACHE"
       - name: Save the build cache
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main'"
         uses: actions/cache/save@v6
         with:
           path: ${{ runner.temp }}/calx-cache
-          key: calx-tests-${{ matrix.os }}-${{ matrix.shard }}-${{ github.run_id }}
+          key: calx-tests-${{ matrix.os }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Save the compiler's objects
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.shard == 1
+        if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.shard == 1"
         uses: actions/cache/save@v6
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-tests-${{ matrix.os }}-${{ github.run_id }}
+          key: ccache-tests-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   # A release of every push to main that passes, as the nightly, and of every v* tag, which must
   # match VERSION, as a stable release (CLX-81). Each platform builds the compiler with its
