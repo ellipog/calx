@@ -21,6 +21,9 @@
 // - version.txt, holding VERSION.
 //
 // Files are added in sorted order with fixed dates, so the same inputs make the same archives.
+// Compressing the toolchain takes minutes, so with CALX_TOOLCHAIN_ARCHIVES set to a folder, as
+// CI's cache keeps one, an archive of the same name there is used instead, if it unpacks to
+// exactly what this would compress.
 //
 // On Windows, with a code-signing certificate, CALX and UPDATER are signed in place before
 // they're packaged, so Windows and its antivirus can tell who made them (CLX-414). CALX_SIGN_CERT
@@ -35,6 +38,7 @@ import std.fs.{is_dir, list, make_dir_all, metadata, read, write}
 import std.hash.{sha256}
 import std.process.{Command, exit, which}
 import std.tar.{Writer as TarWriter}
+import std.xz
 import std.zip.{Writer as ZipWriter}
 
 fn main() {
@@ -174,12 +178,34 @@ fn toolchain_archive(os: String, dir: String, out: String) -> (String, String, S
         let (path, data, mode) = f.copy()
         t.add(path, data, mode: mode)
     }
-    let bytes = t.finish_xz(9)
+    let tar = t.finish()
+    let bytes = kept_archive(asset, tar) ?? xz.compress(tar, 9)
     let sum = hex(sha256(bytes))
     try save("{out}/{asset}", bytes)
     try save("{out}/{asset}.sha256", "{sum}  {asset}\n".to_bytes())
     println("{asset}: {files.len()} files, {bytes.len()} bytes, sha256 {sum}")
     return (asset, sum, name)
+}
+
+// The archive named `asset` in the folder CALX_TOOLCHAIN_ARCHIVES names, if it's there and unpacks
+// to `tar` exactly.
+fn kept_archive(asset: String, tar: List<u8>) -> List<u8>? {
+    let dir = variable("CALX_TOOLCHAIN_ARCHIVES") else return none
+    let path = "{dir}/{asset}"
+    let bytes = match read(path) {
+        ok(b) => b,
+        err(_) => return none,
+    }
+    let same = match xz.decompress(bytes) {
+        ok(unpacked) => unpacked == tar,
+        err(_) => false,
+    }
+    if not same {
+        println("{path} holds another toolchain, so this one is compressed")
+        return none
+    }
+    println("{asset} is the one in {dir}")
+    return some(bytes)
 }
 
 // `name` in lower case, with `-` for each run of what isn't a letter, a digit or a `.`.
