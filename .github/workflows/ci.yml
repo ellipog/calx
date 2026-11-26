@@ -245,28 +245,6 @@ jobs:
           path: ${{ runner.temp }}/calx-cache
           key: calx-tests-${{ matrix.os }}-${{ matrix.shard }}-${{ github.run_id }}
           restore-keys: calx-tests-${{ matrix.os }}-${{ matrix.shard }}-
-      # The iOS simulator the tests that need one run on (CLX-408): the first part's and the
-      # second's each have one. It boots while the compiler builds, after the caches are restored,
-      # which take a minute or more each beside a boot and seconds without. "Wait for the iOS
-      # simulator" waits for it, and says how long the boot took (CLX-424).
-      - name: Start the iOS simulator
-        if: runner.os == 'macOS' && matrix.shard <= 2
-        shell: bash
-        run: |
-          # The first iPhone of the newest iOS the image has; `simctl list` lists them oldest first.
-          xcodebuild -version
-          id=$(xcrun simctl list devices available | awk '/^-- iOS /{seen=0} /^ +iPhone/ && !seen {seen=1; last=$0} END{print last}' | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}')
-          if [ -z "$id" ]; then echo "this runner's Xcode has no iPhone simulator"; exit 1; fi
-          xcrun simctl list devices available | grep -E "^-- |$id" | grep -B1 "$id"
-          echo "SIMULATOR=$id" >> "$GITHUB_ENV"
-          nohup bash -c 'start=$(date +%s); xcrun simctl bootstatus "$1" -b > "$2/simulator-boot.txt" 2>&1; s=$?; echo "booted in $(( $(date +%s) - start )) s, status $s" >> "$2/simulator-boot.txt"; echo "$s" > "$2/simulator-booted"' \
-            _ "$id" "$RUNNER_TEMP" > /dev/null 2>&1 &
-          # Swift's first compile for the simulator builds its caches of the iOS SDK's modules,
-          # which on a fresh runner whose Xcode isn't the image's default takes minutes. Done here,
-          # beside the compiler's build, staticlib_ios's app builds within its minute (CLX-424).
-          printf 'import Foundation\n' > "$RUNNER_TEMP/warm.swift"
-          nohup xcrun -sdk iphonesimulator swiftc -target arm64-apple-ios18.0-simulator -typecheck "$RUNNER_TEMP/warm.swift" \
-            > "$RUNNER_TEMP/swift-warm.txt" 2>&1 &
       - name: Toolchain
         shell: bash
         run: |
@@ -281,6 +259,29 @@ jobs:
           cmake -S compiler -B "$dir" -G Ninja -DCMAKE_CXX_COMPILER=clang++ "${launcher[@]}" > /dev/null
           ninja -C "$dir"
           if command -v ccache > /dev/null; then ccache -s; fi
+      # The iOS simulator the tests that need one run on (CLX-408): the first part's and the
+      # second's each have one. It boots once the compiler is built, while the checks below run:
+      # booting beside the build held the build's first compiler call up for 3 to 8 minutes, longer
+      # than the boot itself takes. "Wait for the iOS simulator" waits for it, and says how long
+      # the boot took (CLX-424).
+      - name: Start the iOS simulator
+        if: runner.os == 'macOS' && matrix.shard <= 2
+        shell: bash
+        run: |
+          # The first iPhone of the newest iOS the image has; `simctl list` lists them oldest first.
+          xcodebuild -version
+          id=$(xcrun simctl list devices available | awk '/^-- iOS /{seen=0} /^ +iPhone/ && !seen {seen=1; last=$0} END{print last}' | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}')
+          if [ -z "$id" ]; then echo "this runner's Xcode has no iPhone simulator"; exit 1; fi
+          xcrun simctl list devices available | grep -E "^-- |$id" | grep -B1 "$id"
+          echo "SIMULATOR=$id" >> "$GITHUB_ENV"
+          nohup bash -c 'start=$(date +%s); xcrun simctl bootstatus "$1" -b > "$2/simulator-boot.txt" 2>&1; s=$?; echo "booted in $(( $(date +%s) - start )) s, status $s" >> "$2/simulator-boot.txt"; echo "$s" > "$2/simulator-booted"' \
+            _ "$id" "$RUNNER_TEMP" > /dev/null 2>&1 &
+          # Swift's first compile for the simulator builds its caches of the iOS SDK's modules,
+          # which on a fresh runner whose Xcode isn't the image's default takes minutes. Done here,
+          # while the simulator boots, staticlib_ios's app builds within its minute (CLX-424).
+          printf 'import Foundation\n' > "$RUNNER_TEMP/warm.swift"
+          nohup xcrun -sdk iphonesimulator swiftc -target arm64-apple-ios18.0-simulator -typecheck "$RUNNER_TEMP/warm.swift" \
+            > "$RUNNER_TEMP/swift-warm.txt" 2>&1 &
       - name: Check the release tools and the art script
         if: matrix.shard == 1
         shell: bash
