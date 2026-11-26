@@ -466,12 +466,16 @@ jobs:
           - os: windows-11-arm
             platform: windows
             cpu: arm64
-          - os: macos-latest
+          # The Xcode 27 image with Xcode 27.2, as the test job has (CLX-469). The release still
+          # runs on macOS 11 and later: the compiler and the programs it builds say so.
+          - os: xcode-27
             platform: macos
             cpu: arm64
+            developer_dir: /Applications/Xcode_27.2.app/Contents/Developer
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental == true }}
     env:
+      DEVELOPER_DIR: ${{ matrix.developer_dir }}
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 300M
@@ -737,9 +741,11 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          id=$(xcrun simctl list devices available | grep -m1 -E '^ +iPhone' | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}')
+          # As in the test job: the first iPhone of the newest iOS the image has.
+          xcodebuild -version
+          id=$(xcrun simctl list devices available | awk '/^-- iOS /{seen=0} /^ +iPhone/ && !seen {seen=1; last=$0} END{print last}' | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}')
           if [ -z "$id" ]; then echo "this runner's Xcode has no iPhone simulator"; exit 1; fi
-          xcrun simctl list devices available | grep "$id"
+          xcrun simctl list devices available | grep -E "^-- |$id" | grep -B1 "$id"
           echo "SIMULATOR=$id" >> "$GITHUB_ENV"
           nohup bash -c 'start=$(date +%s); xcrun simctl bootstatus "$1" -b > "$2/simulator-boot.txt" 2>&1; s=$?; echo "booted in $(( $(date +%s) - start )) s, status $s" >> "$2/simulator-boot.txt"; echo "$s" > "$2/simulator-booted"' \
             _ "$id" "$RUNNER_TEMP" > /dev/null 2>&1 &
