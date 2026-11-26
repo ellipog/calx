@@ -146,8 +146,10 @@ fn main() {
                 if said.contains("Simulator device failed to launch") {
                     tries.push("launching: {said}")
                 } else {
+                    // A launch stopped before the app printed anything says only that it was
+                    // stopped, on a line of its own, and is tried again as one that printed nothing.
                     for line in said.lines() {
-                        if not line.starts_with("{bundle}: ") {
+                        if not line.starts_with("{bundle}: ") and not line.trim_start().starts_with("[xcrun simctl launch") {
                             printed.push(line.copy())
                         }
                     }
