@@ -8,6 +8,7 @@
 import std.env
 import std.http.{Error, Request, Response, Version, get}
 import std.net.{Conn, Event, Net}
+import std.thread.{sleep}
 
 // What the server knows of one connection: the bytes it hasn't read yet, whether it's HTTP/2,
 // its number, counting from 1 in the order the server accepted them, and the HTTP/2 streams it
@@ -196,6 +197,11 @@ fn main() {
     var a = get("{base}/one", [], 5000, 1000)
     serve(net, mut s, a)
     let one = a.wait()!
+    // URLSession can hand over the first answer before it has put that connection back in its
+    // pool, and in a busy iOS simulator a request started at once then opens a second one.
+    if env.os() == "ios" {
+        unsafe { sleep(250000000) }
+    }
     var b = get("{base}/two", [], 5000, 1000)
     serve(net, mut s, b)
     let two = b.wait()!
