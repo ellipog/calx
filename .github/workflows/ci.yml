@@ -259,11 +259,26 @@ jobs:
           cmake -S compiler -B "$dir" -G Ninja -DCMAKE_CXX_COMPILER=clang++ "${launcher[@]}" > /dev/null
           ninja -C "$dir"
           if command -v ccache > /dev/null; then ccache -s; fi
+      - name: Check the release tools and the art script
+        if: matrix.shard == 1
+        shell: bash
+        run: for f in tools/update/update.calx tools/release/package.calx tools/release/toolchain.calx tools/mdns/interop.calx assets/logo/banner.calx; do "$CALX_BIN" check "$f"; done
+      # `calx update --to` and the install script with CALX_VERSION, from a mirror on loopback: a
+      # nightly from its own release, and an older one from the nightly release.
+      - name: Install a version by its own release
+        if: matrix.shard == 1
+        shell: bash
+        run: '"$CALX_BIN" run tools/install/test.calx -- "$CALX_BIN"'
+      # Calx's own code in its one format (CLX-160). The suite checks the tests' files.
+      - name: Formatting
+        if: matrix.shard == 1
+        shell: bash
+        run: '"$CALX_BIN" fmt --check std tools bench assets tests/run.calx'
       # The iOS simulator the tests that need one run on (CLX-408): the first part's and the
-      # second's each have one. It boots once the compiler is built, while the checks below run:
-      # booting beside the build held the build's first compiler call up for 3 to 8 minutes, longer
-      # than the boot itself takes. "Wait for the iOS simulator" waits for it, and says how long
-      # the boot took (CLX-424).
+      # second's each have one. It starts once everything before the tests is done: for its first
+      # minutes it slows all else on the runner several times over, so that the compiler's build
+      # beside it took 5 minutes, not seconds, and the install check ran out of time. "Wait for the
+      # iOS simulator" waits for it, and says how long the boot took (CLX-424).
       - name: Start the iOS simulator
         if: runner.os == 'macOS' && matrix.shard <= 2
         shell: bash
@@ -282,21 +297,6 @@ jobs:
           printf 'import Foundation\n' > "$RUNNER_TEMP/warm.swift"
           nohup xcrun -sdk iphonesimulator swiftc -target arm64-apple-ios18.0-simulator -typecheck "$RUNNER_TEMP/warm.swift" \
             > "$RUNNER_TEMP/swift-warm.txt" 2>&1 &
-      - name: Check the release tools and the art script
-        if: matrix.shard == 1
-        shell: bash
-        run: for f in tools/update/update.calx tools/release/package.calx tools/release/toolchain.calx tools/mdns/interop.calx assets/logo/banner.calx; do "$CALX_BIN" check "$f"; done
-      # `calx update --to` and the install script with CALX_VERSION, from a mirror on loopback: a
-      # nightly from its own release, and an older one from the nightly release.
-      - name: Install a version by its own release
-        if: matrix.shard == 1
-        shell: bash
-        run: '"$CALX_BIN" run tools/install/test.calx -- "$CALX_BIN"'
-      # Calx's own code in its one format (CLX-160). The suite checks the tests' files.
-      - name: Formatting
-        if: matrix.shard == 1
-        shell: bash
-        run: '"$CALX_BIN" fmt --check std tools bench assets tests/run.calx'
       # The tests find the simulator running and leave it so. After `bootstatus` returns, the
       # first program started on it can take over a minute to run, longer than a test on it may
       # take, so a program built for it is run on it until it runs in under 5 seconds (CLX-442).
