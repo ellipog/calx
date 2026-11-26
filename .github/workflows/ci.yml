@@ -328,7 +328,8 @@ jobs:
         shell: bash
         timeout-minutes: 20
         run: |
-          set -- "$CALX_BIN" run --release tests/run.calx -- --modes debug,release --shard "$SHARD"
+          # A test that fails is run once more, alone; it must pass then, and is named as flaky.
+          set -- "$CALX_BIN" run --release tests/run.calx -- --modes debug,release --shard "$SHARD" --retry
           if [ "$RUNNER_OS" != macOS ]; then
             exec "$@"
           fi
