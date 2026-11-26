@@ -307,8 +307,11 @@ jobs:
             echo "a program run on it: $ran, in $took s"
             if [ "$ran" = yes ] && [ "$took" -lt 5 ]; then break; fi
           done
+      # A part takes 2 to 8 minutes. The step's own limit, unlike the job's, leaves its log when
+      # a test hangs.
       - name: Tests
         shell: bash
+        timeout-minutes: 20
         run: '"$CALX_BIN" run --release tests/run.calx -- --modes debug,release --shard "$SHARD"'
       # std.net.mdns beside the system's own responder (CLX-412): it finds a service avahi or
       # Bonjour announces, and avahi-browse or dns-sd finds and resolves one it announces, with
