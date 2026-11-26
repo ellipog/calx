@@ -453,17 +453,6 @@ jobs:
       CCACHE_SLOPPINESS: incbin
     steps:
       - uses: actions/checkout@v7
-      # Booting while the release is built, as in the test job.
-      - name: Start the iOS simulator
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          id=$(xcrun simctl list devices available | grep -m1 -E '^ +iPhone' | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}')
-          if [ -z "$id" ]; then echo "this runner's Xcode has no iPhone simulator"; exit 1; fi
-          xcrun simctl list devices available | grep "$id"
-          echo "SIMULATOR=$id" >> "$GITHUB_ENV"
-          nohup bash -c 'start=$(date +%s); xcrun simctl bootstatus "$1" -b > "$2/simulator-boot.txt" 2>&1; s=$?; echo "booted in $(( $(date +%s) - start )) s, status $s" >> "$2/simulator-boot.txt"; echo "$s" > "$2/simulator-booted"' \
-            _ "$id" "$RUNNER_TEMP" > /dev/null 2>&1 &
       # As in the test job.
       - name: Install ccache
         continue-on-error: true
@@ -718,6 +707,17 @@ jobs:
           path: ${{ runner.temp }}/toolchain-archives
           key: toolchain-archive-${{ matrix.platform }}-${{ matrix.cpu }}-${{ github.run_id }}
           restore-keys: toolchain-archive-${{ matrix.platform }}-${{ matrix.cpu }}-
+      # Booting while the release is built, once the caches are restored, as in the test job.
+      - name: Start the iOS simulator
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          id=$(xcrun simctl list devices available | grep -m1 -E '^ +iPhone' | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}')
+          if [ -z "$id" ]; then echo "this runner's Xcode has no iPhone simulator"; exit 1; fi
+          xcrun simctl list devices available | grep "$id"
+          echo "SIMULATOR=$id" >> "$GITHUB_ENV"
+          nohup bash -c 'start=$(date +%s); xcrun simctl bootstatus "$1" -b > "$2/simulator-boot.txt" 2>&1; s=$?; echo "booted in $(( $(date +%s) - start )) s, status $s" >> "$2/simulator-boot.txt"; echo "$s" > "$2/simulator-booted"' \
+            _ "$id" "$RUNNER_TEMP" > /dev/null 2>&1 &
       - name: Build and package
         id: build
         shell: bash
