@@ -209,10 +209,13 @@ fn main() {
     println(said(mut app))    // out: closed 1000
 
     // std.http.websocket's client answers the server's pings by itself, on its own thread, so
-    // its socket stays open well past the timeout.
+    // its socket stays open well past the timeout. The timeout is longer here than above, since
+    // a thread of this process answers, and a busy machine, such as an iOS simulator on a CI
+    // runner, can keep one from running for more than 400 ms.
+    app.server.ping_timeout_ms = 1500
     let ws = open("ws://127.0.0.1:{port}/ws")
     let ws_start = unsafe { Instant.now() }
-    while unsafe { Instant.now() }.nanos_since(ws_start) / 1000000 < 1500 {
+    while unsafe { Instant.now() }.nanos_since(ws_start) / 1000000 < 4000 {
         while let e = app.server.next_event(5) {
             handle(mut app, e)
         }
