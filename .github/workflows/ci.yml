@@ -93,6 +93,9 @@ jobs:
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 300M
+      # emit.cpp writes `.incbin` into the C it emits, which ccache takes for the directive and
+      # won't cache unless told it isn't one.
+      CCACHE_SLOPPINESS: incbin
     steps:
       - uses: actions/checkout@v7
       # The iOS simulator the tests that need one run on (CLX-408), all of them in the first part.
