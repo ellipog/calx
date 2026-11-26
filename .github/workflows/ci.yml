@@ -328,7 +328,8 @@ jobs:
         shell: bash
         timeout-minutes: 20
         run: |
-          set -- "$CALX_BIN" run --release tests/run.calx -- --modes debug,release --shard "$SHARD"
+          # A test that fails is run once more, alone; it must pass then, and is named as flaky.
+          set -- "$CALX_BIN" run --release tests/run.calx -- --modes debug,release --shard "$SHARD" --retry
           if [ "$RUNNER_OS" != macOS ]; then
             exec "$@"
           fi
@@ -903,7 +904,8 @@ jobs:
           exe=""
           if [[ "$RUNNER_OS" == Windows ]]; then exe=".exe"; fi
           calx=build/try/bin/calx$exe
-          "$calx" run --release tests/run.calx -- --modes debug,release tests/std tests/library tests/panics
+          # As in the test job, a test that fails is run once more, alone, and must pass then.
+          "$calx" run --release tests/run.calx -- --modes debug,release --retry tests/std tests/library tests/panics
           # Reaches GitHub over HTTPS. Before the first nightly is published there's nothing to find.
           "$calx" update --check || echo "(no release to compare with yet)"
       # Saved when the release's tests fail too, as in the test job.

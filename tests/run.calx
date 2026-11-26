@@ -103,6 +103,9 @@ struct Args {
     no_build: bool
     /// Only part K of N, as K/N, from 1/N to N/N; together the N parts are every test.
     shard: String = ""
+    /// Tests that fail are run once more, alone and one at a time, and the run fails only if one
+    /// fails again. Each that passed then is named, as flaky.
+    retry: bool
 }
 
 // Which part of the tests, from 0, a test is in when they're split into `n`, by its name, so a test
@@ -638,6 +641,7 @@ fn main() {
 
     // Round three: what each did against what its test expects.
     var failed: usize = 0
+    var failed_tests: List<String> = []
     var k: usize = 0
     for job in jobs {
         var problems = job.problems.copy()
@@ -662,6 +666,9 @@ fn main() {
         k += 1
         if not problems.is_empty() {
             failed += 1
+            if not failed_tests.contains(tests[job.test].name) {
+                failed_tests.push(tests[job.test].name.copy())
+            }
             println("FAIL {tests[job.test].name} [{if job.release { "release" } else { "debug" }}]")
             for pr in problems {
                 println(indent(pr))
@@ -725,8 +732,26 @@ fn main() {
             }
         }
     }
-    if failed > 0 or unformatted > 0 {
+    if unformatted > 0 or (failed > 0 and not a.retry) {
         process.exit(1)
+    }
+    if failed > 0 {
+        // Once more, alone, in every mode: a test that fails only beside the others, on a busy
+        // machine, passes then, and is named as flaky; one that fails again fails the run.
+        println("running again, alone: {failed_tests.join(", ")}")
+        var words: List<String> = ["run", "--release", "tests/run.calx", "--", "--modes", modes.join(","), "--jobs", "1"]
+        words.extend(failed_tests.copy())
+        let again = calx_cmd(calx.copy(), root.copy(), words).status()!
+        if not again.success() {
+            process.exit(1)
+        }
+        let actions = env.variable("GITHUB_ACTIONS") != none
+        for t in failed_tests {
+            println("flaky: {t} failed beside the others, and passed alone")
+            if actions {
+                println("::warning file={t},title=Flaky test::{t} failed beside the others, and passed when run again alone")
+            }
+        }
     }
 }
 

@@ -172,10 +172,11 @@ fn main() {
     let port = app.server.port
     println("{app.server.ping_interval_ms} {app.server.ping_timeout_ms}")    // out: 20000 20000
 
-    // A client that answers and one that never does, side by side: pings every 100 ms, and 400
-    // ms for each to be answered.
+    // A client that answers and one that never does, side by side: pings every 100 ms, and 2 s
+    // for each to be answered. This program answers for the client that answers, between the
+    // server's events, and a busy machine can keep it from running for longer than 400 ms.
     app.server.ping_interval_ms = 100
-    app.server.ping_timeout_ms = 400
+    app.server.ping_timeout_ms = 2000
     var peers = List<Peer>()
     peers.push(connect(net, port, true))
     peers.push(connect(net, port, false))
@@ -184,9 +185,9 @@ fn main() {
     let start = unsafe { Instant.now() }
     run(mut app, net, mut peers, 10000, until_closed: true)
     let took = unsafe { Instant.now() }.nanos_since(start) / 1000000
-    // It was pinged once, at 100 ms, and closed 400 ms later.
+    // It was pinged once, at 100 ms, and closed 2 s later.
     println("{shown(peers[1])} | {said(mut app)}")    // out: ping of 4 bytes, close 1011 keepalive ping timeout [closed] | closed 1011 keepalive ping timeout
-    println("{took >= 450} {peers[1].pings} {app.server.is_open(quiet)}")    // out: true 1 false
+    println("{took >= 2050} {peers[1].pings} {app.server.is_open(quiet)}")    // out: true 1 false
     // The one that answers stays open across many intervals, after the other has gone.
     run(mut app, net, mut peers, 1000)
     let answering = app.sockets[0]
@@ -202,17 +203,14 @@ fn main() {
     println("{shown(peers[2])} | {app.server.is_open(answering)} | {said(mut app)}")    // out: ping of 4 bytes, close 1011 keepalive ping timeout [closed] | true | closed 1011 keepalive ping timeout
 
     // The client that answers closes, so the next part needn't run it.
+    // Up to 10 s, as the waits above: if the server had already closed it, nothing comes, and the
+    // line below says so rather than the test waiting for good.
     net.write(peers[0].conn, frame(8, [0x03u8, 0xE8]))
-    while app.log.is_empty() {
-        run(mut app, net, mut peers, 10)
-    }
+    run(mut app, net, mut peers, 10000, until_closed: true)
     println(said(mut app))    // out: closed 1000
 
     // std.http.websocket's client answers the server's pings by itself, on its own thread, so
-    // its socket stays open well past the timeout. The timeout is longer here than above, since
-    // a thread of this process answers, and a busy machine, such as an iOS simulator on a CI
-    // runner, can keep one from running for more than 400 ms.
-    app.server.ping_timeout_ms = 1500
+    // its socket stays open well past the timeout, still 2 s.
     let ws = open("ws://127.0.0.1:{port}/ws")
     let ws_start = unsafe { Instant.now() }
     while unsafe { Instant.now() }.nanos_since(ws_start) / 1000000 < 4000 {
