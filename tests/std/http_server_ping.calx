@@ -202,10 +202,10 @@ fn main() {
     println("{shown(peers[2])} | {app.server.is_open(answering)} | {said(mut app)}")    // out: ping of 4 bytes, close 1011 keepalive ping timeout [closed] | true | closed 1011 keepalive ping timeout
 
     // The client that answers closes, so the next part needn't run it.
+    // Up to 10 s, as the waits above: if the server had already closed it, nothing comes, and the
+    // line below says so rather than the test waiting for good.
     net.write(peers[0].conn, frame(8, [0x03u8, 0xE8]))
-    while app.log.is_empty() {
-        run(mut app, net, mut peers, 10)
-    }
+    run(mut app, net, mut peers, 10000, until_closed: true)
     println(said(mut app))    // out: closed 1000
 
     // std.http.websocket's client answers the server's pings by itself, on its own thread, so
