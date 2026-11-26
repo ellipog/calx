@@ -78,8 +78,15 @@ fn child(a: List<String>) {
         _ = bound(a[1], a[2]).spawn()!
         println("ready")
         flush()
+        // Ends once the test has seen the file grow, as it says in a file of its own: ending at
+        // the first growth this one sees could take the child before the test sees any.
         if a[3] == "return" {
-            _ = growing(a[2])
+            for _ in 0..600 {
+                if size("{a[2]}.seen") > 0 {
+                    return
+                }
+                pause(100)
+            }
             return
         }
         pause(60000)
@@ -110,6 +117,9 @@ fn main() {
         var parent = Command.new(me).args(["parent", String(how), file.copy(), String(end)]).stdout(Stdio.Pipe).spawn()!
         _ = parent.wait_for_line("ready", 60000)
         let ran = growing(file)
+        if end == "return" {
+            append_text("{file}.seen", "x")!
+        }
         if end == "kill" {
             parent.kill()
         }
