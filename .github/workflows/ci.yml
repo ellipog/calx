@@ -882,24 +882,26 @@ jobs:
           "$calx" run --release tests/run.calx -- --modes debug,release tests/std tests/library tests/panics
           # Reaches GitHub over HTTPS. Before the first nightly is published there's nothing to find.
           "$calx" update --check || echo "(no release to compare with yet)"
+      # Saved when the release's tests fail too, as in the test job.
       - name: Trim the build cache
-        if: github.event_name == 'push'
+        if: "!cancelled() && github.event_name == 'push' && steps.toolchain.outputs.hash != ''"
         shell: bash
         env:
           CALX_CACHE: ${{ runner.temp }}/calx-cache
         run: |
           set -eu
+          [ -d "$CALX_CACHE" ] || exit 0
           case "$CALX_CACHE" in
             */calx-cache) rm -rf -- "$CALX_CACHE/bin" ;;
             *) echo "CALX_CACHE is $CALX_CACHE"; exit 1 ;;
           esac
           du -sh "$CALX_CACHE"
       - name: Save the build cache
-        if: github.event_name == 'push'
+        if: "!cancelled() && github.event_name == 'push' && steps.toolchain.outputs.hash != ''"
         uses: actions/cache/save@v6
         with:
           path: ${{ runner.temp }}/calx-cache
-          key: calx-release-${{ matrix.platform }}-${{ matrix.cpu }}-${{ steps.toolchain.outputs.hash }}-${{ github.run_id }}
+          key: calx-release-${{ matrix.platform }}-${{ matrix.cpu }}-${{ steps.toolchain.outputs.hash }}-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.platform }}-${{ matrix.cpu }}
