@@ -373,9 +373,10 @@ fn main() {
     println(log.wait()!)    // out: the client closed with 1000
 
     // A quiet connection whose server answers its pings stays open: it pings once nothing has
-    // come for the interval, and each pong counts as something.
-    let quiet = connect("{base}/", ping_interval_ms: 100, ping_timeout_ms: 400)!
-    println("{quiet.receive(1200)!} {quiet.is_open()} {quiet.idle_ms() < 400}")    // out: none true true
+    // come for the interval, and each pong counts as something. It stays quiet past the timeout,
+    // which is long enough that a busy machine's late pong isn't taken for none (CLX-435).
+    let quiet = connect("{base}/", ping_interval_ms: 100, ping_timeout_ms: 2000)!
+    println("{quiet.receive(2500)!} {quiet.is_open()} {quiet.idle_ms() < 2000}")    // out: none true true
     quiet.send_text("pings")!
     println("{pinged_enough(next(quiet))}")    // out: true
     quiet.close()
