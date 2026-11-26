@@ -373,7 +373,6 @@ struct Job {
     sim: bool            // main_cmd is in the simulator's runs
 }
 
-
 fn calx_cmd(calx: String, root: String, words: List<String>) -> Command {
     return Command.new(calx).args(words).dir(root)
 }
