@@ -3,7 +3,8 @@
 # changes the website (site/) skips it; a change to docs/ still runs it, since the docs' examples
 # are tests. A push runs it only on main and on v* tags, which the package and publish jobs need: a
 # pull request's branch is tested by the pull_request event alone, so each push to it runs it once,
-# not twice (CLX-392).
+# not twice (CLX-392). A pull request that changes only the website, the docs' top-level pages,
+# README.md, LICENSE or the bench workflow skips the tests, and `ci`, the check to require, passes.
 name: ci
 
 on:
@@ -17,17 +18,54 @@ on:
     paths-ignore:
       - 'site/**'
   pull_request:
-    paths-ignore:
-      - 'site/**'
+
+# A pull request's new push cancels the run of the one before. A run of main or a tag is never
+# cancelled, since each publishes what it built.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: changes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.files.outputs.code }}
+    steps:
+      - id: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          COUNT: ${{ github.event.pull_request.changed_files }}
+        run: |
+          code=true
+          # GitHub lists at most 3000 of a pull request's files, so a bigger one runs everything.
+          if [ "$COUNT" -le 3000 ] && files=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate --jq '.[].filename'); then
+            echo "$files"
+            if [ -n "$files" ] && ! grep -qvE '^(site/.*|docs/[^/]+\.md|README\.md|LICENSE|\.github/workflows/bench\.yml)$' <<< "$files"; then
+              code=false
+            fi
+          fi
+          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+
   # Nothing here needs Python: the compiler is built with CMake and Ninja, and the test runner,
   # the benchmarks and the VS Code packager are Calx programs it runs (CLX-104).
+  #
+  # Each system's tests are split in three (tests/run.calx --shard), each part on a machine of its
+  # own, and the other checks are shared out between them. The compiler's objects come from
+  # ccache, and each part's build cache from the last run of main, which alone saves them.
   test:
-    name: tests (${{ matrix.os }})
+    name: tests (${{ matrix.os }}, ${{ matrix.shard }}/3)
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.code == 'true') }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
+        os: [windows-latest, ubuntu-26.04, ubuntu-24.04-arm, windows-11-arm, macos-latest]
+        shard: [1, 2, 3]
         include:
           - os: windows-latest
             calx: build/compiler/windows/calx.exe
@@ -51,6 +89,15 @@ jobs:
     env:
       CXX: clang++
       CALX_BIN: ${{ matrix.calx }}
+      SHARD: ${{ matrix.shard }}/3
+      # Room for everything a part builds, so nothing it will save is dropped.
+      CALX_CACHE_MB: 4096
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 300M
+      # emit.cpp writes `.incbin` into the C it emits, which ccache takes for the directive and
+      # won't cache unless told it isn't one.
+      CCACHE_SLOPPINESS: incbin
     steps:
       - uses: actions/checkout@v7
       # clang, lld and Ninja from Ubuntu's archive. On 2026-11-11 the runners couldn't resolve its
@@ -150,47 +197,142 @@ jobs:
               "$($matches[1])=$($matches[2])" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
             }
           }
-      - name: Toolchain
-        run: clang --version
-      - name: Build the compiler
+      # ccache's own release, pinned and checked, for the compiler's objects. It only saves time, so
+      # if it can't be had, the compiler builds without it.
+      - name: Install ccache
+        continue-on-error: true
         shell: bash
         run: |
-          dir=$(dirname "$CALX_BIN")
-          cmake -S compiler -B "$dir" -G Ninja -DCMAKE_CXX_COMPILER=clang++ > /dev/null
-          ninja -C "$dir"
-      # The iOS simulator the tests that need one run on (CLX-408), started here, so a first boot's
-      # setup is done before the tests start and its time shows on its own (CLX-424). The tests find
-      # it running and leave it so. After `bootstatus` returns, the first program started on it can
-      # take over a minute to run, longer than a test on it may take, so a program built for it is
-      # run on it until it runs in under 5 seconds (CLX-442). The system's own programs can't be:
-      # simctl finds macOS's /usr/bin/true, which has no libSystem there.
+          v=4.14.3
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64) name=linux-x86_64-musl-static.tar.xz sum=d553fac006ed93a37342cee9228cf4e13dd66690fa1a8075c54c7bace9b72ae6 ;;
+            Linux-ARM64) name=linux-aarch64-musl-static.tar.xz sum=f13e56bdb02f62b6f08f54ac527a0a7674dff22ea607167f33621fe2f2ded37b ;;
+            macOS-ARM64) name=darwin.tar.gz sum=764dd2a8100ff83e6bbd7b9a1e2016cc401be34bee8a70ea99698186622c34d5 ;;
+            Windows-X64) name=windows-x86_64.zip sum=c845c3d65be81954c75659145a522a793a27586bf940c5dcfe18af33fa1a67dd ;;
+            Windows-ARM64) name=windows-aarch64.zip sum=4c12ee652936c83b7730ff16f93c86e9e905a91aed9549ce1304185f33c8b3e4 ;;
+          esac
+          cd "$RUNNER_TEMP"
+          file="ccache-$v-$name"
+          curl -fsSL --retry 3 --retry-delay 10 -o "$file" "https://github.com/ccache/ccache/releases/download/v$v/$file"
+          if [ "$RUNNER_OS" != macOS ]; then
+            echo "$sum  $file" | sha256sum -c
+          else
+            echo "$sum  $file" | shasum -a 256 -c
+          fi
+          case "$name" in
+            *.zip) 7z x -y "$file" > /dev/null ;;
+            *) tar -xf "$file" ;;
+          esac
+          dir="${name%.zip}"
+          echo "$RUNNER_TEMP/ccache-$v-${dir%.tar.*}" >> "$GITHUB_PATH"
+          echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
+      - name: Restore the compiler's objects
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-tests-${{ matrix.os }}-${{ github.run_id }}
+          restore-keys: ccache-tests-${{ matrix.os }}-
+      # The build cache of this part's tests from main's last run: a test whose C is the same as
+      # then needs no clang, the same C, flags and clang making the same object.
+      - name: Restore the build cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/calx-cache
+          key: calx-tests-${{ matrix.os }}-${{ matrix.shard }}-${{ github.run_id }}
+          restore-keys: calx-tests-${{ matrix.os }}-${{ matrix.shard }}-
+      # The iOS simulator the tests that need one run on (CLX-408): the first part's and the
+      # second's each have one. It boots while the compiler builds, after the caches are restored,
+      # which take a minute or more each beside a boot and seconds without. "Wait for the iOS
+      # simulator" waits for it, and says how long the boot took (CLX-424).
       - name: Start the iOS simulator
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && matrix.shard <= 2
         shell: bash
         run: |
           id=$(xcrun simctl list devices available | grep -m1 -E '^ +iPhone' | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}')
           if [ -z "$id" ]; then echo "this runner's Xcode has no iPhone simulator"; exit 1; fi
           xcrun simctl list devices available | grep "$id"
-          time xcrun simctl bootstatus "$id" -b
+          echo "SIMULATOR=$id" >> "$GITHUB_ENV"
+          nohup bash -c 'start=$(date +%s); xcrun simctl bootstatus "$1" -b > "$2/simulator-boot.txt" 2>&1; s=$?; echo "booted in $(( $(date +%s) - start )) s, status $s" >> "$2/simulator-boot.txt"; echo "$s" > "$2/simulator-booted"' \
+            _ "$id" "$RUNNER_TEMP" > /dev/null 2>&1 &
+      - name: Toolchain
+        shell: bash
+        run: |
+          clang --version
+          echo "CALX_CACHE=$RUNNER_TEMP/calx-cache" >> "$GITHUB_ENV"
+      - name: Build the compiler
+        shell: bash
+        run: |
+          dir=$(dirname "$CALX_BIN")
+          launcher=()
+          if command -v ccache > /dev/null; then launcher=(-DCMAKE_CXX_COMPILER_LAUNCHER=ccache); fi
+          cmake -S compiler -B "$dir" -G Ninja -DCMAKE_CXX_COMPILER=clang++ "${launcher[@]}" > /dev/null
+          ninja -C "$dir"
+          if command -v ccache > /dev/null; then ccache -s; fi
+      - name: Check the release tools and the art script
+        if: matrix.shard == 1
+        shell: bash
+        run: for f in tools/update/update.calx tools/release/package.calx tools/release/toolchain.calx tools/mdns/interop.calx assets/logo/banner.calx; do "$CALX_BIN" check "$f"; done
+      # `calx update --to` and the install script with CALX_VERSION, from a mirror on loopback: a
+      # nightly from its own release, and an older one from the nightly release.
+      - name: Install a version by its own release
+        if: matrix.shard == 1
+        shell: bash
+        run: '"$CALX_BIN" run tools/install/test.calx -- "$CALX_BIN"'
+      # Calx's own code in its one format (CLX-160). The suite checks the tests' files.
+      - name: Formatting
+        if: matrix.shard == 1
+        shell: bash
+        run: '"$CALX_BIN" fmt --check std tools bench assets tests/run.calx'
+      # The tests find the simulator running and leave it so. After `bootstatus` returns, the
+      # first program started on it can take over a minute to run, longer than a test on it may
+      # take, so a program built for it is run on it until it runs in under 5 seconds (CLX-442).
+      # The system's own programs can't be: simctl finds macOS's /usr/bin/true, which has no
+      # libSystem there.
+      - name: Wait for the iOS simulator
+        if: runner.os == 'macOS' && matrix.shard <= 2
+        shell: bash
+        run: |
+          for i in $(seq 1 900); do
+            if [ -f "$RUNNER_TEMP/simulator-booted" ]; then break; fi
+            sleep 1
+          done
+          tail -n 3 "$RUNNER_TEMP/simulator-boot.txt"
+          if [ "$(cat "$RUNNER_TEMP/simulator-booted" 2> /dev/null)" != 0 ]; then echo "the iOS simulator didn't boot"; exit 1; fi
           "$CALX_BIN" build --target aarch64-ios-sim tests/basics/hello.calx -o build/hello-sim
           for i in $(seq 1 30); do
             start=$(date +%s)
             ran=yes
-            xcrun simctl spawn "$id" "$PWD/build/hello-sim" > /dev/null || ran=no
+            xcrun simctl spawn "$SIMULATOR" "$PWD/build/hello-sim" > /dev/null || ran=no
             took=$(( $(date +%s) - start ))
             echo "a program run on it: $ran, in $took s"
             if [ "$ran" = yes ] && [ "$took" -lt 5 ]; then break; fi
           done
+      # A part takes 2 to 8 minutes. The step's own limit, unlike the job's, leaves its log when
+      # a test hangs. On macOS the step's shell is in the runner's own process group, and three
+      # runs' macOS jobs stopped answering mid-tests with no log, so there the tests run in a
+      # session of their own, and a signal that ends the runner is said.
       - name: Tests
         shell: bash
-        run: '"$CALX_BIN" run --release tests/run.calx -- --modes debug,release'
+        timeout-minutes: 20
+        run: |
+          set -- "$CALX_BIN" run --release tests/run.calx -- --modes debug,release --shard "$SHARD"
+          if [ "$RUNNER_OS" != macOS ]; then
+            exec "$@"
+          fi
+          exec perl -MPOSIX -e '
+            my $pid = fork() // die "fork: $!";
+            if ($pid == 0) { POSIX::setsid() or die "setsid: $!"; exec(@ARGV) or die "exec: $!"; }
+            waitpid($pid, 0);
+            if ($? & 127) { print STDERR "tests/run.calx was ended by signal ", $? & 127, "\n"; exit 1; }
+            exit($? >> 8);
+          ' "$@"
       # std.net.mdns beside the system's own responder (CLX-412): it finds a service avahi or
       # Bonjour announces, and avahi-browse or dns-sd finds and resolves one it announces, with
       # its TXT record. On Windows the tests run beside Windows' own responder already. On macOS
       # it runs as root, since the runner's programs haven't the permission for the local network
       # that macOS asks for (TN3179), and root needs none.
       - name: mDNS with avahi and Bonjour
-        if: (runner.os == 'Linux' && runner.arch == 'X64') || runner.os == 'macOS'
+        if: matrix.shard == 3 && ((runner.os == 'Linux' && runner.arch == 'X64') || runner.os == 'macOS')
         shell: bash
         run: |
           set -eu
@@ -235,50 +377,66 @@ jobs:
       # A handoff between threads that's missing its ordering fails only now and then, so on Arm
       # the parallel and thread tests run 20 more times (CLX-274).
       - name: Threads, again and again
-        if: runner.arch == 'ARM64'
+        if: matrix.shard == 3 && runner.arch == 'ARM64'
         shell: bash
         run: for i in $(seq 1 20); do "$CALX_BIN" run --release tests/run.calx -- --modes release tests/parallel tests/thread || exit 1; done
-      - name: Check the release tools and the art script
-        shell: bash
-        run: for f in tools/update/update.calx tools/release/package.calx tools/release/toolchain.calx tools/mdns/interop.calx assets/logo/banner.calx; do "$CALX_BIN" check "$f"; done
-      # `calx update --to` and the install script with CALX_VERSION, from a mirror on loopback: a
-      # nightly from its own release, and an older one from the nightly release.
-      - name: Install a version by its own release
-        shell: bash
-        run: '"$CALX_BIN" run tools/install/test.calx -- "$CALX_BIN"'
-      # Calx's own code in its one format (CLX-160). The suite checks the tests' files.
-      - name: Formatting
-        shell: bash
-        run: '"$CALX_BIN" fmt --check std tools bench assets tests/run.calx'
       # A full run must print the expected checksum, with one thread and with several. The
       # times on a shared runner are only a rough guide.
       - name: Tick benchmark
+        if: matrix.shard == 2
         shell: bash
         run: '"$CALX_BIN" run bench/run.calx -- calx --threads 1,4 --runs 1'
       - name: Build times
+        if: matrix.shard == 2
         shell: bash
         run: '"$CALX_BIN" run bench/build.calx -- --runs 3'
       # The VS Code extension, packaged as a .vsix, kept as an artifact, so it can be installed
       # without a checkout. The vscode job tests it.
       - name: Package the VS Code extension
-        if: runner.os == 'Linux' && runner.arch == 'X64'
+        if: matrix.shard == 2 && runner.os == 'Linux' && runner.arch == 'X64'
         run: '"$CALX_BIN" run tools/vscode/package.calx'
       - uses: actions/upload-artifact@v7
-        if: runner.os == 'Linux' && runner.arch == 'X64'
+        if: matrix.shard == 2 && runner.os == 'Linux' && runner.arch == 'X64'
         with:
           name: calx-vscode
           path: build/vscode/*.vsix
+      # Main's caches, for the runs after it, pull requests' too; a pull request's own would be
+      # seen only by its own branch, and crowd main's out of the repository's 10 GB. Programs are
+      # left out: they're most of the cache, and linking one again is quick.
+      - name: Trim the build cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -eu
+          case "$CALX_CACHE" in
+            */calx-cache) rm -rf -- "$CALX_CACHE/bin" ;;
+            *) echo "CALX_CACHE is $CALX_CACHE"; exit 1 ;;
+          esac
+          du -sh "$CALX_CACHE"
+      - name: Save the build cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/calx-cache
+          key: calx-tests-${{ matrix.os }}-${{ matrix.shard }}-${{ github.run_id }}
+      - name: Save the compiler's objects
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.shard == 1
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-tests-${{ matrix.os }}-${{ github.run_id }}
 
   # A release of every push to main that passes, as the nightly, and of every v* tag, which must
   # match VERSION, as a stable release (CLX-81). Each platform builds the compiler with its
   # version, commit and date stamped in, builds calx-update with it, and packages both with the
   # runtime and std (tools/release/package.calx), with the toolchain programs are built with as an
   # archive of its own (CLX-110, CLX-251). Then it serves those from here, installs them with the
-  # install script, as a user would, and builds and tests programs with what's installed.
+  # install script, as a user would, and builds and tests programs with what's installed. It runs
+  # beside the tests, and publish waits for both.
   package:
     name: package (${{ matrix.platform }}-${{ matrix.cpu }})
-    needs: test
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -303,8 +461,47 @@ jobs:
             cpu: arm64
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental == true }}
+    env:
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 300M
+      CCACHE_SLOPPINESS: incbin
     steps:
       - uses: actions/checkout@v7
+      # As in the test job.
+      - name: Install ccache
+        continue-on-error: true
+        shell: bash
+        run: |
+          v=4.14.3
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64) name=linux-x86_64-musl-static.tar.xz sum=d553fac006ed93a37342cee9228cf4e13dd66690fa1a8075c54c7bace9b72ae6 ;;
+            Linux-ARM64) name=linux-aarch64-musl-static.tar.xz sum=f13e56bdb02f62b6f08f54ac527a0a7674dff22ea607167f33621fe2f2ded37b ;;
+            macOS-ARM64) name=darwin.tar.gz sum=764dd2a8100ff83e6bbd7b9a1e2016cc401be34bee8a70ea99698186622c34d5 ;;
+            Windows-X64) name=windows-x86_64.zip sum=c845c3d65be81954c75659145a522a793a27586bf940c5dcfe18af33fa1a67dd ;;
+            Windows-ARM64) name=windows-aarch64.zip sum=4c12ee652936c83b7730ff16f93c86e9e905a91aed9549ce1304185f33c8b3e4 ;;
+          esac
+          cd "$RUNNER_TEMP"
+          file="ccache-$v-$name"
+          curl -fsSL --retry 3 --retry-delay 10 -o "$file" "https://github.com/ccache/ccache/releases/download/v$v/$file"
+          if [ "$RUNNER_OS" != macOS ]; then
+            echo "$sum  $file" | sha256sum -c
+          else
+            echo "$sum  $file" | shasum -a 256 -c
+          fi
+          case "$name" in
+            *.zip) 7z x -y "$file" > /dev/null ;;
+            *) tar -xf "$file" ;;
+          esac
+          dir="${name%.zip}"
+          echo "$RUNNER_TEMP/ccache-$v-${dir%.tar.*}" >> "$GITHUB_PATH"
+          echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
+      - name: Restore the compiler's objects
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-package-${{ matrix.platform }}-${{ matrix.cpu }}-${{ github.run_id }}
+          restore-keys: ccache-package-${{ matrix.platform }}-${{ matrix.cpu }}-
       - name: Install Ninja
         if: runner.os == 'Windows'
         shell: pwsh
@@ -365,7 +562,13 @@ jobs:
       # The toolchain a release builds programs with, so building one needs nothing else installed
       # (CLX-110): clang and lld from LLVM's own release, and on Windows mingw-w64's headers and
       # libraries from llvm-mingw's, of the same LLVM version, pinned and checked, which
-      # tools/release/toolchain.calx puts together.
+      # tools/release/toolchain.calx puts together. What's taken from LLVM's release is kept in
+      # the cache under its version, so it's downloaded once.
+      - name: Restore LLVM
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/llvm
+          key: llvm-23.1.5-${{ matrix.platform }}-${{ matrix.cpu }}
       - name: Fetch the toolchain
         if: runner.os == 'Linux'
         run: |
@@ -376,6 +579,8 @@ jobs:
             llvm=LLVM-23.1.5-Linux-X64
             sum=c3107384835f788768f614db610e87fba7077f125ca950eb02a78bab0a308065
           fi
+          echo "LLVM_RELEASE=$RUNNER_TEMP/llvm/$llvm" >> "$GITHUB_ENV"
+          if [ -d "$RUNNER_TEMP/llvm/$llvm" ]; then exit 0; fi
           for wait in 10 30 60 0; do
             curl -fsSL -o "$RUNNER_TEMP/$llvm.tar.zst" "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.5/$llvm.tar.zst" && break
             if [ "$wait" = 0 ]; then echo "LLVM's download failed"; exit 1; fi
@@ -385,19 +590,21 @@ jobs:
           echo "$sum  $RUNNER_TEMP/$llvm.tar.zst" | sha256sum -c
           # Only what the toolchain takes from it: the whole release is 10 GB unpacked. Its zstd
           # window is 1 GiB, which zstd decodes only when told to.
-          tar -I 'zstd -d --long=31' -xf "$RUNNER_TEMP/$llvm.tar.zst" -C "$RUNNER_TEMP" "$llvm/bin/clang-23" "$llvm/bin/lld" \
+          mkdir -p "$RUNNER_TEMP/llvm"
+          tar -I 'zstd -d --long=31' -xf "$RUNNER_TEMP/$llvm.tar.zst" -C "$RUNNER_TEMP/llvm" "$llvm/bin/clang-23" "$llvm/bin/lld" \
             "$llvm/bin/llvm-strip" "$llvm/bin/llvm-objcopy" "$llvm/lib/clang/23" "$llvm/include/llvm/Support/LICENSE.TXT"
           rm "$RUNNER_TEMP/$llvm.tar.zst"
-          echo "LLVM_RELEASE=$RUNNER_TEMP/$llvm" >> "$GITHUB_ENV"
       # On macOS: LLVM's Apple Silicon release, for clang, ld64.lld and dsymutil, with the SDK from
       # the runner's Command Line Tools, as a user's comes. The compiler is built with Apple's clang.
       - name: Fetch the toolchain
         if: runner.os == 'macOS'
         run: |
           command -v ninja > /dev/null || brew install ninja
-          command -v zstd > /dev/null || brew install zstd
           llvm=LLVM-23.1.5-macOS-ARM64
           sum=503de30ef90311e0b143623801b19af2250adac6d69faed65ad0051170202e3b
+          echo "LLVM_RELEASE=$RUNNER_TEMP/llvm/$llvm" >> "$GITHUB_ENV"
+          if [ -d "$RUNNER_TEMP/llvm/$llvm" ]; then exit 0; fi
+          command -v zstd > /dev/null || brew install zstd
           for wait in 10 30 60 0; do
             curl -fsSL -o "$RUNNER_TEMP/$llvm.tar.zst" "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.5/$llvm.tar.zst" && break
             if [ "$wait" = 0 ]; then echo "LLVM's download failed"; exit 1; fi
@@ -407,10 +614,10 @@ jobs:
           echo "$sum  $RUNNER_TEMP/$llvm.tar.zst" | shasum -a 256 -c
           zstd -d -q --long=31 "$RUNNER_TEMP/$llvm.tar.zst" -o "$RUNNER_TEMP/$llvm.tar"
           rm "$RUNNER_TEMP/$llvm.tar.zst"
-          tar -xf "$RUNNER_TEMP/$llvm.tar" -C "$RUNNER_TEMP" "$llvm/bin/clang-23" "$llvm/bin/lld" "$llvm/bin/dsymutil" \
+          mkdir -p "$RUNNER_TEMP/llvm"
+          tar -xf "$RUNNER_TEMP/$llvm.tar" -C "$RUNNER_TEMP/llvm" "$llvm/bin/clang-23" "$llvm/bin/lld" "$llvm/bin/dsymutil" \
             "$llvm/bin/llvm-strip" "$llvm/bin/llvm-objcopy" "$llvm/lib/clang/23" "$llvm/include/llvm/Support/LICENSE.TXT"
           rm "$RUNNER_TEMP/$llvm.tar"
-          echo "LLVM_RELEASE=$RUNNER_TEMP/$llvm" >> "$GITHUB_ENV"
       # The compiler is built with clang 20 from LLVM's apt repository, and lld beside it: those
       # alone, since llvm.sh adds lldb, whose libraries come from Ubuntu's mirrors, which the
       # runners can't always reach (CLX-268). When apt can't install them, it's built with the
@@ -479,17 +686,19 @@ jobs:
           }
           Get-Pinned "https://github.com/mstorsjo/llvm-mingw/releases/download/20261104/$mingw.zip" "$env:RUNNER_TEMP\$mingw.zip" $mingw_sum
           7z x -y "-o$env:RUNNER_TEMP" "$env:RUNNER_TEMP\$mingw.zip" > $null
+          "LLVM_MINGW=$env:RUNNER_TEMP\$mingw" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_RELEASE=$env:RUNNER_TEMP\llvm\$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          if (Test-Path "$env:RUNNER_TEMP\llvm\$llvm") { exit 0 }
           Get-Pinned "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.5/$llvm.tar.zst" "$env:RUNNER_TEMP\$llvm.tar.zst" $llvm_sum
           # Only what the toolchain takes from it: the whole release is 4 GB unpacked. Its zstd
           # window is 1 GiB, which only zstd itself decodes when told to.
           zstd -d -q --long=31 "$env:RUNNER_TEMP\$llvm.tar.zst" -o "$env:RUNNER_TEMP\$llvm.tar"
           if ($LASTEXITCODE -ne 0) { throw "can't decompress $llvm.tar.zst" }
-          & "$env:SystemRoot\System32\tar.exe" -xf "$env:RUNNER_TEMP\$llvm.tar" -C $env:RUNNER_TEMP `
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\llvm" > $null
+          & "$env:SystemRoot\System32\tar.exe" -xf "$env:RUNNER_TEMP\$llvm.tar" -C "$env:RUNNER_TEMP\llvm" `
             "$llvm/bin/clang.exe" "$llvm/bin/lld.exe" "$llvm/lib/clang"
           if ($LASTEXITCODE -ne 0) { throw "can't unpack $llvm.tar" }
           Remove-Item "$env:RUNNER_TEMP\$llvm.tar", "$env:RUNNER_TEMP\$llvm.tar.zst"
-          "LLVM_MINGW=$env:RUNNER_TEMP\$mingw" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          "LLVM_RELEASE=$env:RUNNER_TEMP\$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
       - name: Version
         id: version
         shell: bash
@@ -507,7 +716,25 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "commit=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
           echo "date=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      - name: Restore the toolchain's archive
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/toolchain-archives
+          key: toolchain-archive-${{ matrix.platform }}-${{ matrix.cpu }}-${{ github.run_id }}
+          restore-keys: toolchain-archive-${{ matrix.platform }}-${{ matrix.cpu }}-
+      # Booting while the release is built, once the caches are restored, as in the test job.
+      - name: Start the iOS simulator
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          id=$(xcrun simctl list devices available | grep -m1 -E '^ +iPhone' | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}')
+          if [ -z "$id" ]; then echo "this runner's Xcode has no iPhone simulator"; exit 1; fi
+          xcrun simctl list devices available | grep "$id"
+          echo "SIMULATOR=$id" >> "$GITHUB_ENV"
+          nohup bash -c 'start=$(date +%s); xcrun simctl bootstatus "$1" -b > "$2/simulator-boot.txt" 2>&1; s=$?; echo "booted in $(( $(date +%s) - start )) s, status $s" >> "$2/simulator-boot.txt"; echo "$s" > "$2/simulator-booted"' \
+            _ "$id" "$RUNNER_TEMP" > /dev/null 2>&1 &
       - name: Build and package
+        id: build
         shell: bash
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -530,11 +757,13 @@ jobs:
             # Every macOS has libc++; this one runs on the first for Apple Silicon, as programs do.
             link=("-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0")
           fi
+          if command -v ccache > /dev/null; then link+=(-DCMAKE_CXX_COMPILER_LAUNCHER=ccache); fi
           # The C runtime inside on Windows too, so no redistributable needs installing.
           cmake -S compiler -B build/release -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded "${link[@]}" \
             "-DCALX_VERSION=$VERSION" "-DCALX_COMMIT=$COMMIT" "-DCALX_DATE=$DATE"
           ninja -C build/release
+          if command -v ccache > /dev/null; then ccache -s; fi
           if [[ "$RUNNER_OS" == Windows ]]; then
             build/release/calx$exe run tools/release/toolchain.calx -- windows "$LLVM_MINGW" "$LLVM_RELEASE" \
               build/toolchain "LLVM 23.1.5, llvm-mingw 20261104"
@@ -549,28 +778,33 @@ jobs:
             printf '%s' "$SIGNING_CERT" | base64 -d > "$RUNNER_TEMP/signing.pfx"
             export CALX_SIGN_CERT="$RUNNER_TEMP/signing.pfx" CALX_SIGN_PASSWORD="$SIGNING_PASSWORD"
           fi
+          # An archive of this toolchain from an earlier run, used if it holds the same files, as
+          # compressing it takes minutes. One made anew is kept for the next run.
+          export CALX_TOOLCHAIN_ARCHIVES="$RUNNER_TEMP/toolchain-archives"
           build/release/calx$exe run tools/release/package.calx -- "$VERSION" ${{ matrix.platform }} \
             build/release/calx$exe build/release/calx-update$exe build/dist build/toolchain
           rm -f "$RUNNER_TEMP/signing.pfx"
-      # The iOS simulator, started and settled before the tests, as in the test job (CLX-442).
-      - name: Start the iOS simulator
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          id=$(xcrun simctl list devices available | grep -m1 -E '^ +iPhone' | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}')
-          if [ -z "$id" ]; then echo "this runner's Xcode has no iPhone simulator"; exit 1; fi
-          xcrun simctl list devices available | grep "$id"
-          time xcrun simctl bootstatus "$id" -b
-          build/release/calx build --target aarch64-ios-sim tests/basics/hello.calx -o build/hello-sim
-          for i in $(seq 1 30); do
-            start=$(date +%s)
-            ran=yes
-            xcrun simctl spawn "$id" "$PWD/build/hello-sim" > /dev/null || ran=no
-            took=$(( $(date +%s) - start ))
-            echo "a program run on it: $ran, in $took s"
-            if [ "$ran" = yes ] && [ "$took" -lt 5 ]; then break; fi
+          for f in build/dist/calx-toolchain-*.tar.xz; do
+            if ! cmp -s "$f" "$CALX_TOOLCHAIN_ARCHIVES/${f##*/}"; then
+              rm -rf -- "${RUNNER_TEMP:?}/toolchain-archives"
+              mkdir -p "$CALX_TOOLCHAIN_ARCHIVES"
+              cp "$f" "$CALX_TOOLCHAIN_ARCHIVES/"
+              echo "toolchain=new" >> "$GITHUB_OUTPUT"
+            fi
           done
-      - name: Try the release
+      - name: Save the toolchain's archive
+        if: steps.build.outputs.toolchain == 'new'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/toolchain-archives
+          key: toolchain-archive-${{ matrix.platform }}-${{ matrix.cpu }}-${{ github.run_id }}
+      - name: Save the compiler's objects
+        if: github.event_name == 'push'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-package-${{ matrix.platform }}-${{ matrix.cpu }}-${{ github.run_id }}
+      - name: Install the release
         shell: bash
         run: |
           # The release as GitHub will serve it, from here, by the calx just built, on loopback.
@@ -601,26 +835,88 @@ jobs:
           # most, libraries, and stack traces, which read the PDBs on Windows.
           "$calx" doctor | tee build/doctor.txt
           grep -q "the one Calx carries" build/doctor.txt
+      # The build cache of the last run whose release carried exactly this toolchain, every file
+      # of it the same, so the cache can't stand in for one the toolchain no longer has.
+      - name: The installed toolchain
+        id: toolchain
+        shell: bash
+        run: echo "hash=${{ hashFiles('build/try/toolchain/**') }}" >> "$GITHUB_OUTPUT"
+      - name: Restore the build cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/calx-cache
+          key: calx-release-${{ matrix.platform }}-${{ matrix.cpu }}-${{ steps.toolchain.outputs.hash }}-${{ github.run_id }}
+          restore-keys: calx-release-${{ matrix.platform }}-${{ matrix.cpu }}-${{ steps.toolchain.outputs.hash }}-
+      # The simulator started at the job's start (CLX-442), as in the test job.
+      - name: Wait for the iOS simulator
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          for i in $(seq 1 900); do
+            if [ -f "$RUNNER_TEMP/simulator-booted" ]; then break; fi
+            sleep 1
+          done
+          tail -n 3 "$RUNNER_TEMP/simulator-boot.txt"
+          if [ "$(cat "$RUNNER_TEMP/simulator-booted" 2> /dev/null)" != 0 ]; then echo "the iOS simulator didn't boot"; exit 1; fi
+          build/release/calx build --target aarch64-ios-sim tests/basics/hello.calx -o build/hello-sim
+          for i in $(seq 1 30); do
+            start=$(date +%s)
+            ran=yes
+            xcrun simctl spawn "$SIMULATOR" "$PWD/build/hello-sim" > /dev/null || ran=no
+            took=$(( $(date +%s) - start ))
+            echo "a program run on it: $ran, in $took s"
+            if [ "$ran" = yes ] && [ "$took" -lt 5 ]; then break; fi
+          done
+      - name: Test the release
+        shell: bash
+        env:
+          CALX_CACHE: ${{ runner.temp }}/calx-cache
+          CALX_CACHE_MB: 4096
+        run: |
+          exe=""
+          if [[ "$RUNNER_OS" == Windows ]]; then exe=".exe"; fi
+          calx=build/try/bin/calx$exe
           "$calx" run --release tests/run.calx -- --modes debug,release tests/std tests/library tests/panics
           # Reaches GitHub over HTTPS. Before the first nightly is published there's nothing to find.
           "$calx" update --check || echo "(no release to compare with yet)"
+      - name: Trim the build cache
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          CALX_CACHE: ${{ runner.temp }}/calx-cache
+        run: |
+          set -eu
+          case "$CALX_CACHE" in
+            */calx-cache) rm -rf -- "$CALX_CACHE/bin" ;;
+            *) echo "CALX_CACHE is $CALX_CACHE"; exit 1 ;;
+          esac
+          du -sh "$CALX_CACHE"
+      - name: Save the build cache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/calx-cache
+          key: calx-release-${{ matrix.platform }}-${{ matrix.cpu }}-${{ steps.toolchain.outputs.hash }}-${{ github.run_id }}
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.platform }}-${{ matrix.cpu }}
           path: build/dist/*
 
-  # Publishes what the package jobs made. A tag becomes a release of its own. A push to main
-  # becomes a release of its own too, vVERSION, a prerelease that's never the latest and never
-  # deleted, so a nightly can be pinned and installed by its version later. Then it
-  # replaces the nightly release's files: the archives first, then version.txt, which names the
-  # newest, so it never points at one that isn't there yet. The archives of all but the last two
-  # nightlies go, the one before staying for a download that started before this one. A
+  # Publishes what the package jobs made, once every part of the tests has passed too. A tag
+  # becomes a release of its own. A push to main becomes a release of its own too, vVERSION, a
+  # prerelease that's never the latest and never deleted, so a nightly can be pinned and installed
+  # by its version later. Then it replaces the nightly release's files: the archives first, then
+  # version.txt, which names the newest, so it never points at one that isn't there yet. The
+  # archives of all but the last two nightlies go, the one before staying for a download that
+  # started before this one. A
   # toolchain's archive is the same bytes from the same toolchain, so one the nightly has is left
   # as it is, and none goes, since an older nightly may name it.
   publish:
     name: publish
-    needs: package
+    needs: [test, package]
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.test.result == 'success' && needs.package.result == 'success' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     concurrency:
@@ -696,6 +992,7 @@ jobs:
   vscode:
     name: VS Code extension
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -709,3 +1006,20 @@ jobs:
       - name: Tests
         working-directory: tools/vscode
         run: npm test
+
+  # The one check to require: it passes when every part of the tests and the extension's tests
+  # passed, or skipped them for a pull request that changes nothing they test.
+  ci:
+    name: ci
+    if: always()
+    needs: [changes, test, vscode]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          for r in $RESULTS; do
+            if [ "$r" != success ] && [ "$r" != skipped ]; then exit 1; fi
+          done

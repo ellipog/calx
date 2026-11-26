@@ -3,6 +3,7 @@
 //     calx run tests/run.calx                                # every test, in debug mode
 //     calx run tests/run.calx -- --modes debug,release
 //     calx run tests/run.calx -- tests/integers docs/std     # the tests under folders, or single files
+//     calx run tests/run.calx -- --shard 2/3                 # a third of them, so three machines run them all
 //
 // It tests the compiler that runs it, with its runtime and standard library, as CI tests a
 // release's. To test the one built in the repository, build it, with
@@ -100,6 +101,46 @@ struct Args {
     jobs: u32 = 0
     /// Ignored: the compiler is built beforehand, by ninja.
     no_build: bool
+    /// Only part K of N, as K/N, from 1/N to N/N; together the N parts are every test.
+    shard: String = ""
+}
+
+// Which part of the tests, from 0, a test is in when they're split into `n`, by its name, so a test
+// stays in one part however the others change. The iOS simulator's tests, `sims` by name, take
+// turns from the first part, so each part that has one has a simulator of its own, and runs on it
+// one at a time, as two at once on one simulator make http_ios fail.
+fn shard_of(t: Test, n: u64, sims: List<String>) -> u64 {
+    if t.simulator != none {
+        for i in 0..sims.len() {
+            if sims[i] == t.name {
+                return u64(i) % n
+            }
+        }
+    }
+    // FNV-1a.
+    var h: u64 = 0xcbf29ce484222325
+    for i in 0..t.name.len() {
+        h = (h ^ u64(t.name.byte_at(i))) * 0x100000001b3
+    }
+    return h % n
+}
+
+// K/N as (K - 1, N), or none for an empty one. Anything else ends the run.
+fn parse_shard(s: String) -> (u64, u64)? {
+    if s.is_empty() {
+        return none
+    }
+    if let (k, n) = s.split_once("/") {
+        if let kk = u64.parse(k.trim()) {
+            if let nn = u64.parse(n.trim()) {
+                if kk >= 1 and kk <= nn {
+                    return some((kk - 1, nn))
+                }
+            }
+        }
+    }
+    eprintln("--shard takes K/N, with K from 1 to N, such as 2/3, not {s}")
+    process.exit(2)
 }
 
 struct Patterns {
@@ -329,6 +370,15 @@ struct Job {
     main_cmd: usize
     json_cmd: usize
     problems: List<String>
+    sim: bool            // main_cmd is in the simulator's runs
+}
+
+// A round's commands, run `at_once` at a time, and what they gave.
+struct Batch {
+    cmds: List<Command>
+    at_once: usize
+    outs: List<Output>
+    error: String?
 }
 
 fn calx_cmd(calx: String, root: String, words: List<String>) -> Command {
@@ -358,9 +408,20 @@ fn main() {
         }
     }
     let all = find_tests(root.copy(), a.paths.copy(), mut p)
+    let shard = parse_shard(a.shard)
     // No firewall prompts at a Windows desktop: those tests run there only in CI.
     let asks = windows and env.variable("CI") == none
     var tests = all
+    if let s = shard {
+        var sims: List<String> = []
+        for t in tests {
+            if t.simulator != none {
+                sims.push(t.name.copy())
+            }
+        }
+        sims.sort()
+        tests.retain(|t| shard_of(t, s.1, sims) == s.0)
+    }
     var skipped: usize = 0
     for t in tests {
         if let why = t.firewall {
@@ -427,6 +488,10 @@ fn main() {
     var jobs: List<Job> = []
     var lib_cmds: List<Command> = []
     var cmds: List<Command> = []
+    // The runs on the iOS simulator, one at a time beside the rest: a build cache lets them all
+    // start at once, and with the simulator that busy, http_ios's connections sat idle past their
+    // limit and closed.
+    var sim_cmds: List<Command> = []
     var folders: List<Folder> = []
     var ti: usize = 0
     for t in tests {
@@ -449,7 +514,7 @@ fn main() {
             folders.push(folder)
             var job = Job {
                 test: ti, release: modes[mi] == "release", dir: dir.copy(), source: source.copy(), libs: [], lib_cmds: [],
-                main_cmd: 0, json_cmd: 0, problems: [],
+                main_cmd: 0, json_cmd: 0, problems: [], sim: false,
             }
             let lib_flag: List<String> = if t.kind == "library" { ["--lib"] } else if t.kind == "staticlib" { ["--staticlib"] } else { [] }
             // A static library has no `main` to run, so it's checked, for no errors if none are expected.
@@ -502,15 +567,17 @@ fn main() {
                 }
                 // The system's temporary folder, for the program, is one of its own in its test's
                 // folder, so what it leaves there is seen, and removed with the test's folder.
-                var run = calx_cmd(calx.copy(), root.copy(), words).env("CALX", calx.copy()).input_text(input).timeout(limit(t) * 1000)
+                let run = calx_cmd(calx.copy(), root.copy(), words).env("CALX", calx.copy()).input_text(input).timeout(limit(t) * 1000)
                 if t.simulator != none {
-                    run = run.env("CALX_SIMULATOR", sim_id.copy())
-                }
-                job.main_cmd = cmds.len()
-                if windows {
+                    job.sim = true
+                    job.main_cmd = sim_cmds.len()
+                    sim_cmds.push(run.env("CALX_SIMULATOR", sim_id.copy()).env("TMPDIR", "{dir}/tmp"))
+                } else if windows {
+                    job.main_cmd = cmds.len()
                     let temp = "{dir}/tmp".replace("/", "\\")
                     cmds.push(run.env("TMP", temp.copy()).env("TEMP", temp))
                 } else {
+                    job.main_cmd = cmds.len()
                     cmds.push(run.env("TMPDIR", "{dir}/tmp"))
                 }
             }
@@ -570,8 +637,27 @@ fn main() {
         broken.push(failed)
     }
 
-    // Round two: every program and check.
-    let outs = output_all(cmds, at_once)!
+    // Round two: every program and check, and beside them the simulator's runs, one at a time.
+    var batches = [
+        Batch { cmds: cmds, at_once: at_once, outs: [], error: none },
+        Batch { cmds: sim_cmds, at_once: 1, outs: [], error: none },
+    ]
+    parallel for b in mut batches {
+        if not b.cmds.is_empty() {
+            match output_all(b.cmds.copy(), b.at_once) {
+                ok(o) => b.outs = o,
+                err(e) => b.error = some("{e}"),
+            }
+        }
+    }
+    for b in batches {
+        if let e = b.error {
+            panic(e)
+        }
+    }
+    var listed = batches.to_list()
+    let sim_outs = listed.pop()!.outs
+    let outs = listed.pop()!.outs
 
     // Round three: what each did against what its test expects.
     var failed: usize = 0
@@ -582,7 +668,11 @@ fn main() {
             if not tests[job.test].errors.is_empty() {
                 check_errors(tests[job.test], job, outs[job.main_cmd], outs[job.json_cmd], mut p, mut problems)
             } else {
-                check_run(tests[job.test], job, outs[job.main_cmd], mut p, mut problems)
+                if job.sim {
+                    check_run(tests[job.test], job, sim_outs[job.main_cmd], mut p, mut problems)
+                } else {
+                    check_run(tests[job.test], job, outs[job.main_cmd], mut p, mut problems)
+                }
                 // A folder `fs.temp_dir()` gave is the program's to remove (CLX-317).
                 match fs.list("{job.dir}/tmp") {
                     ok(left) => if not left.is_empty() {
@@ -600,6 +690,20 @@ fn main() {
                 println(indent(pr))
             }
         }
+    }
+    // The slowest, which the run can't end before, for splitting the tests between machines.
+    var slow: List<(u64, String)> = []
+    for job in jobs {
+        let ns = if job.sim {
+            unsafe { sim_outs[job.main_cmd].status.usage() }.wall_ns
+        } else {
+            unsafe { outs[job.main_cmd].status.usage() }.wall_ns
+        }
+        slow.push((ns, "{tests[job.test].name} [{if job.release { "release" } else { "debug" }}]"))
+    }
+    slow.sort_by(|x, y| y.0.cmp(x.0))
+    for s in slow[..5usize.min(slow.len())] {
+        println("slow: {s.0 / 1000000} ms, {s.1}")
     }
     // And the formatting.
     var unformatted: usize = 0
@@ -633,7 +737,8 @@ fn main() {
     let skips = if skipped > 0 { ", {skipped} skipped" } else { "" }
     let formats = if unformatted > 0 { ", {unformatted} not formatted" } else { "" }
     let system = if windows { "Windows" } else if env.os() == "macos" { "macOS" } else { "Linux" }
-    println("{jobs.len() - failed} passed, {failed} failed{formats}{skips} ({tests.len()} tests, modes: {modes.join(", ")}, {system})")
+    let part = if a.shard.is_empty() { String() } else { ", part {a.shard}" }
+    println("{jobs.len() - failed} passed, {failed} failed{formats}{skips} ({tests.len()} tests, modes: {modes.join(", ")}, {system}{part})")
     // A simulator this started is shut down again, as it found it.
     if let s = simulator {
         if s.started {

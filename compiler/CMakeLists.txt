@@ -56,8 +56,10 @@ endif()
 if(NOT DEFINED CALX_DATE)
     set(CALX_DATE "")
 endif()
-target_compile_definitions(calx PRIVATE CALX_VERSION="${CALX_VERSION}" CALX_COMMIT="${CALX_COMMIT}"
-                                        CALX_DATE="${CALX_DATE}")
+# Only on the files that read them, so a nightly's build, whose version and commit are new each
+# time, finds the other files in CI's compiler cache.
+set_property(SOURCE src/main.cpp src/doctor.cpp src/update.cpp src/calx.rc APPEND PROPERTY COMPILE_DEFINITIONS
+    CALX_VERSION="${CALX_VERSION}" CALX_COMMIT="${CALX_COMMIT}" CALX_DATE="${CALX_DATE}")
 
 if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(calx PRIVATE /W4 /permissive-)
@@ -73,8 +75,8 @@ if(WIN32)
     # numbers and its text.
     string(REGEX MATCH "^([0-9]+)\\.([0-9]+)\\.([0-9]+)" _ "${CALX_VERSION}")
     target_sources(calx PRIVATE src/calx.rc)
-    set_source_files_properties(src/calx.rc PROPERTIES COMPILE_DEFINITIONS
-        "CALX_VERSION_MAJOR=${CMAKE_MATCH_1};CALX_VERSION_MINOR=${CMAKE_MATCH_2};CALX_VERSION_PATCH=${CMAKE_MATCH_3}")
+    set_property(SOURCE src/calx.rc APPEND PROPERTY COMPILE_DEFINITIONS
+        CALX_VERSION_MAJOR=${CMAKE_MATCH_1} CALX_VERSION_MINOR=${CMAKE_MATCH_2} CALX_VERSION_PATCH=${CMAKE_MATCH_3})
     # Visual Studio's STL 14.52 refuses a clang older than 22 (error STL1000), and GitHub's
     # windows-latest image has that STL with LLVM 20 since 2026-11-18 (CLX-373). The compiler uses
     # nothing from the STL that clang 20 can't build, so an older clang is let through.
