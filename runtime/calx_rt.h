@@ -353,6 +353,22 @@ static inline __attribute__((nodebug)) cx_Library cx_copy_Library(const cx_Libra
     __builtin_trap();
 }
 
+/* C libraries, for std.c's `CLibrary` (CLX-477), in calx_clib.c. `cx_clib_open` gives the
+ * system's handle, or null, leaving why for `cx_clib_error_len` and `cx_clib_error_copy`, per
+ * thread. A name without a folder is found where the system finds libraries, and a path is from
+ * the current folder. `cx_clib_symbol` gives the address of `name`, or null. */
+CX_FN(void*, cx_clib_open, (const cx_u8* path, cx_usize len));
+CX_FN(cx_usize, cx_clib_error_len, (void));
+CX_FN(void, cx_clib_error_copy, (cx_u8* out));
+CX_FN(void*, cx_clib_symbol, (void* lib, const cx_u8* name, cx_usize len));
+CX_FN(void, cx_clib_close, (void* lib));
+/* What both kinds of library are loaded with, which calx_lib.c calls too. `search` looks for a
+ * name without a folder where the system keeps libraries, rather than in the current folder.
+ * Fails with null, and the system's words in `why`. */
+void* cx_dl_load(const cx_u8* path, cx_usize len, cx_bool search, cx_String* why);
+void* cx_dl_symbol(void* h, const char* name);
+void cx_dl_unload(void* h);
+
 /* Arenas (D114). An arena hands out memory from the bottom of its newest chunk up, and frees it
  * all at once. The state is on the heap, so an `Arena` is one pointer, and the lists made from it
  * hold that pointer, never the `Arena` itself. The first chunk is made when it's first needed. */

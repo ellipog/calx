@@ -101,7 +101,7 @@ Pointers are only used inside `unsafe`:
 | `p.is_null()` | Whether `p` is null |
 | `p.addr()` | `p`'s address, as a `usize` |
 | `p.cast<U>()` | The same address as a pointer to a `U`, `*U` or `*const U` as `p` is, as C's `(U*)p` |
-| `p.to_fn<F>()` | The same address as a C function, of the [`extern "C" fn` type](#c-function-values) `F`, for an address C gave, such as `dlsym`'s or `GetProcAddress`'s |
+| `p.to_fn<F>()` | The same address as a C function, of the [`extern "C" fn` type](#c-function-values) `F`, for an address C gave, such as [`CLibrary.symbol`](#c-libraries-opened-while-running)'s |
 | `p.to_box()` | Takes back the box `b.into_ptr()` gave, from a `*T` |
 
 `read` and `write` copy whole values, so they need `Copy` types: copying a value that owns memory would leave two owners of it.
@@ -232,6 +232,23 @@ fn twice(x: i32) -> i32 {
 fn main() {
     let f: extern "C" fn(i32) -> i32 = twice    // error: `twice` is a Calx function, and an `extern "C" fn(i32) -> i32` is a C one; mark `twice` `@export_c`, so C can call it
     _ = f
+}
+```
+
+### C libraries opened while running
+
+A C library the program finds only when it runs, such as one it downloaded, is opened with [std.c](../std/c.md)'s `CLibrary`, as Python's `ctypes.CDLL` opens one, and `symbol` gives the address of a function in it, which `to_fn` makes one Calx calls (CLX-477). It works the same on Windows, Linux and macOS, in a program and in a [static library](embedding.md), so a module needn't declare `LoadLibraryW` or `dlopen` itself, which no one module could do for every system: the link would fail on the systems without the one it declared.
+
+```calx
+import std.c.{CLibrary}
+import std.env.{os}
+
+fn main() {
+    let name = if os() == "windows" { "ucrtbase.dll" } else if os() == "macos" { "libSystem.dylib" } else { "libc.so.6" }
+    let libc = unsafe { CLibrary.open(name)! }
+    let abs = unsafe { libc.symbol("abs").to_fn<extern "C" fn(i32) -> i32>() }
+    println("{unsafe { abs(-7) }}")    // out: 7
+    unsafe { libc.close() }
 }
 ```
 

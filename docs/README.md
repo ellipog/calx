@@ -140,6 +140,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 66. [std.bz2](std/bz2.md): bzip2 files decompressed as Python's `bz2.decompress` reads them, every stream in a file and randomised blocks too, with the same errors, and compressed byte for byte as `bz2.compress` writes them, several blocks at once
 67. [std.net.mdns](std/net-mdns.md): services announced and found on the local network with mDNS and DNS-SD, as Python's `zeroconf` and Bonjour do, beside the system's own responder, so Bonjour, avahi and Windows find what it announces
 68. [std.http.sse](std/http-sse.md): server-sent events read as they come over a `std.http` stream, as a browser's `EventSource` and Python's `httpx_sse` read them, with multi-line data, IDs, retry times, and reconnects that send `Last-Event-ID`
+69. [std.c](std/c.md): C libraries opened while the program runs, by path or by name, and the addresses of their functions, which `to_fn` makes callable, as Python's `ctypes.CDLL` opens them, in programs and static libraries alike
 
 ### Java compatibility
 
