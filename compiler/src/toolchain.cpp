@@ -2187,6 +2187,8 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // read debug information, which the rest of the runtime never does.
     bool parts_ok = part("calx_trace.c");
     if (parts_ok && opens) parts_ok = part("calx_lib.c");
+    // Loading a shared library, which `Library` does and std.c's `CLibrary` (CLX-477).
+    if (parts_ok && calls({"cx_clib_"})) parts_ok = part("calx_clib.c");
     if (parts_ok && calls({"cx_net_"})) parts_ok = part("calx_net.c");
     if (parts_ok && calls({"cx_jt_"})) parts_ok = part("calx_jtable.c");
     if (parts_ok && calls({"cx_oh_"})) parts_ok = part("calx_ohtable.c");

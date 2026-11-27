@@ -1,0 +1,206 @@
+// CLX-477: std.c's `CLibrary` opens a C library while the program runs, finds its functions and
+// calls them, as loom's core opens sherpa-onnx's C API, which needs onnxruntime beside it. The test
+// builds two C libraries with clang into a folder of their own: `api`, whose `api_twice` calls
+// `dep_add` in `dep`, which it's linked against and finds beside it. A program opens `api` by its
+// path, which loads `dep` from that folder too, calls `api_twice`, finds that a name it doesn't
+// export is null, and opens it twice and closes both. Then the same from a static library, built
+// in debug and release and linked into a C host, which hands it the path.
+// file: main.calx
+import std.c.{CLibrary}
+import std.env.{arch, os, script, variable}
+import std.fs.{make_dir_all}
+import std.path.{join, parent_dir}
+import std.process.{Command}
+
+/// What a program printed, or with how it ended if it failed.
+fn run(exe: String, args: List<String>, dir: String) -> String {
+    match Command.new(exe).args(args).dir(dir).output() {
+        ok(o) => {
+            let text = "{o.text()}{o.error_text()}".trim_end()
+            return if o.status.success() { text } else { "{text} [{o.status}]" }
+        },
+        err(e) => return "can't run {exe}: {e}",
+    }
+}
+
+/// Nothing if a build step worked, as Visual Studio's linker says what it made, or else what it said.
+fn step(exe: String, args: List<String>, dir: String) -> String {
+    match Command.new(exe).args(args).dir(dir).output() {
+        ok(o) => return if o.status.success() { String() } else { "{o.text()}{o.error_text()}".trim_end() },
+        err(e) => return "can't run {exe}: {e}",
+    }
+}
+
+/// The file a library named `name` is in, on this system.
+fn library_file(name: str) -> String {
+    return match os() {
+        "windows" => "{name}.dll",
+        "macos" => "lib{name}.dylib",
+        _ => "lib{name}.so",
+    }
+}
+
+/// What clang needs to link for Windows as Visual Studio does, with its DLL C runtime, as the
+/// static library is built for.
+fn windows_flags(cc: mut List<String>) {
+    cc.push("--target={if arch() == "aarch64" { "aarch64" } else { "x86_64" }}-pc-windows-msvc")
+    cc.push("-fms-runtime-lib=dll")
+    cc.push("-fuse-ld=link")
+    cc.push("-Wl,-nodefaultlib:libcmt")
+}
+
+/// Builds `dep` and `api`, which needs it, into `out/libs`, or says why it couldn't.
+fn build_libraries(clang: String, dir: String) -> String {
+    let windows = os() == "windows"
+    var dep: List<String> = ["-shared", "dep.c", "-o", "out/libs/{library_file("dep")}"]
+    var api: List<String> = ["-shared", "api.c", "-o", "out/libs/{library_file("api")}"]
+    if windows {
+        windows_flags(mut dep)
+        windows_flags(mut api)
+        api.push("out/libs/dep.lib")
+    } else {
+        dep.push("-fPIC")
+        api.extend(["-fPIC", "-Lout/libs", "-ldep"])
+        if os() == "macos" {
+            dep.extend(["-Wl,-install_name,@rpath/libdep.dylib"])
+            api.extend(["-Wl,-rpath,@loader_path"])
+        } else {
+            api.extend(["-Wl,-rpath,$ORIGIN"])
+        }
+    }
+    let built = step(clang.copy(), dep, dir.copy())
+    if not built.is_empty() {
+        return "building dep: {built}"
+    }
+    let linked = step(clang, api, dir)
+    return if linked.is_empty() { String() } else { "building api: {linked}" }
+}
+
+fn main() {
+    let calx = variable("CALX") ?? String("calx")
+    let clang = variable("CALX_CC") ?? String("clang")
+    let dir = parent_dir(script()!)!
+    let windows = os() == "windows"
+    make_dir_all(join(dir.copy(), "out/libs"))!
+    let built = build_libraries(clang.copy(), dir.copy())
+    if not built.is_empty() {
+        println(built)
+        return
+    }
+    let path = join(dir.copy(), "out/libs/{library_file("api")}")
+
+    // From a program.
+    let lib = unsafe { CLibrary.open(path.copy())! }
+    let twice = unsafe { lib.symbol("api_twice").to_fn<extern "C" fn(i32) -> i32>() }
+    println("api_twice(21) gave {unsafe { twice(21) }}")    // out: api_twice(21) gave 42
+    let missing = unsafe { lib.symbol("api_thrice").is_null() }
+    println("{lib.has("api_twice")} {lib.has("api_thrice")} {missing}")    // out: true false true
+    let again = unsafe { CLibrary.open(path.copy())! }
+    unsafe { lib.close() }
+    let still = unsafe { again.symbol("api_twice").to_fn<extern "C" fn(i32) -> i32>() }
+    println("after one close, api_twice(5) gave {unsafe { still(5) }}")    // out: after one close, api_twice(5) gave 10
+    unsafe { again.close() }
+    match unsafe { CLibrary.open(join(dir.copy(), "out/libs/{library_file("none")}")) } {
+        ok(_) => println("opened a library that isn't there"),
+        err(e) => println("{e.starts_with("can't open {join(dir.copy(), "out/libs/")}")}"),    // out: true
+    }
+
+    // From a static library, whose host gives it the path.
+    for mode in ["debug", "release"] {
+        var words: List<String> = ["build", "--staticlib"]
+        if mode == "release" {
+            words.push("--release")
+        }
+        let out = if windows { "out/{mode}/core.lib" } else { "out/{mode}/libcore.a" }
+        words.extend(["core.calx", "-o", out.copy()])
+        let made = step(calx.copy(), words, dir.copy())
+        if not made.is_empty() {
+            println("building the {mode} library: {made}")
+            continue
+        }
+        let exe = "out/{mode}/host{if windows { ".exe" } else { "" }}"
+        var cc: List<String> = ["host.c", "-I", "out/{mode}", out.copy(), "-o", exe.copy()]
+        if windows {
+            windows_flags(mut cc)
+        } else if os() == "linux" {
+            cc.extend(["-lm", "-lpthread", "-ldl"])
+        }
+        let linked = step(clang.copy(), cc, dir.copy())
+        if not linked.is_empty() {
+            println("linking the {mode} host: {linked}")
+            continue
+        }
+        println(run(join(dir.copy(), exe), [path.copy(), join(dir.copy(), "out/libs/{library_file("none")}")], dir.copy()))
+    }
+    // out: core_twice gave 42
+    // out: core_twice gave -1 for a library that isn't there: true
+    // out: core_twice gave 42
+    // out: core_twice gave -1 for a library that isn't there: true
+}
+
+// file: core.calx
+import std.c.{CLibrary}
+
+/// The `len` bytes at `p`, as text.
+unsafe fn text_at(p: *const u8, len: usize) -> String {
+    var bytes = List<u8>()
+    bytes.reserve(len)
+    for i in 0..len {
+        bytes.push(unsafe { p.add(i).read() })
+    }
+    return String.from_utf8(bytes) ?? String()
+}
+
+/// Opens the C library at the path in the `len` bytes at `path` and gives `api_twice(x)`, or -1
+/// if it can't, and whether the reason it gave starts as it should.
+@export_c(on_panic: -2)
+fn core_twice(path: *const u8, len: usize, x: i32, why_ok: *u8) -> i32 {
+    let given = unsafe { text_at(path, len) }
+    match unsafe { CLibrary.open(given.copy()) } {
+        ok(lib) => {
+            let twice = unsafe { lib.symbol("api_twice").to_fn<extern "C" fn(i32) -> i32>() }
+            let n = unsafe { twice(x) }
+            unsafe { lib.close() }
+            return n
+        },
+        err(e) => {
+            unsafe { why_ok.write(if e.starts_with("can't open {given}: ") { 1 } else { 0 }) }
+            return -1
+        },
+    }
+}
+
+// file: host.c
+#include <stdio.h>
+#include <string.h>
+#include "core.h"
+
+int main(int argc, char** argv) {
+    calx_init();
+    uint8_t why_ok = 0;
+    printf("core_twice gave %d\n", core_twice((const uint8_t*)argv[1], strlen(argv[1]), 21, &why_ok));
+    int none = core_twice((const uint8_t*)argv[2], strlen(argv[2]), 21, &why_ok);
+    printf("core_twice gave %d for a library that isn't there: %s\n", none, why_ok ? "true" : "false");
+    fflush(stdout);
+    return calx_shutdown();
+}
+
+// file: dep.c
+#ifdef _WIN32
+#define EXPORT __declspec(dllexport)
+#else
+#define EXPORT __attribute__((visibility("default")))
+#endif
+
+EXPORT int dep_add(int a, int b) { return a + b; }
+
+// file: api.c
+#ifdef _WIN32
+#define EXPORT __declspec(dllexport)
+__declspec(dllimport) int dep_add(int a, int b);
+#else
+#define EXPORT __attribute__((visibility("default")))
+int dep_add(int a, int b);
+#endif
+
+EXPORT int api_twice(int x) { return dep_add(x, x); }

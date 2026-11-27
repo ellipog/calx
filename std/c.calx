@@ -1,0 +1,66 @@
+/// C libraries a program opens while it runs, and finds functions in, as Python's `ctypes.CDLL`
+/// does: a `.dll` on Windows, a `.so` on Linux and a `.dylib` on macOS.
+module std.c
+
+extern "C" {
+    fn cx_clib_open(path: *const u8, len: usize) -> *u8
+    fn cx_clib_error_len() -> usize
+    fn cx_clib_error_copy(out: *u8)
+    fn cx_clib_symbol(lib: *u8, name: *const u8, len: usize) -> *u8
+    fn cx_clib_close(lib: *u8)
+}
+
+/// A C library that's open. Dropping one leaves the library loaded, since a function found in it
+/// can still be called; `close` unloads it.
+@handle
+pub struct CLibrary {
+    handle: *u8
+}
+
+unsafe impl Send for CLibrary {}
+
+impl CLibrary {
+    /// Opens the C library at `path`, or fails with why: `can't open PATH: ` and the system's
+    /// words, such as that there's no such file, or that a library it needs isn't there.
+    ///
+    /// A path is from the current folder. A name without a folder, such as `kernel32.dll` or
+    /// `libc.so.6`, is found where the system finds libraries. On Windows, the DLLs the library
+    /// needs are loaded from its own folder, then the system's, so one shipped beside it is found.
+    /// Elsewhere, its symbols are all resolved as it opens, and kept to itself.
+    ///
+    /// It's `unsafe`, since opening a library runs its code. iOS opens only libraries signed into
+    /// the app, so never one the app downloaded, and the error says so.
+    pub unsafe fn open(path: String) -> CLibrary ! String {
+        var why = List<u8>()
+        unsafe {
+            let h = cx_clib_open(path.as_ptr(), path.len())
+            if not h.is_null() {
+                return CLibrary { handle: h }
+            }
+            let n = cx_clib_error_len()
+            why.reserve(n)
+            cx_clib_error_copy(why.as_mut_ptr())
+            why.set_len(n)
+        }
+        fail String.from_utf8(why) ?? "can't open {path}"
+    }
+
+    /// The address of what the library exports as `name`, a function or data, or null if it
+    /// exports nothing by that name. `p.to_fn<F>()` makes a function's address one Calx calls.
+    pub unsafe fn symbol(self, name: String) -> *u8 {
+        unsafe {
+            return cx_clib_symbol(self.handle, name.as_ptr(), name.len())
+        }
+    }
+
+    /// Whether the library exports `name`.
+    pub fn has(self, name: String) -> bool {
+        return unsafe { not cx_clib_symbol(self.handle, name.as_ptr(), name.len()).is_null() }
+    }
+
+    /// Unloads the library. It's `unsafe`, since a function found in it would then call nothing.
+    /// A library opened twice is unloaded at the second `close`.
+    pub unsafe fn close(own self) {
+        unsafe { cx_clib_close(self.handle) }
+    }
+}

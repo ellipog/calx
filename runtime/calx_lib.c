@@ -11,13 +11,6 @@
 
 #include <string.h>
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#else
-#include <dlfcn.h>
-#endif
-
 /* Written by the compiler for each program that opens libraries. */
 extern void* const cx_runtime_fns[];
 extern const cx_usize cx_runtime_count;
@@ -33,80 +26,10 @@ typedef struct {
 static void add(cx_String* s, const char* text) { cx_string_push_bytes(s, (const cx_u8*)text, strlen(text)); }
 static void add_str(cx_String* s, cx_str text) { cx_string_push_bytes(s, text.ptr, text.len); }
 
-#ifdef _WIN32
-static void* load(const cx_String* path, cx_String* error) {
-    cx_i32 n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (const char*)path->ptr, (int)path->len, NULL, 0);
-    if (n <= 0 && path->len) {
-        add(error, "isn't a path Windows can open");
-        return NULL;
-    }
-    wchar_t* w = (wchar_t*)cx_alloc(((cx_usize)n + 1) * sizeof(wchar_t));
-    MultiByteToWideChar(CP_UTF8, 0, (const char*)path->ptr, (int)path->len, w, n);
-    w[n] = 0;
-    /* A path, from the current folder as on Linux, rather than a name Windows looks for in its
-     * own folders. The DLLs it needs come from its folder, then the system's. */
-    DWORD full_len = GetFullPathNameW(w, 0, NULL, NULL);
-    wchar_t* full = full_len ? (wchar_t*)cx_alloc((cx_usize)full_len * sizeof(wchar_t)) : NULL;
-    HMODULE h = NULL;
-    DWORD code = ERROR_BAD_PATHNAME;
-    if (full && GetFullPathNameW(w, full_len, full, NULL)) {
-        h = LoadLibraryExW(full, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-        code = h ? 0 : GetLastError();
-    }
-    if (full) cx_free(full, (cx_usize)full_len * sizeof(wchar_t));
-    cx_free(w, ((cx_usize)n + 1) * sizeof(wchar_t));
-    if (!h) {
-        wchar_t* msg = NULL;
-        DWORD len = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-                                   NULL, code, MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US), (wchar_t*)&msg, 0, NULL);
-        if (!len) len = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-                                       NULL, code, 0, (wchar_t*)&msg, 0, NULL);
-        while (len && (msg[len - 1] == L'\n' || msg[len - 1] == L'\r' || msg[len - 1] == L' ' || msg[len - 1] == L'.')) len--;
-        if (len) {
-            int m = WideCharToMultiByte(CP_UTF8, 0, msg, (int)len, NULL, 0, NULL, NULL);
-            cx_string_reserve(error, (cx_usize)m);
-            WideCharToMultiByte(CP_UTF8, 0, msg, (int)len, (char*)error->ptr + error->len, m, NULL, NULL);
-            error->len += (cx_usize)m;
-        } else {
-            add(error, "Windows can't load it");
-        }
-        if (msg) LocalFree(msg);
-    }
-    return h;
-}
-static void* symbol(void* h, const char* name) { return (void*)GetProcAddress((HMODULE)h, name); }
-static void unload(void* h) { FreeLibrary((HMODULE)h); }
-#else
-static void* load(const cx_String* path, cx_String* error) {
-    char* p = (char*)cx_alloc(path->len + 1);
-    memcpy(p, path->ptr, path->len);
-    p[path->len] = 0;
-    /* A path without a slash would be looked for on the system's library path, not here. */
-    void* h = NULL;
-    if (memchr(p, '/', path->len)) {
-        h = dlopen(p, RTLD_NOW | RTLD_LOCAL);
-    } else {
-        cx_free(p, path->len + 1);
-        p = (char*)cx_alloc(path->len + 3);
-        memcpy(p, "./", 2);
-        memcpy(p + 2, path->ptr, path->len);
-        p[path->len + 2] = 0;
-        h = dlopen(p, RTLD_NOW | RTLD_LOCAL);
-        cx_free(p, path->len + 3);
-        p = NULL;
-    }
-    if (p) cx_free(p, path->len + 1);
-    if (!h) {
-        /* dlerror starts with the path, which the message already has. */
-        const char* e = dlerror();
-        const char* colon = e ? strstr(e, ": ") : NULL;
-        add(error, colon ? colon + 2 : e ? e : "it can't be loaded");
-    }
-    return h;
-}
-static void* symbol(void* h, const char* name) { return dlsym(h, name); }
-static void unload(void* h) { dlclose(h); }
-#endif
+/* calx_clib.c's, which loads C libraries too: a path, from the current folder. */
+static void* load(const cx_String* path, cx_String* error) { return cx_dl_load(path->ptr, path->len, 0, error); }
+static void* symbol(void* h, const char* name) { return cx_dl_symbol(h, name); }
+static void unload(void* h) { cx_dl_unload(h); }
 
 cx_bool cx_lib_open(cx_str path, cx_Library* out, cx_String* error) {
     out->p = NULL;

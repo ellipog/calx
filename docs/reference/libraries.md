@@ -80,6 +80,8 @@ In a program, `@export` changes nothing.
 | `lib.has(name)` | Whether the library exports a function named `name` |
 | `unsafe { lib.close() }` | Unloads the library, and uses up `lib` |
 
+`Library.open` opens only a library `calx build --lib` built. A C library, such as one a program downloads, is opened with [std.c](../std/c.md)'s `CLibrary`, which finds a function's address by its name, for [`to_fn`](unsafe.md#c-function-values).
+
 `find` can take its type from where its value goes, as in `let f: fn(i32) -> i32 = lib.find("double")!`.
 
 Opening a library needs `unsafe`, since it runs code from outside the program, which the checker never saw: as with a [C function](unsafe.md), the program vouches for it. Finding a function is safe, since what it finds has the type asked for, and the library stays loaded while anything could hold a function from it. Dropping a `Library` leaves it loaded. `close` unloads it, which needs `unsafe`, since a function found in it would then call nothing. A library opened twice is unloaded at the second `close`.
@@ -163,8 +165,8 @@ fn main() {
 @export
 fn pick(xs: List<i32>, i: usize) -> i32 {
     return xs[i]  // panic: index 3 is out of bounds for length 1
-    // trace: plugin.pick:165
-    // trace: main.main:159
+    // trace: plugin.pick:167
+    // trace: main.main:161
 }
 ```
 
