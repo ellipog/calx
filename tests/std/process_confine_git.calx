@@ -1,0 +1,80 @@
+// std.process: a confined `git` makes a repository and clones one into the folder it's given,
+// under the user's home on Windows, whose folders above, C:\Users and C:\, a confinement can pass
+// through once the machine is set up with `Confine.setup` (CLX-482). Listing them stays denied.
+// The test runs itself as the confined program that lists one.
+// needs: git
+import std.env.{args, os, variable}
+import std.fs.{exists, is_dir, list, make_dir_all, remove_dir_all, separator, temp_dir}
+import std.path.{parent_dir}
+import std.process.{Command, Confine, confine_supported, current_exe}
+import std.uuid.{Uuid}
+
+// What `git ARGS`, confined by `c` and run in `dir`, said: "ok", or why not.
+fn git(c: Confine, dir: String, a: List<String>) -> String {
+    let cmd = Command.new("git").args(a).dir(dir.copy()).confine(c.copy()).env("HOME", dir.copy()).env("GIT_TERMINAL_PROMPT", "0")
+    return match cmd.output() {
+        ok(o) => if o.status.success() { String("ok") } else { "failed: {o.error_text().trim()}" },
+        err(e) => "failed: {e}",
+    }
+}
+
+// What this program, confined by `c`, said of listing `p`.
+fn seen(c: Confine, p: String) -> String {
+    return match Command.new(current_exe()).arg(p.copy()).confine(c.copy()).read() {
+        ok(v) => v,
+        err(e) => "failed: {e}",
+    }
+}
+
+fn main() {
+    let a = args()
+    if a.len() > 0 {
+        println(match list(a[0]) {
+            ok(_) => "listed",
+            err(_) => "denied",
+        })
+        return
+    }
+    if not confine_supported() {
+        println("this system can't confine a program")
+        return
+    }
+    // CI's runners are administrators, so it's set up without asking. Elsewhere a machine that
+    // isn't set up would ask for consent, so the test says what it would and stops.
+    if not Confine.is_set_up() and variable("CI") != none {
+        Confine.setup()!
+    }
+    if not Confine.is_set_up() {
+        println("set up: true")                              // out: set up: true
+        println("inits: ok")                                 // out: inits: ok
+        println("clones: ok")                                // out: clones: ok
+        println("cloned: true")                              // out: cloned: true
+        println("lists the users' folder: denied")           // out: lists the users' folder: denied
+        println("lists the drive: denied")                   // out: lists the drive: denied
+        println("removed")                                   // out: removed
+        return
+    }
+    println("set up: {Confine.is_set_up()}")
+    let s = separator()
+    // On Windows the temporary folder is in the home: C:\Users\NAME\AppData\Local\Temp.
+    let base = "{temp_dir()!}{s}calx-git-{Uuid.random().simple()}"
+    make_dir_all(base)!
+    let name = "calx-test-{Uuid.random().simple()}"
+    let exe_dir = parent_dir(current_exe()) ?? String(".")
+    let c = Confine.new(name).write(base).read(exe_dir).internet(true)
+
+    println("inits: {git(c, base, ["init", "-q", "made"])}")
+    println("clones: {git(c, base, ["clone", "-q", "--depth", "1", "https://github.com/octocat/Hello-World", "cloned"])}")
+    println("cloned: {exists("{base}{s}cloned{s}README")}")
+    let users = parent_dir(variable(if os() == "windows" { "USERPROFILE" } else { "HOME" }) ?? String()) ?? String("/")
+    let root = if os() == "windows" { String("C:\\") } else { String("/") }
+    // Elsewhere the drive's root is the system's, which a confinement may read.
+    let drive = if os() == "windows" { seen(c, root) } else { String("denied") }
+    println("lists the users' folder: {if is_dir(users) { seen(c, users) } else { String("denied") }}")
+    println("lists the drive: {drive}")
+    match Confine.remove(name) {
+        ok => println("removed"),
+        err(e) => println("remove: {e}"),
+    }
+    remove_dir_all(base)!
+}

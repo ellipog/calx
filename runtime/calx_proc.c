@@ -43,6 +43,7 @@
 #include <psapi.h> /* K32GetProcessMemoryInfo, which kernel32 has */
 #include <aclapi.h>
 #include <sddl.h>
+#include <shellapi.h> /* SHELLEXECUTEINFOW; ShellExecuteExW is looked up, so shell32 isn't linked */
 #include <userenv.h>
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "userenv.lib")
@@ -715,6 +716,40 @@ static void env_block_w(const spec* sp, wbuf* out, wbuf* path, int* path_set) {
         }
         w_free(&name);
     }
+    /* CreateProcess makes an AppContainer's LOCALAPPDATA, TEMP and TMP, its own folders, from the
+     * LOCALAPPDATA it's given, and without one fails with ERROR_ENVVAR_NOT_FOUND: so a confined
+     * child gets this user's, which Windows then replaces (CLX-482). */
+    int has_local = 0;
+    for (size_t i = 0; i < n + made_n && !has_local; i++) {
+        const wchar_t* e = i < n ? list[i] : made.p + starts[i - n];
+        has_local = env_name_len(e) == 12 && CompareStringOrdinal(e, 12, L"LOCALAPPDATA", 12, TRUE) == CSTR_EQUAL;
+    }
+    if (sp->confined && !has_local) {
+        wchar_t local[MAX_PATH + 16];
+        DWORD k = GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
+        if (!k || k >= MAX_PATH) {
+            HANDLE token;
+            k = MAX_PATH;
+            if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+                if (!GetUserProfileDirectoryW(token, local, &k)) k = 0;
+                CloseHandle(token);
+            } else {
+                k = 0;
+            }
+            if (k) {
+                k = (DWORD)wcslen(local);
+                memcpy(local + k, L"\\AppData\\Local", 15 * sizeof(wchar_t));
+                k += 14;
+            }
+        }
+        if (k) {
+            starts = (size_t*)grow(starts, (made_n + 1) * sizeof *starts);
+            starts[made_n++] = made.len;
+            w_add(&made, L"LOCALAPPDATA=", 13);
+            w_add(&made, local, k);
+            w_push(&made, 0);
+        }
+    }
     list = (wchar_t**)grow(list, (n + made_n) * sizeof *list);
     for (size_t i = 0; i < made_n; i++) list[n++] = made.p + starts[i];
     qsort(list, n, sizeof *list, env_cmp);
@@ -922,9 +957,14 @@ static BOOL CALLBACK make_bound_job(PINIT_ONCE once, PVOID param, PVOID* ctx) {
  * gets an ACE for the container's SID that what's under it inherits, read and write or read alone,
  * and each folder above it, up to the drive's root, an ACE of its own, which nothing inherits,
  * that lets the container read that folder's attributes and pass through it, but not list it: a
- * program that looks at every folder above its own, as git does, needs that. Windows won't let a
- * user change C:\ or C:\Users, which only let an AppContainer pass through, so such a program
- * fails for a folder under C:\Users.
+ * program that looks at every folder above its own, as git does, needs that.
+ *
+ * Windows won't let a user change C:\ or C:\Users, so those get the same ACE once for the machine,
+ * by an administrator, from `Confine.setup` (CLX-482): for a capability of Calx's own, which every
+ * confinement has, on each fixed drive's root and the folder the users' homes are in. A folder
+ * above a given one that has it gets no ACE of the container's own. Windows' own capabilities for
+ * these folders, isolatedWin32-volumeRootMinimal and -profilesRootMinimal, let a program list them
+ * too, and CreateProcess takes them only for a packaged app.
  *
  * What was granted is kept in the registry, under HKCU\Software\Calx\Confine, which the container
  * can't write, so `cx_proc_confine_remove` takes each ACE back off before it deletes the profile.
@@ -946,6 +986,21 @@ static PSID container_sid(const wchar_t* name, int make) {
         return NULL;
     }
     return sid;
+}
+
+/* What a container may do in a folder above one it's given: read its attributes and pass through
+ * it, but not list it. */
+#define PASS_MASK (FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE)
+
+/* The capability every confinement has, which `Confine.setup` lets through the folders above
+ * those given that a user can't change: DeriveCapabilitySidsFromName("calxConfineAncestors"),
+ * S-1-15-3-1024-2837129080-2995927786-1115315405-522662216-2526562226-586060551-4232958013-875641255. */
+static PSID pass_cap(BYTE buf[SECURITY_MAX_SID_SIZE]) {
+    static const DWORD sub[10] = {3, 1024, 2837129080u, 2995927786u, 1115315405u, 522662216u, 2526562226u, 586060551u, 4232958013u, 875641255u};
+    SID_IDENTIFIER_AUTHORITY app = {{0, 0, 0, 0, 0, 15}};
+    InitializeSid((PSID)buf, &app, 10);
+    for (int i = 0; i < 10; i++) *GetSidSubAuthority((PSID)buf, (DWORD)i) = sub[i];
+    return (PSID)buf;
 }
 
 /* Whether `acl` has an ACE of its own, not inherited, that grants `sid` at least `mask` with
@@ -1048,6 +1103,18 @@ static DWORD grant_here(const wchar_t* path, PSID sid, DWORD mask) {
     free(acl);
     free(sd);
     return e;
+}
+
+/* Whether the folder `path` lets `sid` pass through it, with an ACE of its own, or no DACL. -1 if
+ * its DACL can't be read, as a drive's that isn't there. */
+static int lets_pass(const wchar_t* path, PSID sid) {
+    PACL acl = NULL;
+    SECURITY_DESCRIPTOR_CONTROL ctl = 0;
+    PSECURITY_DESCRIPTOR sd = dacl_of(path, &acl, &ctl);
+    if (!sd) return -1;
+    int yes = !acl || has_ace(acl, sid, PASS_MASK, 0);
+    free(sd);
+    return yes;
 }
 
 /* Takes every ACE of its own for `sid` off `path`: with SetNamedSecurityInfo, which takes the
@@ -1165,15 +1232,19 @@ static int give(const wchar_t* name, wbuf* rec, PSID sid, span p, DWORD mask, DW
         goto done;
     }
     /* Each folder above, to the root, which isn't changed: an ACE there would be for every folder
-     * on the drive. A folder Windows won't let this user change, as C:\Users, stays as it is. */
+     * on the drive. One that lets every confinement through, from `Confine.setup`, needs none of
+     * its own, and one Windows won't let this user change, as C:\Users without it, stays as it
+     * is. */
+    BYTE cap_buf[SECURITY_MAX_SID_SIZE];
+    PSID cap = pass_cap(cap_buf);
     for (;;) {
         wchar_t* cut = wcsrchr(full.p, L'\\');
         if (!cut || cut - full.p <= 2) break;
         *cut = 0;
         full.len = (size_t)(cut - full.p);
         if (full.len <= 2) break;
-        if (record_has(rec, L'A', full.p)) continue;
-        DWORD ge = grant_here(full.p, sid, FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE);
+        if (record_has(rec, L'A', full.p) || lets_pass(full.p, cap) == 1) continue;
+        DWORD ge = grant_here(full.p, sid, PASS_MASK);
         if (ge == 0 && (*e = record_add(name, rec, L'A', full.p)) != 0) {
             step = G_RECORD;
             goto done;
@@ -1199,7 +1270,8 @@ static int confine_name_ok(span n) {
 /* What a confined child starts with: its container and the capabilities it has. */
 typedef struct {
     SECURITY_CAPABILITIES sc;
-    SID_AND_ATTRIBUTES caps[1];
+    SID_AND_ATTRIBUTES caps[2];
+    BYTE pass[SECURITY_MAX_SID_SIZE];
     BYTE internet[SECURITY_MAX_SID_SIZE];
 } confinement;
 
@@ -1240,13 +1312,16 @@ static int confine_prepare(const spec* sp, confinement* c) {
         return 0;
     }
     c->sc.AppContainerSid = sid;
+    c->caps[0].Sid = pass_cap(c->pass);
+    c->caps[0].Attributes = SE_GROUP_ENABLED;
+    c->sc.Capabilities = c->caps;
+    c->sc.CapabilityCount = 1;
     if (sp->confine.internet) {
         DWORD size = sizeof c->internet;
         if (CreateWellKnownSid(WinCapabilityInternetClientSid, NULL, c->internet, &size)) {
-            c->caps[0].Sid = c->internet;
-            c->caps[0].Attributes = SE_GROUP_ENABLED;
-            c->sc.Capabilities = c->caps;
-            c->sc.CapabilityCount = 1;
+            c->caps[1].Sid = c->internet;
+            c->caps[1].Attributes = SE_GROUP_ENABLED;
+            c->sc.CapabilityCount = 2;
         }
     }
     return 1;
@@ -1308,6 +1383,137 @@ static int confine_remove_os(span n) {
     w_free(&name);
     w_free(&rec);
     return ok;
+}
+
+/* --- The machine's setup for confinements (CLX-482) --------------------------------------- *
+ *
+ * The folders `Confine.setup` lets every confinement pass through: each fixed drive's root and
+ * the folder the users' homes are in, C:\ and C:\Users. Only an administrator may change them, so
+ * a program that isn't one runs itself again as one, with Windows asking for consent, and the
+ * copy does that alone: it has the arguments SETUP_ARG and "do" or "undo", which it takes before
+ * `main`, and exits with 0 or the error. What it does is always the same, so a program that runs
+ * it so can make it do nothing else. Each ACE goes on with SetFileSecurity, which doesn't go
+ * through what's under the folder, as SetNamedSecurityInfo, and icacls with it, would: for C:\,
+ * the whole drive. */
+
+#define SETUP_ARG L"--calx-confine-setup-5c1e"
+
+/* The folders, each ending with a NUL. */
+static void setup_folders(wbuf* out) {
+    out->len = 0;
+    DWORD drives = GetLogicalDrives();
+    for (int d = 0; d < 26; d++) {
+        wchar_t root[4] = {(wchar_t)(L'A' + d), L':', L'\\', 0};
+        if (!((drives >> d) & 1) || GetDriveTypeW(root) != DRIVE_FIXED) continue;
+        w_add(out, root, 4);
+    }
+    wchar_t prof[MAX_PATH];
+    DWORD n = MAX_PATH;
+    if (GetProfilesDirectoryW(prof, &n) && prof[0]) w_add(out, prof, wcslen(prof) + 1);
+}
+
+/* Whether every folder lets confinements through, for `undo` 0, or none does, for 1. A folder
+ * whose DACL can't be read, as a drive's that isn't ready, counts as done. */
+static int setup_done(int undo) {
+    wbuf f = {0};
+    BYTE buf[SECURITY_MAX_SID_SIZE];
+    PSID cap = pass_cap(buf);
+    setup_folders(&f);
+    int done = 1;
+    for (size_t i = 0; i < f.len && done; i += wcslen(f.p + i) + 1) {
+        int lets = lets_pass(f.p + i, cap);
+        if (lets >= 0) done = undo ? lets == 0 : lets == 1;
+    }
+    w_free(&f);
+    return done;
+}
+
+/* Puts the ACE on each folder, or takes it off: 0, or the first error. */
+static DWORD setup_here(int undo) {
+    wbuf f = {0};
+    BYTE buf[SECURITY_MAX_SID_SIZE];
+    PSID cap = pass_cap(buf);
+    setup_folders(&f);
+    DWORD first = 0;
+    for (size_t i = 0; i < f.len; i += wcslen(f.p + i) + 1) {
+        int lets = lets_pass(f.p + i, cap);
+        if (lets < 0 || lets == !undo) continue;
+        DWORD e = undo ? revoke(f.p + i, cap, 0) : grant_here(f.p + i, cap, PASS_MASK);
+        if (e && !first) first = e;
+    }
+    w_free(&f);
+    return first;
+}
+
+/* As the program starts: the copy run as an administrator does the setup and exits. */
+__attribute__((constructor)) static void setup_at_start(void) {
+    const wchar_t* c = GetCommandLineW();
+    /* Past the program's own name, quoted or not. */
+    if (*c == L'"') {
+        c++;
+        while (*c && *c != L'"') c++;
+        if (*c) c++;
+    } else {
+        while (*c && *c != L' ' && *c != L'\t') c++;
+    }
+    while (*c == L' ' || *c == L'\t') c++;
+    size_t k = wcslen(SETUP_ARG);
+    if (wcsncmp(c, SETUP_ARG, k) != 0 || c[k] != L' ') return;
+    c += k + 1;
+    int undo;
+    if (wcscmp(c, L"do") == 0) undo = 0;
+    else if (wcscmp(c, L"undo") == 0) undo = 1;
+    else return;
+    ExitProcess(setup_here(undo));
+}
+
+typedef BOOL(WINAPI* shell_exec_fn)(SHELLEXECUTEINFOW*);
+
+/* Runs this program again as an administrator, to do the setup: 0, or the error. */
+static DWORD setup_elevated(int undo) {
+    HMODULE shell = LoadLibraryW(L"shell32.dll");
+    shell_exec_fn run = shell ? (shell_exec_fn)(void*)GetProcAddress(shell, "ShellExecuteExW") : NULL;
+    if (!run) return GetLastError();
+    wchar_t exe[32768];
+    DWORD n = GetModuleFileNameW(NULL, exe, 32768);
+    if (!n || n >= 32768) return GetLastError();
+    SHELLEXECUTEINFOW info;
+    memset(&info, 0, sizeof info);
+    info.cbSize = sizeof info;
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    info.lpVerb = L"runas";
+    info.lpFile = exe;
+    info.lpParameters = undo ? SETUP_ARG L" undo" : SETUP_ARG L" do";
+    info.nShow = SW_HIDE;
+    if (!run(&info)) return GetLastError();
+    DWORD code = ERROR_GEN_FAILURE;
+    if (info.hProcess) {
+        WaitForSingleObject(info.hProcess, INFINITE);
+        if (!GetExitCodeProcess(info.hProcess, &code)) code = GetLastError();
+        CloseHandle(info.hProcess);
+    }
+    return code;
+}
+
+static int confine_ready_os(void) { return setup_done(0); }
+
+/* Does the setup, or undoes it: here if this program may, or else as an administrator. 1 if it's
+ * done, or 0 with why. */
+static int confine_setup_os(int undo) {
+    if (setup_done(undo)) return 1;
+    DWORD e = setup_here(undo);
+    if (e && !setup_done(undo)) {
+        e = setup_elevated(undo);
+        if (e == ERROR_CANCELLED) {
+            confine_fail(0, "the setup needs an administrator, and Windows' request for one was declined", NULL, 0);
+            return 0;
+        }
+    }
+    if (!setup_done(undo)) {
+        confine_fail((cx_i32)e, undo ? "can't take the setup back off C:\\ and C:\\Users" : "can't let confinements through C:\\ and C:\\Users", NULL, 0);
+        return 0;
+    }
+    return 1;
 }
 
 /* The handles the child inherits, the job it goes into and the container it's confined to, for
@@ -1611,7 +1817,8 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
     confinement conf;
     memset(&conf, 0, sizeof conf);
     SECURITY_CAPABILITIES* sc = NULL;
-    int changes = sp->clear_env || sp->envc;
+    /* A confined child's environment is made here too, so it always has LOCALAPPDATA. */
+    int changes = sp->clear_env || sp->envc || sp->confined;
     if (sp->has_dir) {
         wbuf rel = {0};
         w_utf8(&rel, sp->dir);
@@ -1783,6 +1990,8 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
         if (sc && e == ERROR_ACCESS_DENIED) {
             confine_fail(0, "it can't read the program, which isn't in the system's folders or one it's given to read: ", (const char*)sp->program.p,
                          sp->program.n);
+        } else if (sc && e == ERROR_ENVVAR_NOT_FOUND) {
+            confine_fail(0, "Windows starts a confined program only with LOCALAPPDATA in its environment, and this user has none", NULL, 0);
         } else {
             fail_win(e);
         }
@@ -3929,6 +4138,21 @@ cx_bool cx_proc_confine_remove(const cx_u8* name, cx_usize n) {
     span s = {name, n};
     return confine_remove_os(s) != 0;
 }
+
+#ifndef _WIN32
+/* Only Windows keeps a confinement from the attributes of the folders above its own. */
+static int confine_ready_os(void) { return 1; }
+static int confine_setup_os(int undo) {
+    (void)undo;
+    return 1;
+}
+#endif
+
+/* Whether the machine is set up for confinements (CLX-482). */
+cx_bool cx_proc_confine_ready(void) { return confine_ready_os() != 0; }
+
+/* Sets the machine up for confinements, or takes that back: 1, or 0 with why in `result`. */
+cx_bool cx_proc_confine_setup(cx_bool undo) { return confine_setup_os(undo ? 1 : 0) != 0; }
 
 cx_usize cx_proc_result_len(void) { return result_len; }
 void cx_proc_result_copy(cx_u8* to) {

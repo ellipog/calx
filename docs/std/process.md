@@ -353,7 +353,7 @@ Starting it takes a few hundred microseconds more, 0.6 ms in all on the referenc
 | `Failed { command, status }` | It ran, and didn't succeed. Only `run` and `read` fail with it |
 | `InputClosed` | It stopped reading before all of its input was written. Only `Child.write` fails with it |
 | `Unsupported` | The system starts no programs: iOS, where an app runs alone in its sandbox, so every way to start one fails with it there, on the simulator too ([iOS](#ios)) |
-| `Unconfined(why)` | It was to be [confined](#confining-it) and couldn't be: the system can't confine a program, a folder given isn't there, or the program isn't in a folder it may read. `Confine.remove` fails with it too |
+| `Unconfined(why)` | It was to be [confined](#confining-it) and couldn't be: the system can't confine a program, a folder given isn't there, or the program isn't in a folder it may read. `Confine.remove`, `Confine.setup` and `Confine.undo_setup` fail with it too |
 | `Os(code)` | Something else, with the system's error code |
 
 Each shows as a sentence, such as `can't find the program git on PATH`.
@@ -430,6 +430,9 @@ var agent = Command.new("node").args(["agent.js"]).dir("C:/agents/a_1").confine(
 | `c.internet(on: bool) -> Confine` | Whether it may connect to the internet. Without it, it connects to nothing |
 | `c.name() -> String` | Its name |
 | `Confine.remove(name: String) ! ProcessError` | Takes back what the confinement was given, once nothing in it runs |
+| `Confine.setup() ! ProcessError` | Sets the machine up, once, so a confined program can read the attributes of `C:\` and `C:\Users`, as `git` needs. It asks for an administrator's consent. Elsewhere it does nothing |
+| `Confine.undo_setup() ! ProcessError` | Takes that back |
+| `Confine.is_set_up() -> bool` | Whether the machine is set up. Always `true` but on Windows |
 | `confine_supported() -> bool` | Whether this system can confine a program |
 
 A folder given must be there when the program starts, and the program itself must be in the system's folders or in one given: a Calx program started confined needs its own folder given to read. The system's folders are Windows' System32 and Program Files, macOS' `/usr`, `/bin`, `/sbin`, `/System`, `/Library`, `/opt` and `/Applications/Xcode*.app`, and Linux's `/usr`, `/bin`, `/sbin`, `/lib*`, `/etc`, `/opt`, `/proc`, `/sys`, `/run`, `/nix` and `/snap`, with `/dev` to read and write.
@@ -437,7 +440,10 @@ A folder given must be there when the program starts, and the program itself mus
 **On Windows** it's an AppContainer of the confinement's name, as Chromium's sandboxed processes are:
 
 - Each folder given gets an ACE for the container, which what's in it inherits. Each folder above it gets an ACE of its own, which nothing inherits, that lets the container read the folder's attributes and pass through it, but not list it, as `git` needs to look at every folder above its own. What was given is kept in the registry, under `HKCU\Software\Calx\Confine`, where the container can't write, and `Confine.remove` takes each ACE back off and deletes the container's profile, with what Windows kept for it there.
-- Windows doesn't let a user change `C:\` or `C:\Users`, and they let a container pass through but not look at them, so a program that looks at every folder above its own fails for a folder under `C:\Users`: `git clone` does. A folder outside it, such as one in `C:\` or on another drive, works.
+- Windows doesn't let a user change `C:\` or `C:\Users`, so those folders need `Confine.setup` once for the machine. Without it, a program that looks at every folder above its own fails for a folder under `C:\Users`: `git init` and `git clone` do, and so does `mkdir a\b\c` in `cmd`. `Confine.setup` gives each fixed drive's root and the folder the users' homes are in an ACE for a capability every confinement has. The ACE lets it read the folder's attributes and pass through it, but not list it or read what's in it, and the folder needs no ACE of the container's own. It takes an administrator: a program that isn't one runs itself again as one, so Windows asks for consent once, and that copy changes only those folders. An installer that runs as an administrator can call it.
+- Windows' own capabilities for those folders, `isolatedWin32-volumeRootMinimal` and `isolatedWin32-profilesRootMinimal`, would let a container list them too, and `CreateProcess` takes them only for a packaged app.
+- A folder above one given that isn't one of those and that this user can't change, such as one another user owns, stays closed, with the same result.
+- Windows starts an AppContainer only with `LOCALAPPDATA` in its environment, from which it makes the container's own `LOCALAPPDATA`, `TEMP` and `TMP`. A confined program whose command clears the environment or removes it gets this user's back.
 - Windows Server 2025 doesn't let a container open `NUL`, and Git for Windows opens it each time it starts, so git doesn't run confined there. Windows 11 lets it.
 - With the internet it has the `internetClient` capability. It never reaches this machine's own addresses, `127.0.0.1` among them; to reach its parent it connects to a [local socket](net.md#local-sockets) whose `allow` names its confinement, which `std.http` does with a `local://NAME/` URL.
 - Its temporary folder is its own, in its profile, as Windows gives every AppContainer, and its `USERPROFILE` is the user's, which it can't read: `git` takes that as no config.

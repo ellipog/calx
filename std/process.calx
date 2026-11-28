@@ -58,6 +58,8 @@ extern "C" {
     fn cx_proc_machine_cpu(out: *u64)
     fn cx_proc_confine_supported() -> bool
     fn cx_proc_confine_remove(name: *const u8, n: usize) -> bool
+    fn cx_proc_confine_setup(undo: bool) -> bool
+    fn cx_proc_confine_ready() -> bool
 }
 
 /// Where a program's input comes from, or where its output goes.
@@ -274,6 +276,33 @@ impl Confine {
         if not unsafe { cx_proc_confine_remove(name.as_ptr(), name.len()) } {
             fail ProcessError.Unconfined(result())
         }
+    }
+
+    /// Sets the machine up so a confined program can read the attributes of every folder above
+    /// those it's given, as `git` and `cmd`'s `mkdir` do, which on Windows it can't do for `C:\`
+    /// and `C:\Users` (CLX-482). It's once for the machine, and lasts until `undo_setup`. Each
+    /// fixed drive's root and the folder the users' homes are in get an ACE for a capability every
+    /// confinement has, which lets it read the folder's attributes and pass through it, but not
+    /// list or read what's in it. Only an administrator may change them, so a program that isn't
+    /// one runs itself again as one, and Windows asks for consent. Elsewhere there's nothing to set
+    /// up, so it does nothing.
+    pub fn setup() ! ProcessError {
+        if not unsafe { cx_proc_confine_setup(false) } {
+            fail ProcessError.Unconfined(result())
+        }
+    }
+
+    /// Takes back what `setup` did, as an administrator, as it does.
+    pub fn undo_setup() ! ProcessError {
+        if not unsafe { cx_proc_confine_setup(true) } {
+            fail ProcessError.Unconfined(result())
+        }
+    }
+
+    /// Whether the machine has what `setup` does: on Windows, whether each folder it changes has
+    /// the ACE; elsewhere always.
+    pub fn is_set_up() -> bool {
+        return unsafe { cx_proc_confine_ready() }
     }
 }
 
