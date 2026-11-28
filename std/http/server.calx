@@ -39,7 +39,7 @@ pub struct Request {
     pub headers: List<Header>
     /// The body, as `Content-Length` or chunks gave it, or empty.
     pub body: List<u8>
-    /// The client's address: `127.0.0.1`.
+    /// The client's address: `127.0.0.1`, or `""` over a local socket.
     pub client: String
     conn: Conn
     keep: bool
@@ -258,7 +258,7 @@ const STREAM_QUEUED: usize = 4194304
 pub struct Server {
     /// The port it listens on, which the system picked if `listen` was given 0.
     pub port: u16
-    /// The address it listens on.
+    /// The address it listens on, or the local socket's name, for one from `listen_local`.
     pub host: String
     /// The longest body it takes, in bytes. A longer one gets `413 Content Too Large`. 64 MB to
     /// start with.
@@ -297,6 +297,13 @@ pub struct Server {
     ping_due: u64
     due_interval: u64
     due_timeout: u64
+    // It listens on the local socket `host`, from `listen_local`.
+    local: bool
+}
+
+// A server on `net`, which listens already.
+fn on(net: Net, port: u16, host: String, local: bool) -> Server {
+    return Server { port: port, host: host.copy(), max_body: 67108864, log: true, max_message: 67108864, ping_interval_ms: 20000, ping_timeout_ms: 20000, net: net, clients: Map<u32, Client>(), ready: Deque<u32>(), events: List<Event>(), date: String(), date_second: -1, streams: List<Stream>(), happened: Deque<ServerEvent>(), closing: 0, on_signal: false, woken: false, born: unsafe { Instant.now() }, ping_due: u64.MAX, due_interval: 20000, due_timeout: 20000, local: local }
 }
 
 // A file `serve` is sending in parts after its response's head: where the next part starts, how
@@ -350,11 +357,24 @@ impl Server {
     pub fn listen(port: u16, host: String = "127.0.0.1") -> Server ! NetError {
         let net = try Net.new()
         let p = try net.listen(host, port)
-        return Server { port: p, host: host.copy(), max_body: 67108864, log: true, max_message: 67108864, ping_interval_ms: 20000, ping_timeout_ms: 20000, net: net, clients: Map<u32, Client>(), ready: Deque<u32>(), events: List<Event>(), date: String(), date_second: -1, streams: List<Stream>(), happened: Deque<ServerEvent>(), closing: 0, on_signal: false, woken: false, born: unsafe { Instant.now() }, ping_due: u64.MAX, due_interval: 20000, due_timeout: 20000 }
+        return on(net, p, host, false)
     }
 
-    /// The address to open in a browser: `http://127.0.0.1:8000/`.
+    /// A server listening on the local socket `name`, as `std.net`'s `Net.listen_local` listens,
+    /// which the confinements named in `allow` may connect to too, on Windows (CLX-480). Its port is
+    /// 0, its host the name, and `std.http` reaches it at `local://NAME/`.
+    pub fn listen_local(name: String, allow: List<String> = []) -> Server ! NetError {
+        let net = try Net.new()
+        try net.listen_local(name, allow)
+        return on(net, 0, name, true)
+    }
+
+    /// The address to open in a browser: `http://127.0.0.1:8000/`, or for a local socket the URL
+    /// `std.http` takes, `local://NAME/`.
     pub fn url(self) -> String {
+        if self.local {
+            return "local://{self.host}/"
+        }
         var h = if self.host.is_empty() { String("localhost") } else { self.host.copy() }
         if h.contains(":") {
             h = "[{h}]"
@@ -1153,8 +1173,12 @@ impl Server {
     /// closes every connection with `shutdown`, and returns.
     pub fn serve(mut self, dir: String) {
         if self.log {
-            let shown = if self.host.is_empty() { String("every address") } else { self.host.copy() }
-            println("Serving HTTP on {shown} port {self.port} ({self.url()}) ...")
+            if self.local {
+                println("Serving HTTP on the local socket {self.host} ({self.url()}) ...")
+            } else {
+                let shown = if self.host.is_empty() { String("every address") } else { self.host.copy() }
+                println("Serving HTTP on {shown} port {self.port} ({self.url()}) ...")
+            }
             flush()
         }
         let waker = match self.net.waker() {

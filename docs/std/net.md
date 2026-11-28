@@ -60,6 +60,8 @@ fn main() {
 | `Net.new() -> Net ! NetError` | A new, empty `Net` |
 | `net.listen(host: String, port: u16) -> u16 ! NetError` | Listens on `host` and `port`, and returns the port, which the system picks when `port` is 0. An empty host listens on every address, IPv4 and IPv6, with one IPv6 socket that takes IPv4 clients too; where the machine has no IPv6, on every IPv4 address |
 | `net.connect(host: String, port: u16) -> Conn ! NetError` | Starts opening a connection. A poll reports `Connected` once it's open, or `Closed` if it couldn't be |
+| `net.listen_local(name: String, allow: List<String> = []) ! NetError` | Listens on the [local socket](#local-sockets) `name`, which the confinements in `allow` may connect to too |
+| `net.connect_local(name: String) -> Conn ! NetError` | Opens a connection to the local socket `name`. A poll reports `Connected`; `Refused` if nothing listens there |
 | `net.poll(timeout_ms: i64, events: mut List<Event>)` | Waits up to `timeout_ms` milliseconds for something to happen, or forever if it's negative, and replaces what's in `events` with what happened. It returns as soon as there's an event, so `events` is empty only once the time is up: the runtime's own work, such as finishing a send or a close, doesn't end the wait |
 | `net.read(conn: Conn, buf: mut List<u8>) -> usize` | Moves every byte that has arrived on the connection onto the end of `buf`, and returns how many there were |
 | `net.write(conn: Conn, bytes: List<u8>)` | Queues the bytes to send. They go to the system at the next poll or `flush`, with everything else queued on the connection since the last, then as soon as the socket takes them |
@@ -220,6 +222,20 @@ fn main() {
 
 - **Its `Net` is its own while it's used.** A stream polls its `Net` while it waits, and passes over what those polls say of other connections, so a thread makes a `Net` for the transfer, as a blocking socket is one thread's. Its polls, a flush's too, take every event, an `Accepted` among them, so two streams share a `Net` in one thread only once the connections are open, and while neither waits for the other, as above.
 - **Memory stays bounded both ways.** A write waits once 4 MiB is queued, and the runtime reads a connection only while its `Net` is polled, which a stream does only when it has nothing left to give: a slow reader holds the sender back through TCP, rather than the bytes piling up in either.
+
+## Local sockets
+
+A local socket reaches a program on the same machine by name rather than by port, as Python's `socket.AF_UNIX` does, and a program [confined](process.md#confining-it) by `std.process` can reach one, where it can't reach `127.0.0.1` on Windows (CLX-480). `listen_local` listens on one, each connection is reported as `Accepted`, and it's read, written and closed as a TCP connection is, in the same loop. `connect_local` opens one.
+
+```
+let net = Net.new()!
+net.listen_local("tool-a_1", ["agent-a_1"])!   // a program confined as agent-a_1 may connect
+```
+
+- **A name** is 1 to 100 letters, digits, `.`, `-` and `_`. On Windows it's the named pipe `\\.\pipe\NAME`. On Linux and macOS it's the Unix socket `/tmp/calx-local-UID/NAME`, in a folder only this user may use, and a name with a `/` in it is the socket's own path.
+- **Who may connect:** this user's programs. On Windows a confined program may only if its confinement is in `allow`: the pipe's ACL lets that AppContainer read and write it, but not make instances of it, so it can't pose as the listener. On Linux and macOS any of this user's programs may, confined or not, since neither Landlock nor the macOS sandbox can tell one confinement from another there, so a server that serves several confinements checks who's asking itself, such as with a token each is given.
+- **One listener a name:** a second fails with `AddressInUse`. On Linux and macOS a socket file a program that has ended left behind is taken over.
+- **A connection's `peer`** is `none`.
 
 ## UDP
 

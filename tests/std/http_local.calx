@@ -1,0 +1,88 @@
+// std.net, std.http.server and std.http over a local socket (CLX-480): a parent serves HTTP on a
+// local listener that lets a confinement connect, and a child confined by `std.process`, with no
+// internet, asks it over the local socket, as a GET, a POST, and a stream, and gets the answers.
+import std.env.{args}
+import std.fs.{remove_dir_all, temp_dir}
+import std.http.{Header, fetch, post, stream_get}
+import std.http.server.{Response, Server}
+import std.path.{parent_dir}
+import std.process.{Command, Confine, Stdio, confine_supported, current_exe}
+import std.uuid.{Uuid}
+
+fn child(name: String) {
+    match fetch("local://{name}/hello?x=1", 10000) {
+        ok(r) => println("get: {r.status} {String.from_utf8(r.body) ?? String()}"),
+        err(e) => println("get: {e}"),
+    }
+    var p = post("local://{name}/echo", [Header { name: "Content-Type", value: "text/plain" }], "ping".to_bytes(), 10000, 1 << 20)
+    match p.wait() {
+        ok(r) => println("post: {r.status} {String.from_utf8(r.body) ?? String()}"),
+        err(e) => println("post: {e}"),
+    }
+    var s = stream_get("local://{name}/stream")
+    var text = String()
+    loop {
+        match s.read() {
+            ok(chunk) => match chunk {
+                some(b) => text.push_str(String.from_utf8(b) ?? String()),
+                none => break,
+            },
+            err(e) => {
+                text.push_str("{e}")
+                break
+            },
+        }
+    }
+    s.close()
+    println("stream: {text}")
+    match fetch("local://calx-nothing-listens-{name}/", 5000) {
+        ok(r) => println("nothing: {r.status}"),
+        err(e) => println("nothing: {e}"),
+    }
+}
+
+fn main() {
+    let a = args()
+    if a.len() > 0 {
+        child(a[0])
+        return
+    }
+    if not confine_supported() {
+        println("this system can't confine a program")
+        return
+    }
+    let id = Uuid.random().simple()
+    let jail_name = "calx-test-{id}"
+    let name = "calx-http-{id}"
+    var server = Server.listen_local(name, [jail_name.copy()])!
+    server.log = false
+    println("url: {server.url().starts_with("local://calx-http-")}") // out: url: true
+    let home = temp_dir()!
+    let exe_dir = parent_dir(current_exe()) ?? String(".")
+    let jail = Confine.new(jail_name).write(home).read(exe_dir)
+    var kid = Command.new(current_exe()).arg(name.copy()).stdout(Stdio.Pipe).confine(jail).spawn()!
+    loop {
+        if let req = server.next(100) {
+            let res = if req.path == "/hello" {
+                Response.text("hello {req.query}")
+            } else if req.path == "/echo" {
+                Response.text("{req.method} {req.text() ?? String()}")
+            } else {
+                Response.text("one two three")
+            }
+            server.respond(req, res)
+        }
+        if let _ = kid.try_wait() {
+            break
+        }
+    }
+    let out = kid.wait()
+    print(out.text())
+    // out: get: 200 hello x=1
+    // out: post: 200 POST ping
+    // out: stream: one two three
+    // out: nothing: can't connect: nothing answered at the host and port
+    server.shutdown(1000)
+    Confine.remove(jail_name)!
+    remove_dir_all(home)!
+}

@@ -15,6 +15,8 @@ extern "C" {
     fn cx_net_open() -> u64
     fn cx_net_listen(net: u64, host: *const u8, len: usize, port: u16) -> i32
     fn cx_net_connect(net: u64, host: *const u8, len: usize, port: u16) -> u32
+    fn cx_net_listen_local(net: u64, name: *const u8, len: usize, allow: *const u8, allow_len: usize) -> i32
+    fn cx_net_connect_local(net: u64, name: *const u8, len: usize) -> u32
     fn cx_net_poll(net: u64, timeout_ms: i64) -> usize
     fn cx_net_event_kind(net: u64, i: usize) -> u32
     fn cx_net_event_conn(net: u64, i: usize) -> u32
@@ -714,6 +716,41 @@ impl Net {
     /// open, or `Closed` if it couldn't be. What's sent before then waits.
     pub fn connect(self, host: String, port: u16) -> Conn ! NetError {
         let id = unsafe { cx_net_connect(self.handle, host.as_ptr(), host.len(), port) }
+        if id == 0xFFFFFFFF {
+            fail last_error()
+        }
+        return Conn { number: id, net: self.number }
+    }
+
+    /// Listens for connections on the local socket `name`, which only programs on this machine
+    /// reach (CLX-480): on Windows the named pipe `\\.\pipe\NAME`, and on Linux and macOS the Unix
+    /// socket `/tmp/calx-local-UID/NAME`, in a folder only this user may use, or the path `name`
+    /// if it has a `/` in it. A name is 1 to 100 letters, digits, `.`, `-` and `_`. Each
+    /// connection is reported as `Accepted`, and is read and written as a TCP one is.
+    ///
+    /// Only this user's programs may connect. On Windows a program confined by `std.process`'s
+    /// `Confine` may only if its confinement's name is in `allow`, since an AppContainer opens
+    /// nothing it isn't given; on Linux and macOS any of this user's programs may, confined or
+    /// not. A name another listener has fails with `AddressInUse`; a Unix socket a program that
+    /// has ended left behind is taken over.
+    pub fn listen_local(self, name: String, allow: List<String> = []) ! NetError {
+        var list = String()
+        for a in allow {
+            if not list.is_empty() {
+                list.push_str("\n")
+            }
+            list.push_str(a)
+        }
+        if unsafe { cx_net_listen_local(self.handle, name.as_ptr(), name.len(), list.as_ptr(), list.len()) } < 0 {
+            fail last_error()
+        }
+    }
+
+    /// Opens a connection to the local socket `name`, as `listen_local` names them. A poll reports
+    /// `Connected`, and what's written before then waits. Fails with `Refused` if nothing listens
+    /// there, and `BadAddress` if it can't be a name.
+    pub fn connect_local(self, name: String) -> Conn ! NetError {
+        let id = unsafe { cx_net_connect_local(self.handle, name.as_ptr(), name.len()) }
         if id == 0xFFFFFFFF {
             fail last_error()
         }

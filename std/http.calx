@@ -6,7 +6,9 @@
 /// its own. A connection is kept for the requests after it to the same host, and HTTP/2 ones,
 /// which `Version.Http2` asks for, go over one connection at once (CLX-383). A `Stream`, from
 /// `stream_get` or `stream_post`, gives its body as it comes, for a response that may never end,
-/// as an event stream's doesn't (CLX-459).
+/// as an event stream's doesn't (CLX-459). A `local://NAME/path` URL goes over the local socket
+/// `NAME` of std.net, to a server on the same machine, which is how a confined program reaches its
+/// parent (CLX-480).
 module std.http
 
 import std.net.waker.{Waker}

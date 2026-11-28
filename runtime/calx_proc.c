@@ -2854,6 +2854,25 @@ static int sb_profile(const spec* sp, cbuf* b, const char* temp) {
     sb_line(b, "(allow file-read* file-write* process-exec (subpath ");
     sb_quote(b, temp);
     sb_line(b, "))\n");
+    /* std.net's local sockets, which a confined program reaches its parent by (CLX-480): this
+     * user's, in /tmp/calx-local-UID, and any in the folders it's given. */
+    char local[64];
+    snprintf(local, sizeof local, "/private/tmp/calx-local-%u", (unsigned)getuid());
+    sb_line(b, "(allow network-outbound (subpath ");
+    sb_quote(b, local);
+    sb_line(b, "))\n");
+    for (int pass = 0; pass < 2; pass++) {
+        span* list = pass ? sp->confine.reads : sp->confine.writes;
+        size_t n = pass ? sp->confine.nreads : sp->confine.nwrites;
+        for (size_t i = 0; i < n; i++) {
+            char* r = given_path(list[i]);
+            if (!r) return 0;
+            sb_line(b, "(allow network-outbound (subpath ");
+            sb_quote(b, r);
+            sb_line(b, "))\n");
+            free(r);
+        }
+    }
     if (sp->confine.internet) {
         sb_line(b, "(allow system-socket)\n(allow network-outbound (remote ip))\n"
                    "(deny network-outbound (remote ip \"localhost:*\"))\n"
