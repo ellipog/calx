@@ -78,6 +78,7 @@ fn kind(e: ProcessError) -> String {
         Failed { command, status } => "failed: {command.ends_with(" fail")} {status}",
         InputClosed => String("input closed"),
         Unsupported => String("unsupported"),
+        Unconfined(why) => "unconfined: {why}",
         Os(code) => "os {code}",
     }
 }
