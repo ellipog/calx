@@ -41,9 +41,16 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <psapi.h> /* K32GetProcessMemoryInfo, which kernel32 has */
+#include <aclapi.h>
+#include <sddl.h>
+#include <userenv.h>
+#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "userenv.lib")
+#undef small /* rpcndr.h's, which these bring in */
 #else
 #define _GNU_SOURCE
 #include <dirent.h>
+#include <ftw.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -90,7 +97,7 @@ extern void (*cx_children_at_exit)(int normal);
 /* Where a stream goes, as std.process numbers `Stdio`. */
 enum { IO_INHERIT = 0, IO_PIPE = 1, IO_NULL = 2, IO_STDOUT = 3 };
 /* Why a child didn't start, as std.process numbers `ProcessError`. */
-enum { E_NOT_FOUND = 1, E_DENIED = 2, E_BAD_DIR = 3, E_BAD_ARG = 4, E_CLOSED = 5, E_OS = 6, E_UNSUPPORTED = 7 };
+enum { E_NOT_FOUND = 1, E_DENIED = 2, E_BAD_DIR = 3, E_BAD_ARG = 4, E_CLOSED = 5, E_OS = 6, E_UNSUPPORTED = 7, E_CONFINE = 8 };
 /* `cx_proc_state`'s bits. */
 enum { ST_EXITED = 1, ST_KILLED = 2, ST_TIMED_OUT = 4, ST_FINISHED = 8, ST_HAS_CODE = 16 };
 
@@ -123,6 +130,34 @@ static void set_result(const char* s, size_t n) {
     }
     memcpy(result, s, n);
     result_len = n;
+}
+
+/* A confinement that couldn't be made (CLX-479): why, in words, which std.process takes from
+ * `result`, and the system's error code, or 0. */
+static void confine_fail(cx_i32 code, const char* why, const char* path, size_t path_n) {
+    char text[1024];
+    size_t n = strlen(why);
+    if (n > 400) n = 400;
+    memcpy(text, why, n);
+    if (path) {
+        if (path_n > sizeof text - n - 40) path_n = sizeof text - n - 40;
+        memcpy(text + n, path, path_n);
+        n += path_n;
+    }
+    if (code) {
+        static const char e[] = ": system error ";
+        memcpy(text + n, e, sizeof e - 1);
+        n += sizeof e - 1;
+        char digits[16];
+        int k = 0;
+        unsigned long long v = code < 0 ? (unsigned long long)(-(long long)code) : (unsigned long long)code;
+        if (code < 0) text[n++] = '-';
+        do digits[k++] = (char)('0' + v % 10), v /= 10;
+        while (v);
+        while (k) text[n++] = digits[--k];
+    }
+    set_result(text, n);
+    fail(E_CONFINE, code);
 }
 
 /* Bytes waiting in a stream: `start..len` of `p`. */
@@ -294,7 +329,19 @@ typedef struct {
  * a byte that's 1 to take it out of power throttling; a byte that's 1 to start it from a
  * helper, so its peak memory is its own; a byte that's 1 to start it in a group of its own,
  * so it can be stopped with what it starts; and a byte that's 1 to end it, with its group, when
- * this program ends. Integers are little-endian, and each text is a u32 length and its bytes. */
+ * this program ends. Then a byte that's 1 to confine it (CLX-479), and if it is, the confinement's
+ * name, a byte that's 1 to let it reach the internet, and the folders it may write and those it may
+ * read, each a u32 count and the paths. Integers are little-endian, and each text is a u32 length
+ * and its bytes. */
+typedef struct {
+    span name;
+    int internet;
+    span* writes;
+    size_t nwrites;
+    span* reads;
+    size_t nreads;
+} confine_spec;
+
 typedef struct {
     cx_u32 io[3];
     int clear_env;
@@ -312,6 +359,8 @@ typedef struct {
     int measured;
     int own_group;
     int bound;
+    int confined;
+    confine_spec confine;
 } spec;
 
 typedef struct {
@@ -348,6 +397,22 @@ static void spec_free(spec* sp) {
     free(sp->args);
     free(sp->env);
     free(sp->cpus);
+    free(sp->confine.writes);
+    free(sp->confine.reads);
+}
+
+/* A u32 count of texts, then each. */
+static span* rd_spans(reader* r, size_t* count) {
+    size_t n = (size_t)rd_int(r, 4);
+    if (r->bad || n > r->n) {
+        r->bad = 1;
+        *count = 0;
+        return NULL;
+    }
+    span* s = (span*)grow(NULL, n * sizeof(span));
+    for (size_t i = 0; i < n; i++) s[i] = rd_span(r);
+    *count = n;
+    return s;
 }
 
 static int spec_read(spec* sp, const cx_u8* p, size_t n) {
@@ -381,6 +446,13 @@ static int spec_read(spec* sp, const cx_u8* p, size_t n) {
     sp->measured = (int)rd_int(&r, 1);
     sp->own_group = (int)rd_int(&r, 1);
     sp->bound = (int)rd_int(&r, 1);
+    sp->confined = (int)rd_int(&r, 1);
+    if (sp->confined) {
+        sp->confine.name = rd_span(&r);
+        sp->confine.internet = (int)rd_int(&r, 1);
+        sp->confine.writes = rd_spans(&r, &sp->confine.nwrites);
+        sp->confine.reads = rd_spans(&r, &sp->confine.nreads);
+    }
     return !r.bad;
 }
 
@@ -658,11 +730,13 @@ static wchar_t* path_var_w(wbuf* b) {
     return b->p;
 }
 
-/* A name no other pipe has: this process, a count, and the clock. */
+/* A name no other pipe has: this process, a count, and the clock. It's under LOCAL\, which in an
+ * AppContainer is the container's own, where a confined program may make one, and elsewhere just
+ * part of the name (CLX-479). */
 static void pipe_name(wchar_t* out) {
     static volatile LONG counter;
     unsigned long long parts[3] = {GetCurrentProcessId(), (unsigned long long)InterlockedIncrement(&counter), cx_clock_ns()};
-    const wchar_t* prefix = L"\\\\.\\pipe\\calx-";
+    const wchar_t* prefix = L"\\\\.\\pipe\\LOCAL\\calx-";
     size_t k = 0;
     while (prefix[k]) {
         out[k] = prefix[k];
@@ -828,9 +902,407 @@ static BOOL CALLBACK make_bound_job(PINIT_ONCE once, PVOID param, PVOID* ctx) {
     return TRUE;
 }
 
-/* The handles the child inherits and the job it goes into, for CreateProcess. */
-static LPPROC_THREAD_ATTRIBUTE_LIST make_attrs(HANDLE* list, DWORD count, int job) {
-    DWORD n = (count ? 1 : 0) + (job ? 1 : 0);
+/* --- Confinement on Windows: an AppContainer (CLX-479) ------------------------------------- *
+ *
+ * A confined child runs in the AppContainer the confinement's name makes, which the programs it
+ * starts are in too. Windows lets an AppContainer open only what's granted to its SID, to a
+ * capability it has, or to every AppContainer: the system's own folders, System32 and Program
+ * Files, grant that, and a user's home, other folders and other drives don't. Each folder given
+ * gets an ACE for the container's SID that what's under it inherits, read and write or read alone,
+ * and each folder above it, up to the drive's root, an ACE of its own, which nothing inherits,
+ * that lets the container read that folder's attributes and pass through it, but not list it: a
+ * program that looks at every folder above its own, as git does, needs that. Windows won't let a
+ * user change C:\ or C:\Users, which only let an AppContainer pass through, so such a program
+ * fails for a folder under C:\Users.
+ *
+ * What was granted is kept in the registry, under HKCU\Software\Calx\Confine, which the container
+ * can't write, so `cx_proc_confine_remove` takes each ACE back off before it deletes the profile.
+ * The internetClient capability lets it reach the internet; an AppContainer never reaches this
+ * machine's own addresses. */
+
+#define CONFINE_KEY L"Software\\Calx\\Confine"
+
+/* The confinement's name, as UTF-16. */
+static void confine_name(const spec* sp, wbuf* out) { w_utf8(out, sp->confine.name); }
+
+/* The container's SID, made with its profile if there isn't one. Freed with FreeSid. */
+static PSID container_sid(const wchar_t* name, int make) {
+    PSID sid = NULL;
+    HRESULT hr = make ? CreateAppContainerProfile(name, name, name, NULL, 0, &sid) : HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS);
+    if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)) hr = DeriveAppContainerSidFromAppContainerName(name, &sid);
+    if (FAILED(hr)) {
+        SetLastError((DWORD)hr);
+        return NULL;
+    }
+    return sid;
+}
+
+/* Whether `acl` has an ACE of its own, not inherited, that grants `sid` at least `mask` with
+ * `flags`. */
+static int has_ace(PACL acl, PSID sid, DWORD mask, BYTE flags) {
+    if (!acl) return 0;
+    for (DWORD i = 0; i < acl->AceCount; i++) {
+        ACCESS_ALLOWED_ACE* a;
+        if (!GetAce(acl, i, (void**)&a)) continue;
+        if (a->Header.AceType != ACCESS_ALLOWED_ACE_TYPE || (a->Header.AceFlags & INHERITED_ACE)) continue;
+        if ((a->Header.AceFlags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)) != flags) continue;
+        if ((a->Mask & mask) == mask && EqualSid((PSID)&a->SidStart, sid)) return 1;
+    }
+    return 0;
+}
+
+/* Grants `sid` `mask` on the folder or file `path`, inherited by what's under a folder, which
+ * SetNamedSecurityInfo gives what's there already. Nothing changes if it has it already. */
+static DWORD grant_tree(const wchar_t* path, PSID sid, DWORD mask, int folder) {
+    PACL old = NULL, acl = NULL;
+    PSECURITY_DESCRIPTOR sd = NULL;
+    DWORD e = GetNamedSecurityInfoW(path, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &old, NULL, &sd);
+    if (e) return e;
+    BYTE flags = folder ? OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE : 0;
+    if (!has_ace(old, sid, mask, flags)) {
+        EXPLICIT_ACCESSW ea;
+        memset(&ea, 0, sizeof ea);
+        ea.grfAccessPermissions = mask;
+        ea.grfAccessMode = GRANT_ACCESS;
+        ea.grfInheritance = folder ? SUB_CONTAINERS_AND_OBJECTS_INHERIT : NO_INHERITANCE;
+        ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+        ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+        ea.Trustee.ptstrName = (LPWSTR)sid;
+        e = SetEntriesInAclW(1, &ea, old, &acl);
+        if (!e) e = SetNamedSecurityInfoW((LPWSTR)path, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, acl, NULL);
+        if (acl) LocalFree(acl);
+    }
+    LocalFree(sd);
+    return e;
+}
+
+/* The folder's DACL as it is, for set_here, and its control bits. */
+static PSECURITY_DESCRIPTOR dacl_of(const wchar_t* path, PACL* acl, SECURITY_DESCRIPTOR_CONTROL* ctl) {
+    DWORD need = 0;
+    GetFileSecurityW(path, DACL_SECURITY_INFORMATION, NULL, 0, &need);
+    if (!need) return NULL;
+    PSECURITY_DESCRIPTOR sd = grow(NULL, need);
+    BOOL present = FALSE, defaulted = FALSE;
+    DWORD rev;
+    if (!GetFileSecurityW(path, DACL_SECURITY_INFORMATION, sd, need, &need) || !GetSecurityDescriptorDacl(sd, &present, acl, &defaulted) ||
+        !GetSecurityDescriptorControl(sd, ctl, &rev)) {
+        free(sd);
+        return NULL;
+    }
+    if (!present) *acl = NULL;
+    return sd;
+}
+
+/* Sets the folder's DACL to `acl`, keeping whether it inherits, with SetFileSecurity, which
+ * doesn't go through what's under it as SetNamedSecurityInfo would: for the folders above a given
+ * one, a user's home among them. */
+static DWORD set_dacl(const wchar_t* path, PACL acl, SECURITY_DESCRIPTOR_CONTROL ctl) {
+    SECURITY_DESCRIPTOR sd;
+    InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorDacl(&sd, TRUE, acl, FALSE);
+    SECURITY_DESCRIPTOR_CONTROL keep = SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED;
+    SetSecurityDescriptorControl(&sd, keep, ctl & keep);
+    return SetFileSecurityW(path, DACL_SECURITY_INFORMATION, &sd) ? 0 : GetLastError();
+}
+
+/* Grants `sid` `mask` on the folder `path` alone, nothing under it inheriting it: put after its
+ * own ACEs, before those it inherits, as Windows orders them. */
+static DWORD grant_here(const wchar_t* path, PSID sid, DWORD mask) {
+    PACL old = NULL;
+    SECURITY_DESCRIPTOR_CONTROL ctl = 0;
+    PSECURITY_DESCRIPTOR sd = dacl_of(path, &old, &ctl);
+    if (!sd) return GetLastError();
+    if (!old || has_ace(old, sid, mask, 0)) {
+        /* No DACL lets everyone in already. */
+        free(sd);
+        return 0;
+    }
+    ACL_SIZE_INFORMATION info;
+    GetAclInformation(old, &info, sizeof info, AclSizeInformation);
+    DWORD size = info.AclBytesInUse + sizeof(ACCESS_ALLOWED_ACE) + GetLengthSid(sid);
+    PACL acl = grow(NULL, size);
+    InitializeAcl(acl, size, ACL_REVISION);
+    int put = 0;
+    for (DWORD i = 0; i < old->AceCount; i++) {
+        ACE_HEADER* h;
+        if (!GetAce(old, i, (void**)&h)) continue;
+        if (!put && (h->AceFlags & INHERITED_ACE)) {
+            AddAccessAllowedAceEx(acl, ACL_REVISION, 0, mask, sid);
+            put = 1;
+        }
+        AddAce(acl, ACL_REVISION, MAXDWORD, h, h->AceSize);
+    }
+    if (!put) AddAccessAllowedAceEx(acl, ACL_REVISION, 0, mask, sid);
+    DWORD e = set_dacl(path, acl, ctl);
+    free(acl);
+    free(sd);
+    return e;
+}
+
+/* Takes every ACE of its own for `sid` off `path`: with SetNamedSecurityInfo, which takes the
+ * copies what's under it inherited off too, for a given folder, or with SetFileSecurity alone for
+ * one above. */
+static DWORD revoke(const wchar_t* path, PSID sid, int tree) {
+    PACL old = NULL;
+    SECURITY_DESCRIPTOR_CONTROL ctl = 0;
+    PSECURITY_DESCRIPTOR sd = dacl_of(path, &old, &ctl);
+    if (!sd) {
+        DWORD e = GetLastError();
+        return e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND ? 0 : e;
+    }
+    DWORD e = 0;
+    int found = 0;
+    for (DWORD i = 0; old && i < old->AceCount; i++) {
+        ACCESS_ALLOWED_ACE* a;
+        if (GetAce(old, i, (void**)&a) && !(a->Header.AceFlags & INHERITED_ACE) && a->Header.AceType == ACCESS_ALLOWED_ACE_TYPE &&
+            EqualSid((PSID)&a->SidStart, sid)) {
+            found = 1;
+        }
+    }
+    if (found && tree) {
+        EXPLICIT_ACCESSW ea;
+        memset(&ea, 0, sizeof ea);
+        ea.grfAccessMode = REVOKE_ACCESS;
+        ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+        ea.Trustee.ptstrName = (LPWSTR)sid;
+        PACL acl = NULL;
+        e = SetEntriesInAclW(1, &ea, old, &acl);
+        if (!e) e = SetNamedSecurityInfoW((LPWSTR)path, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, acl, NULL);
+        if (acl) LocalFree(acl);
+    } else if (found) {
+        ACL_SIZE_INFORMATION info;
+        GetAclInformation(old, &info, sizeof info, AclSizeInformation);
+        PACL acl = grow(NULL, info.AclBytesInUse);
+        InitializeAcl(acl, info.AclBytesInUse, ACL_REVISION);
+        for (DWORD i = 0; i < old->AceCount; i++) {
+            ACCESS_ALLOWED_ACE* a;
+            if (!GetAce(old, i, (void**)&a)) continue;
+            if (!(a->Header.AceFlags & INHERITED_ACE) && a->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && EqualSid((PSID)&a->SidStart, sid)) continue;
+            AddAce(acl, ACL_REVISION, MAXDWORD, a, a->Header.AceSize);
+        }
+        e = set_dacl(path, acl, ctl);
+        free(acl);
+    }
+    free(sd);
+    return e;
+}
+
+/* The paths granted to the confinement `name`, as the registry keeps them: a REG_MULTI_SZ whose
+ * entries are 'T' and a given path, or 'A' and a folder above one. */
+static void record_read(const wchar_t* name, wbuf* out) {
+    DWORD size = 0;
+    out->len = 0;
+    if (RegGetValueW(HKEY_CURRENT_USER, CONFINE_KEY, name, RRF_RT_REG_MULTI_SZ, NULL, NULL, &size) != ERROR_SUCCESS || !size) return;
+    w_reserve(out, size / sizeof(wchar_t) + 2);
+    if (RegGetValueW(HKEY_CURRENT_USER, CONFINE_KEY, name, RRF_RT_REG_MULTI_SZ, NULL, out->p, &size) != ERROR_SUCCESS) return;
+    out->len = size / sizeof(wchar_t);
+    /* It ends in two zeros; keep one, so each entry ends in one. */
+    while (out->len && out->p[out->len - 1] == 0) out->len--;
+    out->p[out->len++] = 0;
+}
+
+/* Whether the record has the entry `kind` `path`. */
+static int record_has(const wbuf* rec, wchar_t kind, const wchar_t* path) {
+    for (size_t i = 0; i < rec->len;) {
+        const wchar_t* e = rec->p + i;
+        size_t n = wcslen(e);
+        if (n && e[0] == kind && _wcsicmp(e + 1, path) == 0) return 1;
+        i += n + 1;
+    }
+    return 0;
+}
+
+/* Adds the entry to the record, kept as it's written, before the ACE it names is set, so a
+ * program that ends in between leaves nothing `remove` doesn't know of. */
+static DWORD record_add(const wchar_t* name, wbuf* rec, wchar_t kind, const wchar_t* path) {
+    if (record_has(rec, kind, path)) return 0;
+    w_push(rec, kind);
+    w_add(rec, path, wcslen(path));
+    w_push(rec, 0);
+    w_push(rec, 0);
+    rec->len--;
+    return (DWORD)RegSetKeyValueW(HKEY_CURRENT_USER, CONFINE_KEY, name, REG_MULTI_SZ, rec->p, (DWORD)((rec->len + 1) * sizeof(wchar_t)));
+}
+
+/* Gives the container `sid` the path `p`, from the program, made whole: what's under it, with
+ * `mask`, and each folder above it, to pass through. 0, or the step that failed, with its error
+ * code in `*e`. */
+enum { G_OK, G_MISSING, G_RECORD, G_ACL };
+static int give(const wchar_t* name, wbuf* rec, PSID sid, span p, DWORD mask, DWORD* e) {
+    wbuf rel = {0}, full = {0};
+    int step = G_OK;
+    w_utf8(&rel, p);
+    DWORD k = GetFullPathNameW(rel.p, 0, NULL, NULL);
+    if (k) {
+        w_reserve(&full, k);
+        full.len = GetFullPathNameW(rel.p, k, full.p, NULL);
+    }
+    DWORD a = k ? GetFileAttributesW(full.p) : INVALID_FILE_ATTRIBUTES;
+    if (a == INVALID_FILE_ATTRIBUTES) {
+        step = G_MISSING;
+        *e = GetLastError();
+        goto done;
+    }
+    /* A folder's path without the separator at its end, but for a drive's root. */
+    while (full.len > 3 && (full.p[full.len - 1] == L'\\' || full.p[full.len - 1] == L'/')) full.p[--full.len] = 0;
+    if ((*e = record_add(name, rec, L'T', full.p)) != 0) {
+        step = G_RECORD;
+        goto done;
+    }
+    if ((*e = grant_tree(full.p, sid, mask, (a & FILE_ATTRIBUTE_DIRECTORY) != 0)) != 0) {
+        step = G_ACL;
+        goto done;
+    }
+    /* Each folder above, to the root, which isn't changed: an ACE there would be for every folder
+     * on the drive. A folder Windows won't let this user change, as C:\Users, stays as it is. */
+    for (;;) {
+        wchar_t* cut = wcsrchr(full.p, L'\\');
+        if (!cut || cut - full.p <= 2) break;
+        *cut = 0;
+        full.len = (size_t)(cut - full.p);
+        if (full.len <= 2) break;
+        if (record_has(rec, L'A', full.p)) continue;
+        DWORD ge = grant_here(full.p, sid, FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE);
+        if (ge == 0 && (*e = record_add(name, rec, L'A', full.p)) != 0) {
+            step = G_RECORD;
+            goto done;
+        }
+    }
+done:
+    w_free(&rel);
+    w_free(&full);
+    return step;
+}
+
+/* Whether the confinement's name is one an AppContainer can have, as std.process checks it too:
+ * 1 to 64 letters, digits, '.', '-' and '_'. */
+static int confine_name_ok(span n) {
+    if (n.n == 0 || n.n > 64) return 0;
+    for (size_t i = 0; i < n.n; i++) {
+        cx_u8 c = n.p[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_')) return 0;
+    }
+    return 1;
+}
+
+/* What a confined child starts with: its container and the capabilities it has. */
+typedef struct {
+    SECURITY_CAPABILITIES sc;
+    SID_AND_ATTRIBUTES caps[1];
+    BYTE internet[SECURITY_MAX_SID_SIZE];
+} confinement;
+
+/* Makes the container, or finds it, and gives it the folders. 0 if it couldn't, saying why. */
+static int confine_prepare(const spec* sp, confinement* c) {
+    memset(c, 0, sizeof *c);
+    if (!confine_name_ok(sp->confine.name)) {
+        confine_fail(0, "a confinement's name is 1 to 64 letters, digits, '.', '-' and '_'", NULL, 0);
+        return 0;
+    }
+    wbuf name = {0}, rec = {0};
+    confine_name(sp, &name);
+    PSID sid = container_sid(name.p, 1);
+    if (!sid) {
+        confine_fail((cx_i32)GetLastError(), "Windows couldn't make the AppContainer", NULL, 0);
+        w_free(&name);
+        return 0;
+    }
+    record_read(name.p, &rec);
+    int ok = 1;
+    for (int pass = 0; pass < 2 && ok; pass++) {
+        span* list = pass ? sp->confine.reads : sp->confine.writes;
+        size_t n = pass ? sp->confine.nreads : sp->confine.nwrites;
+        DWORD mask = pass ? FILE_GENERIC_READ | FILE_GENERIC_EXECUTE : FILE_ALL_ACCESS;
+        for (size_t i = 0; i < n && ok; i++) {
+            DWORD e = 0;
+            int step = give(name.p, &rec, sid, list[i], mask, &e);
+            if (step == G_MISSING) confine_fail(0, "there's nothing to give it at ", (const char*)list[i].p, list[i].n);
+            else if (step == G_RECORD) confine_fail((cx_i32)e, "can't keep in the registry what it was given, for ", (const char*)list[i].p, list[i].n);
+            else if (step == G_ACL) confine_fail((cx_i32)e, "can't let it into ", (const char*)list[i].p, list[i].n);
+            ok = step == G_OK;
+        }
+    }
+    w_free(&rec);
+    w_free(&name);
+    if (!ok) {
+        FreeSid(sid);
+        return 0;
+    }
+    c->sc.AppContainerSid = sid;
+    if (sp->confine.internet) {
+        DWORD size = sizeof c->internet;
+        if (CreateWellKnownSid(WinCapabilityInternetClientSid, NULL, c->internet, &size)) {
+            c->caps[0].Sid = c->internet;
+            c->caps[0].Attributes = SE_GROUP_ENABLED;
+            c->sc.Capabilities = c->caps;
+            c->sc.CapabilityCount = 1;
+        }
+    }
+    return 1;
+}
+
+static void confine_release(confinement* c) {
+    if (c->sc.AppContainerSid) FreeSid(c->sc.AppContainerSid);
+    c->sc.AppContainerSid = NULL;
+}
+
+/* Every Windows this runs on, 10 and later, has AppContainers. */
+static int confine_supported_os(void) { return 1; }
+
+/* Takes back what the confinement was given and deletes its profile, with the files Windows kept
+ * for it there. 1 if it did, or there was nothing to remove. */
+static int confine_remove_os(span n) {
+    if (!confine_name_ok(n)) {
+        confine_fail(0, "a confinement's name is 1 to 64 letters, digits, '.', '-' and '_'", NULL, 0);
+        return 0;
+    }
+    wbuf name = {0}, rec = {0};
+    w_utf8(&name, n);
+    record_read(name.p, &rec);
+    PSID sid = rec.len ? container_sid(name.p, 0) : NULL;
+    int ok = 1;
+    if (rec.len && !sid) {
+        confine_fail((cx_i32)GetLastError(), "Windows couldn't find the AppContainer's SID", NULL, 0);
+        ok = 0;
+    }
+    for (size_t i = 0; ok && i < rec.len;) {
+        const wchar_t* e = rec.p + i;
+        size_t k = wcslen(e);
+        if (k > 1) {
+            DWORD err = revoke(e + 1, sid, e[0] == L'T');
+            if (err) {
+                char path[600];
+                int pn = WideCharToMultiByte(CP_UTF8, 0, e + 1, -1, path, sizeof path, NULL, NULL);
+                confine_fail((cx_i32)err, "can't take its access back off ", path, pn > 0 ? (size_t)pn - 1 : 0);
+                ok = 0;
+            }
+        }
+        i += k + 1;
+    }
+    if (sid) FreeSid(sid);
+    if (ok) {
+        LSTATUS d = RegDeleteKeyValueW(HKEY_CURRENT_USER, CONFINE_KEY, name.p);
+        if (d != ERROR_SUCCESS && d != ERROR_FILE_NOT_FOUND) {
+            confine_fail((cx_i32)d, "can't forget in the registry what it was given", NULL, 0);
+            ok = 0;
+        }
+    }
+    if (ok) {
+        HRESULT hr = DeleteAppContainerProfile(name.p);
+        if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) && hr != HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND)) {
+            confine_fail((cx_i32)hr, "Windows couldn't delete the AppContainer", NULL, 0);
+            ok = 0;
+        }
+    }
+    w_free(&name);
+    w_free(&rec);
+    return ok;
+}
+
+/* The handles the child inherits, the job it goes into and the container it's confined to, for
+ * CreateProcess. */
+static LPPROC_THREAD_ATTRIBUTE_LIST make_attrs(HANDLE* list, DWORD count, int job, SECURITY_CAPABILITIES* sc) {
+    DWORD n = (count ? 1 : 0) + (job ? 1 : 0) + (sc ? 1 : 0);
     if (!n) return NULL;
     SIZE_T size = 0;
     InitializeProcThreadAttributeList(NULL, n, 0, &size);
@@ -840,7 +1312,8 @@ static LPPROC_THREAD_ATTRIBUTE_LIST make_attrs(HANDLE* list, DWORD count, int jo
         return NULL;
     }
     if ((count && !UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, list, count * sizeof(HANDLE), NULL, NULL)) ||
-        (job && !UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &children_job, sizeof(HANDLE), NULL, NULL))) {
+        (job && !UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &children_job, sizeof(HANDLE), NULL, NULL)) ||
+        (sc && !UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, sc, sizeof *sc, NULL, NULL))) {
         DeleteProcThreadAttributeList(attrs);
         free(attrs);
         return NULL;
@@ -1124,6 +1597,9 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
     HANDLE ours[3] = {NULL, NULL, NULL};
     LPPROC_THREAD_ATTRIBUTE_LIST attrs = NULL;
     HANDLE tree = NULL;
+    confinement conf;
+    memset(&conf, 0, sizeof conf);
+    SECURITY_CAPABILITIES* sc = NULL;
     int changes = sp->clear_env || sp->envc;
     if (sp->has_dir) {
         wbuf rel = {0};
@@ -1230,14 +1706,18 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
     si.StartupInfo.hStdInput = child[0];
     si.StartupInfo.hStdOutput = child[1];
     si.StartupInfo.hStdError = child[2];
+    if (sp->confined) {
+        if (!confine_prepare(sp, &conf)) goto done;
+        sc = &conf.sc;
+    }
     InitOnceExecuteOnce(&children_once, make_job, NULL, NULL);
     int job = children_job != NULL;
-    attrs = make_attrs(list, count, job);
+    attrs = make_attrs(list, count, job, sc);
     if (!attrs && job) {
         job = 0;   /* a Windows without job lists, before 10's 1607 */
-        attrs = make_attrs(list, count, 0);
+        attrs = make_attrs(list, count, 0, sc);
     }
-    if (!attrs && count) {
+    if (!attrs && (count || sc)) {
         fail_win(GetLastError());
         goto done;
     }
@@ -1281,14 +1761,20 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
         /* A job this program is in may not allow one inside it: then the child goes without. */
         DWORD e = GetLastError();
         free_attrs(attrs);
-        attrs = make_attrs(list, count, 0);
+        attrs = make_attrs(list, count, 0, sc);
         si.lpAttributeList = attrs;
-        made = (attrs || !count) && CreateProcessW(exe.p, line.p, NULL, NULL, count > 0, flags, changes ? env.p : NULL,
+        made = (attrs || !(count || sc)) && CreateProcessW(exe.p, line.p, NULL, NULL, count > 0, flags, changes ? env.p : NULL,
                                                    sp->has_dir ? dir.p : NULL, &si.StartupInfo, &pi);
         if (!made) SetLastError(e);
     }
     if (!made) {
-        fail_win(GetLastError());
+        DWORD e = GetLastError();
+        if (sc && e == ERROR_ACCESS_DENIED) {
+            confine_fail(0, "it can't read the program, which isn't in the system's folders or one it's given to read: ", (const char*)sp->program.p,
+                         sp->program.n);
+        } else {
+            fail_win(e);
+        }
         goto done;
     }
     if (flags & CREATE_SUSPENDED) {
@@ -1349,6 +1835,7 @@ done:
     }
     if (tree) CloseHandle(tree);
     free_attrs(attrs);
+    confine_release(&conf);
     w_free(&name);
     w_free(&path);
     w_free(&exe);
@@ -2166,6 +2653,378 @@ static int start_watcher(pid_t pid, pid_t pgid) {
 #endif
 #endif
 
+/* --- Confinement on macOS and Linux (CLX-479) ---------------------------------------------- *
+ *
+ * On macOS a confined child runs under the system's sandbox, Seatbelt, as `sandbox-exec -p`
+ * gives it a profile, which the programs it starts keep: everything is denied but reading the
+ * system's own folders and those given, writing those given to write, and what a program needs
+ * of the system to run, such as looking up users and checking certificates. Any path's metadata
+ * may be read, as git's walk up its folders needs, but not a folder's listing nor a file's bytes.
+ * With the internet, it may connect anywhere but this machine's own addresses.
+ *
+ * On Linux it's Landlock, which a thread of this program takes on before it starts the child,
+ * as the affinity is, so only the child, and what it starts, have it: reading and running files
+ * under the system's folders and those given, and writing under those given to write. Without
+ * the internet it can't make a TCP connection, which needs Linux 6.7's Landlock. A confinement
+ * leaves nothing on either system to remove. */
+
+static int confine_name_ok(span n) {
+    if (n.n == 0 || n.n > 64) return 0;
+    for (size_t i = 0; i < n.n; i++) {
+        cx_u8 c = n.p[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_')) return 0;
+    }
+    return 1;
+}
+
+/* The confinement's own temporary folder, which it's given as TMPDIR, since the user's is shared:
+ * calx-confine-NAME in the user's own on macOS, and /tmp/calx-confine-UID-NAME on Linux. */
+static char* confine_temp_path(span n) {
+    cbuf b = {0};
+#ifdef __APPLE__
+    char t[1024];
+    size_t k = confstr(_CS_DARWIN_USER_TEMP_DIR, t, sizeof t);
+    char* r = k > 0 && k <= sizeof t ? realpath(t, NULL) : NULL;
+    if (!r) return NULL;
+    c_add(&b, r, strlen(r));
+    free(r);
+    if (b.p[b.len - 1] != '/') c_add(&b, "/", 1);
+    c_add(&b, "calx-confine-", 13);
+#else
+    char t[64];
+    snprintf(t, sizeof t, "/tmp/calx-confine-%u-", (unsigned)getuid());
+    c_add(&b, t, strlen(t));
+#endif
+    c_add(&b, (const char*)n.p, n.n);
+    return b.p;
+}
+
+#ifndef CX_IOS
+/* The temporary folder, made if it isn't there: this user's alone, and not a link. NULL, having
+ * said why, if it can't be. */
+static char* confine_temp(span n) {
+    char* t = confine_temp_path(n);
+    if (!t) {
+        confine_fail(0, "can't find this user's temporary folder", NULL, 0);
+        return NULL;
+    }
+    struct stat st;
+    if (mkdir(t, 0700) != 0 && errno != EEXIST) {
+        confine_fail(errno, "can't make its temporary folder ", t, strlen(t));
+    } else if (lstat(t, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 077)) {
+        confine_fail(0, "its temporary folder is another user's, or open to them: ", t, strlen(t));
+    } else {
+        return t;
+    }
+    free(t);
+    return NULL;
+}
+#endif
+
+static int rm_entry(const char* path, const struct stat* st, int flag, struct FTW* f) {
+    (void)st, (void)flag, (void)f;
+    return remove(path) == 0 || errno == ENOENT ? 0 : -1;
+}
+
+/* Deletes the confinement's temporary folder, with what's in it, never following a link. */
+static int confine_remove_os(span n) {
+    if (!confine_name_ok(n)) {
+        confine_fail(0, "a confinement's name is 1 to 64 letters, digits, '.', '-' and '_'", NULL, 0);
+        return 0;
+    }
+    char* t = confine_temp_path(n);
+    if (!t) return 1;
+    struct stat st;
+    int ok = 1;
+    if (lstat(t, &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == getuid() && nftw(t, rm_entry, 16, FTW_DEPTH | FTW_PHYS) != 0) {
+        confine_fail(errno, "can't delete its temporary folder ", t, strlen(t));
+        ok = 0;
+    }
+    free(t);
+    return ok;
+}
+
+static char* given_path(span p);
+
+#ifndef CX_IOS
+/* Gives the confined child, in `*envp`, TMPDIR, its own temporary folder, and HOME, the first
+ * folder it may write, unless the command sets them: the user's own it can't use. The texts made
+ * go in `extra`, to free. */
+static void confine_env(const spec* sp, char*** envp, const char* temp, char** extra) {
+    span home_n = {(const cx_u8*)"HOME", 4}, temp_n = {(const cx_u8*)"TMPDIR", 6};
+    int set_home = sp->confine.nwrites > 0, set_temp = 1;
+    for (size_t c = 0; c < sp->envc; c++) {
+        span nm = sp->env[c].name;
+        if (nm.n == 4 && memcmp(nm.p, "HOME", 4) == 0) set_home = 0;
+        if (nm.n == 6 && memcmp(nm.p, "TMPDIR", 6) == 0) set_temp = 0;
+    }
+    char* home = set_home ? given_path(sp->confine.writes[0]) : NULL;
+    size_t n = 0;
+    while ((*envp)[n]) n++;
+    char** e = (char**)grow(NULL, (n + 3) * sizeof *e);
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (home && same_name((*envp)[i], home_n)) continue;
+        if (set_temp && same_name((*envp)[i], temp_n)) continue;
+        e[k++] = (*envp)[i];
+    }
+    if (home) {
+        extra[0] = (char*)grow(NULL, strlen(home) + 6);
+        memcpy(extra[0], "HOME=", 5);
+        strcpy(extra[0] + 5, home);
+        e[k++] = extra[0];
+        free(home);
+    }
+    if (set_temp) {
+        extra[1] = (char*)grow(NULL, strlen(temp) + 8);
+        memcpy(extra[1], "TMPDIR=", 7);
+        strcpy(extra[1] + 7, temp);
+        e[k++] = extra[1];
+    }
+    e[k] = NULL;
+    if (*envp != environ) free(*envp);
+    *envp = e;
+}
+#endif
+
+/* The real path of a path given, made whole with its links followed, as the sandbox compares
+ * them; NULL, having said why, if there's nothing there. */
+static char* given_path(span p) {
+    char* c = cstr(p);
+    char* r = realpath(c, NULL);
+    if (!r) confine_fail(0, "there's nothing to give it at ", c, strlen(c));
+    free(c);
+    return r;
+}
+
+#if defined(__APPLE__) && !defined(CX_IOS)
+
+static int confine_supported_os(void) {
+    if (access("/usr/bin/sandbox-exec", X_OK) == 0) return 1;
+    confine_fail(0, "this macOS has no /usr/bin/sandbox-exec", NULL, 0);
+    return 0;
+}
+
+/* `s` as an SBPL string, quoted. */
+static void sb_quote(cbuf* b, const char* s) {
+    c_add(b, "\"", 1);
+    for (; *s; s++) {
+        if (*s == '"' || *s == '\\') c_add(b, "\\", 1);
+        c_add(b, s, 1);
+    }
+    c_add(b, "\"", 1);
+}
+
+static void sb_line(cbuf* b, const char* s) { c_add(b, s, strlen(s)); }
+
+/* The Seatbelt profile for the confinement, or 0, having said why. */
+static int sb_profile(const spec* sp, cbuf* b, const char* temp) {
+    sb_line(b, "(version 1)\n(deny default)\n"
+               "(allow process-fork)\n(allow process-exec)\n"
+               "(allow signal (target same-sandbox))\n(allow process-info* (target same-sandbox))\n"
+               "(allow sysctl-read)\n(allow file-read-metadata)\n"
+               "(allow ipc-posix-shm-read-data ipc-posix-shm-read-metadata (ipc-posix-name-regex #\"^apple\\.shm\\.notification_center\"))\n"
+               "(allow ipc-posix-sem)\n"
+               /* What a program asks the system for as it runs: users and groups, notifications,
+                * logging, preferences, and certificates' trust, for TLS. Not Launch Services nor
+                * the window server, which would start a program outside. */
+               "(allow mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\" \"com.apple.system.opendirectoryd.membership\""
+               " \"com.apple.system.notification_center\" \"com.apple.system.logger\" \"com.apple.logd\" \"com.apple.diagnosticd\""
+               " \"com.apple.cfprefsd.daemon\" \"com.apple.cfprefsd.agent\" \"com.apple.trustd\" \"com.apple.trustd.agent\""
+               " \"com.apple.SecurityServer\" \"com.apple.ocspd\" \"com.apple.coreservices.launchservicesd\" \"com.apple.system.DirectoryService.libinfo_v1\""
+               " \"com.apple.FSEvents\" \"com.apple.dnssd.service\" \"com.apple.analyticsd\" \"com.apple.TrustEvaluationAgent\"))\n"
+               "(allow file-read* (literal \"/\") (subpath \"/usr\") (subpath \"/bin\") (subpath \"/sbin\") (subpath \"/System\")"
+               " (subpath \"/Library\") (subpath \"/opt\") (regex #\"^/Applications/Xcode[^/]*\\.app(/|$)\") (subpath \"/private/etc\")"
+               " (subpath \"/private/var/db/timezone\") (subpath \"/private/var/db/xcode_select_link\") (subpath \"/private/var/select\")"
+               " (subpath \"/private/var/db/dyld\") (subpath \"/dev\"))\n"
+               "(allow file-read* file-write-data file-ioctl (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\")"
+               " (literal \"/dev/dtracehelper\") (regex #\"^/dev/fd/\") (regex #\"^/dev/ttys[0-9]+$\"))\n");
+    for (int pass = 0; pass < 2; pass++) {
+        span* list = pass ? sp->confine.reads : sp->confine.writes;
+        size_t n = pass ? sp->confine.nreads : sp->confine.nwrites;
+        for (size_t i = 0; i < n; i++) {
+            char* r = given_path(list[i]);
+            if (!r) return 0;
+            sb_line(b, pass ? "(allow file-read* process-exec (subpath " : "(allow file-read* file-write* process-exec (subpath ");
+            sb_quote(b, r);
+            sb_line(b, "))\n");
+            free(r);
+        }
+    }
+    sb_line(b, "(allow file-read* file-write* process-exec (subpath ");
+    sb_quote(b, temp);
+    sb_line(b, "))\n");
+    if (sp->confine.internet) {
+        sb_line(b, "(allow system-socket)\n(allow network-outbound (remote ip))\n"
+                   "(deny network-outbound (remote ip \"localhost:*\"))\n"
+                   "(allow network-outbound (literal \"/private/var/run/mDNSResponder\"))\n");
+    }
+    return 1;
+}
+
+#elif !defined(CX_IOS)
+
+#ifndef SYS_landlock_create_ruleset
+#define SYS_landlock_create_ruleset 444
+#define SYS_landlock_add_rule 445
+#define SYS_landlock_restrict_self 446
+#endif
+
+/* Landlock's ABI, as linux/landlock.h lays it out, for headers older than it. */
+struct ll_ruleset_attr {
+    cx_u64 fs, net, scoped;
+};
+struct ll_path_beneath {
+    cx_u64 allowed;
+    cx_i32 parent_fd;
+} __attribute__((packed));
+enum {
+    LL_EXECUTE = 1 << 0, LL_WRITE_FILE = 1 << 1, LL_READ_FILE = 1 << 2, LL_READ_DIR = 1 << 3, LL_TRUNCATE = 1 << 14, LL_IOCTL_DEV = 1 << 15,
+    LL_NET_BIND = 1 << 0, LL_NET_CONNECT = 1 << 1, LL_SCOPE_UNIX = 1 << 0, LL_SCOPE_SIGNAL = 1 << 1,
+};
+
+/* Landlock's version here, or 0 where it's off. */
+static int landlock_abi(void) {
+    long v = syscall(SYS_landlock_create_ruleset, NULL, 0, 1u);
+    return v > 0 ? (int)v : 0;
+}
+
+static int confine_supported_os(void) {
+    if (landlock_abi()) return 1;
+    confine_fail(0, "this Linux has no Landlock: it needs Linux 5.13, with Landlock among its security modules", NULL, 0);
+    return 0;
+}
+
+/* The file rights this version of Landlock knows: all of them, to deny what isn't allowed. */
+static cx_u64 ll_fs_all(int abi) {
+    cx_u64 all = (1ull << 13) - 1;
+    if (abi >= 2) all |= 1ull << 13; /* REFER */
+    if (abi >= 3) all |= LL_TRUNCATE;
+    if (abi >= 5) all |= LL_IOCTL_DEV;
+    return all;
+}
+
+/* The rights of these that a file, not a folder, can have. */
+static cx_u64 ll_file_rights(cx_u64 r) { return r & (LL_EXECUTE | LL_WRITE_FILE | LL_READ_FILE | LL_TRUNCATE | LL_IOCTL_DEV); }
+
+/* Lets the ruleset `fd` have `rights` under `path`, if it's there. 0, with errno, if adding it failed. */
+static int ll_allow(int fd, const char* path, cx_u64 rights, int must) {
+    int at = open(path, O_PATH | O_CLOEXEC);
+    if (at < 0) return !must;
+    struct stat st;
+    if (fstat(at, &st) == 0 && !S_ISDIR(st.st_mode)) rights = ll_file_rights(rights);
+    struct ll_path_beneath pb = {rights, at};
+    int ok = syscall(SYS_landlock_add_rule, fd, 1, &pb, 0) == 0;
+    int e = errno;
+    close(at);
+    errno = e;
+    return ok;
+}
+
+/* The ruleset for the confinement, or -1, having said why. `self` is this program's file, which a
+ * measured or bound child's helper runs, or NULL. */
+static int ll_ruleset(const spec* sp, const char* self, const char* temp) {
+    int abi = landlock_abi();
+    if (!abi) {
+        confine_supported_os();
+        return -1;
+    }
+    if (!sp->confine.internet && abi < 4) {
+        confine_fail(0, "this Linux's Landlock can't keep a program off the network: that needs Linux 6.7", NULL, 0);
+        return -1;
+    }
+    struct ll_ruleset_attr attr = {ll_fs_all(abi), 0, 0};
+    size_t size = 8;
+    if (!sp->confine.internet) attr.net = LL_NET_BIND | LL_NET_CONNECT;
+    if (abi >= 4) size = 16;
+    if (abi >= 6) attr.scoped = LL_SCOPE_UNIX | LL_SCOPE_SIGNAL, size = 24;
+    int fd = (int)syscall(SYS_landlock_create_ruleset, &attr, size, 0);
+    if (fd < 0) {
+        confine_fail(errno, "Linux couldn't make the Landlock ruleset", NULL, 0);
+        return -1;
+    }
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    cx_u64 read = LL_EXECUTE | LL_READ_FILE | LL_READ_DIR;
+    static const char* system[] = {"/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc", "/opt", "/proc", "/sys",
+                                   "/run", "/nix", "/snap", "/var/lib/snapd/snap", "/gnu"};
+    int ok = 1;
+    for (size_t i = 0; i < sizeof system / sizeof *system && ok; i++) ok = ll_allow(fd, system[i], read, 0);
+    /* What a program writes to and reads from as it runs: /dev/null, the terminal and the like. */
+    if (ok) ok = ll_allow(fd, "/dev", LL_READ_FILE | LL_WRITE_FILE | LL_READ_DIR | (abi >= 3 ? LL_TRUNCATE : 0) | (abi >= 5 ? LL_IOCTL_DEV : 0), 0);
+    if (ok && self) ok = ll_allow(fd, self, LL_EXECUTE | LL_READ_FILE, 0);
+    if (ok) ok = ll_allow(fd, temp, attr.fs, 1);
+    /* The name servers and hosts, wherever /etc links to them: WSL's are in /mnt/wsl. */
+    static const char* links[] = {"/etc/resolv.conf", "/etc/hosts"};
+    for (int i = 0; i < 2 && ok; i++) {
+        char* r = realpath(links[i], NULL);
+        if (r) ok = ll_allow(fd, r, LL_READ_FILE, 0);
+        free(r);
+    }
+    for (int pass = 0; pass < 2 && ok; pass++) {
+        span* list = pass ? sp->confine.reads : sp->confine.writes;
+        size_t n = pass ? sp->confine.nreads : sp->confine.nwrites;
+        for (size_t i = 0; i < n && ok; i++) {
+            char* r = given_path(list[i]);
+            if (!r) {
+                close(fd);
+                return -1;
+            }
+            ok = ll_allow(fd, r, pass ? read : attr.fs, 1);
+            if (!ok) confine_fail(errno, "can't let it into ", r, strlen(r));
+            free(r);
+        }
+    }
+    if (!ok) {
+        if (err_kind != E_CONFINE) confine_fail(errno, "Linux couldn't add a Landlock rule", NULL, 0);
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/* A posix_spawn made on a thread of its own that has taken on the ruleset first, so the child, and
+ * what it starts, have it, and this program's threads don't. */
+typedef struct {
+    int ruleset;
+    pid_t* pid;
+    const char* path;
+    const posix_spawn_file_actions_t* fa;
+    const posix_spawnattr_t* at;
+    char* const* argv;
+    char* const* envp;
+    int e;
+} ll_spawn;
+
+static void* ll_spawn_main(void* arg) {
+    ll_spawn* s = arg;
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 || syscall(SYS_landlock_restrict_self, s->ruleset, 0) != 0) {
+        s->e = errno;
+        return NULL;
+    }
+    s->e = posix_spawn(s->pid, s->path, s->fa, s->at, s->argv, s->envp);
+    return NULL;
+}
+
+/* posix_spawn, confined to `ruleset` if it's one. */
+static int spawn_in(int ruleset, pid_t* pid, const char* path, const posix_spawn_file_actions_t* fa, const posix_spawnattr_t* at,
+                    char* const* argv, char* const* envp) {
+    if (ruleset < 0) return posix_spawn(pid, path, fa, at, argv, envp);
+    ll_spawn s = {ruleset, pid, path, fa, at, argv, envp, 0};
+    pthread_t t;
+    if (pthread_create(&t, NULL, ll_spawn_main, &s) != 0) return EAGAIN;
+    pthread_join(t, NULL);
+    return s.e;
+}
+
+#else
+
+static int confine_supported_os(void) {
+    confine_fail(0, "iOS starts no programs", NULL, 0);
+    return 0;
+}
+
+#endif
+
 #ifdef CX_IOS
 /* Never called: cx_proc_spawn fails first on iOS, whose SDK leaves out what this takes. */
 static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n) {
@@ -2183,6 +3042,14 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
     size_t made_n = 0;
     const char* path = getenv("PATH");
     cbuf exe = {0};
+    char* temp = NULL;
+    char* extra[2] = {NULL, NULL};
+#ifdef __APPLE__
+    cbuf profile = {0};
+    char** sbargv = NULL;
+#else
+    int ruleset = -1;
+#endif
     int ours[3] = {-1, -1, -1}, theirs[3] = {-1, -1, -1};
     posix_spawn_file_actions_t fa;
     posix_spawnattr_t at;
@@ -2235,6 +3102,38 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
         fail(found < 0 ? E_DENIED : E_NOT_FOUND, found < 0 ? EACCES : ENOENT);
         goto done;
     }
+    if (sp->confined) {
+        if (!confine_name_ok(sp->confine.name)) {
+            confine_fail(0, "a confinement's name is 1 to 64 letters, digits, '.', '-' and '_'", NULL, 0);
+            goto done;
+        }
+        if (!confine_supported_os() || !(temp = confine_temp(sp->confine.name))) goto done;
+        for (size_t i = 0; i < sp->confine.nwrites + sp->confine.nreads; i++) {
+            char* r = given_path(i < sp->confine.nwrites ? sp->confine.writes[i] : sp->confine.reads[i - sp->confine.nwrites]);
+            if (!r) goto done;
+            free(r);
+        }
+        confine_env(sp, &envp, temp, extra);
+    }
+#ifdef __APPLE__
+    /* Confined, it's sandbox-exec that's started, with the profile, and it runs the program. */
+    if (sp->confined) {
+        if (!sb_profile(sp, &profile, temp)) goto done;
+        sbargv = (char**)grow(NULL, (sp->argc + 5) * sizeof *sbargv);
+        sbargv[0] = (char*)"sandbox-exec";
+        sbargv[1] = (char*)"-p";
+        sbargv[2] = profile.p;
+        sbargv[3] = exe.p;
+        memcpy(sbargv + 4, argv + 1, (sp->argc + 1) * sizeof *argv);
+    }
+#else
+    if (sp->confined) {
+        char* self = sp->measured || sp->bound ? realpath("/proc/self/exe", NULL) : NULL;
+        ruleset = ll_ruleset(sp, self, temp);
+        free(self);
+        if (ruleset < 0) goto done;
+    }
+#endif
     for (int i = 0; i < 3; i++) {
         switch (sp->io[i]) {
         case IO_PIPE: {
@@ -2414,7 +3313,7 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
     pid_t pid;
     p->started_ns = cx_clock_ns();
 #ifdef __APPLE__
-    int e = posix_spawn(&pid, exe.p, &fa, &at, argv, envp);
+    int e = sbargv ? posix_spawn(&pid, "/usr/bin/sandbox-exec", &fa, &at, sbargv, envp) : posix_spawn(&pid, exe.p, &fa, &at, argv, envp);
     p->pgid = pid;
     if (!e && sp->bound) {
         int w = start_watcher(pid, sp->own_group ? pid : 0);
@@ -2434,7 +3333,7 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
         /* The helper is the one that leads the child's group, and its ID is the group's as long as
          * the group has anyone in it, though the helper has gone. */
         pid_t hpid;
-        e = posix_spawn(&hpid, "/proc/self/exe", &fa, &at, hargv, envp);
+        e = spawn_in(ruleset, &hpid, "/proc/self/exe", &fa, &at, hargv, envp);
         p->pgid = hpid;
         close(report[1]);
         close(slot);
@@ -2443,7 +3342,7 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
         close(report[0]);
         free(hargv);
     } else {
-        e = posix_spawn(&pid, exe.p, &fa, &at, argv, envp);
+        e = spawn_in(ruleset, &pid, exe.p, &fa, &at, argv, envp);
         p->pgid = pid;
     }
     if (pinned) sched_setaffinity(0, sizeof was, &was);
@@ -2495,6 +3394,15 @@ done:
     free(made);
     if (envp != environ) free(envp);
     free(exe.p);
+    free(temp);
+    free(extra[0]);
+    free(extra[1]);
+#ifdef __APPLE__
+    free(profile.p);
+    free(sbargv);
+#else
+    if (ruleset >= 0) close(ruleset);
+#endif
     return ok;
 }
 #endif
@@ -2982,6 +3890,15 @@ void cx_proc_free(cx_i64 h) {
 /* Finds a program as `cx_proc_spawn` would, with this program's PATH: 1 with its path for
  * `cx_proc_result_copy`, or 0. */
 cx_i32 cx_proc_which(const cx_u8* name, cx_usize n) { return which_os(name, n); }
+
+/* Whether this system can confine a program (CLX-479); if not, why is in `result`. */
+cx_bool cx_proc_confine_supported(void) { return confine_supported_os() != 0; }
+
+/* Takes back what the confinement `name` was given: 1, or 0 with why in `result`. */
+cx_bool cx_proc_confine_remove(const cx_u8* name, cx_usize n) {
+    span s = {name, n};
+    return confine_remove_os(s) != 0;
+}
 
 cx_usize cx_proc_result_len(void) { return result_len; }
 void cx_proc_result_copy(cx_u8* to) {

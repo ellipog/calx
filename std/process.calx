@@ -56,6 +56,8 @@ extern "C" {
     fn cx_proc_set_affinity(cpus: *const u32, n: usize) -> i32
     fn cx_proc_full_speed()
     fn cx_proc_machine_cpu(out: *u64)
+    fn cx_proc_confine_supported() -> bool
+    fn cx_proc_confine_remove(name: *const u8, n: usize) -> bool
 }
 
 /// Where a program's input comes from, or where its output goes.
@@ -89,6 +91,9 @@ pub enum ProcessError {
     InputClosed
     /// The system starts no programs at all: iOS, where an app runs alone in its sandbox.
     Unsupported
+    /// It was to be confined, and couldn't be: why. Or `Confine.remove` couldn't take back what a
+    /// confinement was given.
+    Unconfined(String)
     /// Something else, with the system's error code.
     Os(i32)
 }
@@ -109,6 +114,7 @@ impl Display for ProcessError {
             Failed { command, status } => print("`{command}` {status}"),
             InputClosed => print("the program stopped reading its input before all of it was written"),
             Unsupported => print("iOS doesn't let an app start other programs"),
+            Unconfined(why) => print("can't confine it: {why}"),
             Os(code) => print("the system couldn't start the program: error {code}"),
         }
     }
@@ -202,6 +208,96 @@ impl Output {
     }
 }
 
+/// Where a program may go, for `Command.confine` (CLX-479): the folders it may write, those it may
+/// only read, and whether it may reach the internet. Everything else of the machine is closed to
+/// it and to every program it starts, but the system's own programs and libraries, which it may
+/// read and run, so `git`, `node` and a shell work: Windows' System32 and Program Files, macOS'
+/// `/usr`, `/bin`, `/System`, `/Library` and `/opt`, and Linux's `/usr`, `/bin`, `/lib`, `/etc`,
+/// `/opt` and `/proc`. The user's home, other folders and other drives are closed unless given.
+///
+/// On Windows it's an AppContainer of the confinement's name, which lasts until `remove`, and each
+/// folder given gets an ACE for it, which what's in the folder inherits. On macOS it's the
+/// system's sandbox, Seatbelt, as `sandbox-exec` runs it, and on Linux it's Landlock.
+pub struct Confine {
+    label: String,
+    writes: List<String>,
+    reads: List<String>,
+    online: bool,
+}
+
+impl Confine {
+    /// A confinement named `name`, 1 to 64 letters, digits, `.`, `-` and `_`, which may go
+    /// nowhere yet. The same name is the same confinement: on Windows the same AppContainer, and
+    /// a local listener in `std.net` lets the programs in it connect by this name.
+    pub fn new(name: String) -> Confine {
+        return Confine { label: name.copy(), writes: List<String>(), reads: List<String>(), online: false }
+    }
+
+    /// Lets it read and write the folder `path`, and everything in it, or the file. It must be
+    /// there when the program starts.
+    pub fn write(own self, path: String) -> Confine {
+        var c = self
+        c.writes.push(path.copy())
+        return c
+    }
+
+    /// Lets it read the folder `path`, and everything in it, or the file, and run the programs
+    /// there, as the program itself if it isn't in the system's folders. It must be there when
+    /// the program starts.
+    pub fn read(own self, path: String) -> Confine {
+        var c = self
+        c.reads.push(path.copy())
+        return c
+    }
+
+    /// Whether it may connect to the internet: on Windows and macOS, to every address but this
+    /// machine's own, and on Linux, by TCP to any address. Without it, it connects to nothing.
+    pub fn internet(own self, on: bool) -> Confine {
+        var c = self
+        c.online = on
+        return c
+    }
+
+    /// Its name.
+    pub fn name(self) -> String {
+        return self.label.copy()
+    }
+
+    /// Takes back what the confinement `name` was given, for when it's done with: on Windows it
+    /// takes the ACEs off the folders and those above them, and deletes the AppContainer's
+    /// profile, with what Windows kept for it there, its temporary files among them. Elsewhere a
+    /// confinement leaves nothing behind, so there's nothing to do. Nothing in it may be running.
+    pub fn remove(name: String) ! ProcessError {
+        if not name_ok(name) {
+            fail ProcessError.BadArgument("{name} can't be a confinement's name: it's 1 to 64 letters, digits, '.', '-' and '_'")
+        }
+        if not unsafe { cx_proc_confine_remove(name.as_ptr(), name.len()) } {
+            fail ProcessError.Unconfined(result())
+        }
+    }
+}
+
+/// Whether this system can confine a program: Windows 10 and later, every macOS, and Linux 5.13
+/// and later with Landlock on. Not iOS, which starts no programs.
+pub fn confine_supported() -> bool {
+    return unsafe { cx_proc_confine_supported() }
+}
+
+// Whether `name` can be a confinement's: 1 to 64 of a-z, A-Z, 0-9, '.', '-' and '_'.
+fn name_ok(name: String) -> bool {
+    if name.is_empty() or name.len() > 64 {
+        return false
+    }
+    for i in 0..name.len() {
+        let b = name.byte_at(i)
+        let fits = (b >= 97 and b <= 122) or (b >= 65 and b <= 90) or (b >= 48 and b <= 57) or b == 46 or b == 45 or b == 95
+        if not fits {
+            return false
+        }
+    }
+    return true
+}
+
 struct EnvChange {
     name: String,
     value: String?,
@@ -225,6 +321,7 @@ pub struct Command {
     alone: bool,
     grouped: bool,
     bound: bool,
+    jail: Confine?,
 }
 
 impl Command {
@@ -247,6 +344,7 @@ impl Command {
             alone: false,
             grouped: false,
             bound: false,
+            jail: none,
         }
     }
 
@@ -414,6 +512,17 @@ impl Command {
     pub fn ends_with_this(own self) -> Command {
         var c = self
         c.bound = true
+        return c
+    }
+
+    /// Runs it confined to what `jail` gives it, with every program it starts (CLX-479): it reads
+    /// the system's own programs and libraries, and the folders given, writes only the folders
+    /// given to write, and reaches the internet only if it may. Starting it fails with
+    /// `Unconfined` if the system can't confine it, as `confine_supported` says, or a folder
+    /// given isn't there, or the program isn't in a folder it may read.
+    pub fn confine(own self, jail: Confine) -> Command {
+        var c = self
+        c.jail = some(jail.copy())
         return c
     }
 
@@ -933,6 +1042,21 @@ fn check(c: Command) ! ProcessError {
             fail ProcessError.BadArgument(String("the folder's name has a zero byte in it"))
         }
     }
+    if let j = c.jail {
+        if not name_ok(j.label) {
+            fail ProcessError.BadArgument("{j.label} can't be a confinement's name: it's 1 to 64 letters, digits, '.', '-' and '_'")
+        }
+        for p in j.writes {
+            if p.is_empty() or has_zero(p) {
+                fail ProcessError.BadArgument(String("a folder a confinement is given is empty or has a zero byte in it"))
+            }
+        }
+        for p in j.reads {
+            if p.is_empty() or has_zero(p) {
+                fail ProcessError.BadArgument(String("a folder a confinement is given is empty or has a zero byte in it"))
+            }
+        }
+    }
     for v in c.changes {
         if v.name.is_empty() or v.name.contains("=") or has_zero(v.name) {
             fail ProcessError.BadArgument("{v.name} can't be the name of an environment variable")
@@ -990,6 +1114,22 @@ fn start(c: Command, in_default: Stdio, out_default: Stdio, err_default: Stdio, 
     spec.push(if c.alone { 1 } else { 0 })
     spec.push(if c.grouped { 1 } else { 0 })
     spec.push(if c.bound { 1 } else { 0 })
+    match c.jail {
+        some(j) => {
+            spec.push(1)
+            push_text(mut spec, j.label)
+            spec.push(if j.online { 1 } else { 0 })
+            push_u32(mut spec, u32.wrap(j.writes.len()))
+            for w in j.writes {
+                push_text(mut spec, w)
+            }
+            push_u32(mut spec, u32.wrap(j.reads.len()))
+            for r in j.reads {
+                push_text(mut spec, r)
+            }
+        },
+        none => spec.push(0),
+    }
     let h = unsafe { cx_proc_spawn(spec.as_ptr(), spec.len(), c.given.as_ptr(), c.given.len(), group) }
     if h != 0 {
         return h
@@ -1012,6 +1152,7 @@ fn start(c: Command, in_default: Stdio, out_default: Stdio, err_default: Stdio, 
             "the batch file {c.program} has a name cmd.exe can't be given"
         }),
         7 => ProcessError.Unsupported,
+        8 => ProcessError.Unconfined(result()),
         _ => ProcessError.Os(code),
     }
 }

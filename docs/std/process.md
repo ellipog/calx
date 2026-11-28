@@ -353,6 +353,7 @@ Starting it takes a few hundred microseconds more, 0.6 ms in all on the referenc
 | `Failed { command, status }` | It ran, and didn't succeed. Only `run` and `read` fail with it |
 | `InputClosed` | It stopped reading before all of its input was written. Only `Child.write` fails with it |
 | `Unsupported` | The system starts no programs: iOS, where an app runs alone in its sandbox, so every way to start one fails with it there, on the simulator too ([iOS](#ios)) |
+| `Unconfined(why)` | It was to be [confined](#confining-it) and couldn't be: the system can't confine a program, a folder given isn't there, or the program isn't in a folder it may read. `Confine.remove` fails with it too |
 | `Os(code)` | Something else, with the system's error code |
 
 Each shows as a sentence, such as `can't find the program git on PATH`.
@@ -408,6 +409,44 @@ var browser = Command.new("chrome").args(["--headless", "--user-data-dir={profil
 - **On Linux**, killing `calx run` kills the program, which the system sends `SIGKILL` when `calx run` ends, however it ends.
 
 So a test runner that stops a `calx run` that ran too long stops the program too, and it doesn't keep the runner's pipes open. Asking it to stop is different: Ctrl+C, SIGTERM, SIGHUP and Ctrl+Break don't end `calx run` while its program runs, so a program that [handles](signal.md) them ends as it means to, and `calx run` ends with its status ([`calx run`](../reference/command.md#running-a-file)).
+
+## Confining it
+
+`c.confine(jail)` runs the program, and every program it starts, so that it sees only the folders a `Confine` gives it, as an agent that's to start fresh needs (CLX-479). It reads and runs the system's own programs and libraries, so `git`, `node` and a shell work, reads and writes the folders given to write, reads those given to read, and reaches the internet only if it may. The user's home, other folders and other drives are closed to it.
+
+```
+let c = Confine.new("agent-a_1")
+    .write("C:/agents/a_1")
+    .read("C:/Users/x/AppData/Local/tool/bin")
+    .internet(true)
+var agent = Command.new("node").args(["agent.js"]).dir("C:/agents/a_1").confine(c).spawn()!
+```
+
+| `Confine` | Says |
+| --- | --- |
+| `Confine.new(name: String) -> Confine` | A confinement named `name`, 1 to 64 letters, digits, `.`, `-` and `_`, that may go nowhere yet. The same name is the same confinement |
+| `c.write(path: String) -> Confine` | It may read and write the folder, and what's in it, or the file |
+| `c.read(path: String) -> Confine` | It may read the folder, and what's in it, or the file, and run the programs there |
+| `c.internet(on: bool) -> Confine` | Whether it may connect to the internet. Without it, it connects to nothing |
+| `c.name() -> String` | Its name |
+| `Confine.remove(name: String) ! ProcessError` | Takes back what the confinement was given, once nothing in it runs |
+| `confine_supported() -> bool` | Whether this system can confine a program |
+
+A folder given must be there when the program starts, and the program itself must be in the system's folders or in one given: a Calx program started confined needs its own folder given to read. The system's folders are Windows' System32 and Program Files, macOS' `/usr`, `/bin`, `/sbin`, `/System`, `/Library`, `/opt` and `/Applications/Xcode*.app`, and Linux's `/usr`, `/bin`, `/sbin`, `/lib*`, `/etc`, `/opt`, `/proc`, `/sys`, `/run`, `/nix` and `/snap`, with `/dev` to read and write.
+
+**On Windows** it's an AppContainer of the confinement's name, as Chromium's sandboxed processes are:
+
+- Each folder given gets an ACE for the container, which what's in it inherits. Each folder above it gets an ACE of its own, which nothing inherits, that lets the container read the folder's attributes and pass through it, but not list it, as `git` needs to look at every folder above its own. What was given is kept in the registry, under `HKCU\Software\Calx\Confine`, where the container can't write, and `Confine.remove` takes each ACE back off and deletes the container's profile, with what Windows kept for it there.
+- Windows doesn't let a user change `C:\` or `C:\Users`, and they let a container pass through but not look at them, so a program that looks at every folder above its own fails for a folder under `C:\Users`: `git clone` does. A folder outside it, such as one in `C:\` or on another drive, works.
+- Windows Server 2025 doesn't let a container open `NUL`, and Git for Windows opens it each time it starts, so git doesn't run confined there. Windows 11 lets it.
+- With the internet it has the `internetClient` capability. It never reaches this machine's own addresses, `127.0.0.1` among them.
+- Its temporary folder is its own, in its profile, as Windows gives every AppContainer, and its `USERPROFILE` is the user's, which it can't read: `git` takes that as no config.
+
+**On macOS** it's the system's sandbox, Seatbelt, as `sandbox-exec -p` runs it, with a profile that denies everything but what's given and what a program needs of the system to run, such as looking users up and checking certificates. It may read any path's metadata, but not a folder's listing nor a file's bytes. With the internet it may connect anywhere but this machine's own addresses.
+
+**On Linux** it's Landlock, which a thread of this program takes on before it starts the program, as a pinned one is started, so only the program and what it starts have it. Without the internet it can't make a TCP connection, which needs Linux 6.7; on an older Linux, starting a program confined without the internet fails. UDP isn't Landlock's to stop, and with the internet it may reach this machine's own addresses too. On Linux 6.12 and later it can't signal programs outside it nor connect to their abstract Unix sockets. A program started `measured` or `ends_with_this` is started by this program's own file run again, so that file is readable to it.
+
+**On macOS and Linux** it gets a temporary folder of its own as `TMPDIR`, `calx-confine-NAME` in the user's temporary folder on macOS and `/tmp/calx-confine-UID-NAME` on Linux, which `Confine.remove` deletes, and `HOME` is the first folder given to write, unless the command sets them itself.
 
 ## Speed
 

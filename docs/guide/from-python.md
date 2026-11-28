@@ -178,6 +178,7 @@ fn main() ! Error {
 | `subprocess.run(..., capture_output=True)` | `Command.new(...).output()`, with the status and both streams |
 | `Popen(cmd, start_new_session=True)`, `os.killpg(p.pid, signal.SIGTERM)`, `CREATE_NEW_PROCESS_GROUP` with `p.send_signal(signal.CTRL_BREAK_EVENT)` | `Command.new(...).own_group().spawn()` and `child.stop()`, the same call on every system, then `child.kill_tree()` for what's left, which Python needs `psutil` for ([stopping it](../std/process.md#stopping-it-and-what-it-started)) |
 | `Popen(cmd, preexec_fn=lambda: libc.prctl(PR_SET_PDEATHSIG, SIGKILL))`, Linux only | `Command.new(...).ends_with_this().spawn()`, on every system, with its whole group if it's `own_group` too ([ending with this program](../std/process.md#ending-with-this-program)) |
+| No standard library way; `ctypes` against `CreateAppContainerProfile` on Windows, `sandbox-exec` on macOS, Landlock on Linux | `Command.new(...).confine(Confine.new("a").write(dir)).spawn()`, which sees only the folders it's given, on every system ([confining it](../std/process.md#confining-it)) |
 | `p.wait(timeout=10)`, `p.send_signal(signal.SIGHUP)` | `child.wait_timeout(10000)`, `none` if it's still running, and `child.signal(1)` |
 | `shlex.split(line)`, `shlex.quote(w)`, `shlex.join(words)` | `split(line)`, `quote(w)` and `join(words)` from [`std.shell`](../std/shell.md) |
 | `os.wait4(pid, 0)`, `psutil.Process(pid).memory_info()` | `unsafe { status.usage() }`, `unsafe { child.usage() }`: CPU time and memory, the same on both systems, without `ctypes` |
