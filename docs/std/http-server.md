@@ -57,6 +57,7 @@ fn main() ! Error {
 | Item | Gives |
 | --- | --- |
 | `Server.listen(port: u16, host: String = "127.0.0.1") -> Server ! NetError` | A server listening on `port` of `host`. 0 lets the system pick a port, and `""` listens on every address, IPv4 and IPv6, as `python -m http.server` does |
+| `Server.listen_local(name: String, allow: List<String> = []) -> Server ! NetError` | A server listening on the [local socket](net.md#local-sockets) `name`, which the confinements in `allow` may connect to too, so a program [confined](process.md#confining-it) by `std.process` reaches it. Its `port` is 0, its `host` the name, its `url()` `local://NAME/`, which [`std.http`](http.md#local-sockets) takes, and each request's `client` is `""` (CLX-480) |
 | `server.port: u16`, `server.host: String` | The port and address it listens on |
 | `server.max_body: usize` | The longest body it takes, in bytes: 64 MB to start with. A longer one gets `413 Content Too Large` |
 | `server.log: bool` | Whether `serve` prints where it's serving and logs each request to standard error, as Python does: `true` to start with |

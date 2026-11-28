@@ -1086,6 +1086,8 @@ CX_FN(cx_usize, cx_deflate, (const cx_u8* in, cx_usize n, cx_u32 format, cx_u32 
 CX_FN(cx_u64, cx_net_open, (void));
 CX_FN(cx_i32, cx_net_listen, (cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port));
 CX_FN(cx_u32, cx_net_connect, (cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port));
+CX_FN(cx_i32, cx_net_listen_local, (cx_u64 h, const cx_u8* name, cx_usize len, const cx_u8* allow, cx_usize allow_len));
+CX_FN(cx_u32, cx_net_connect_local, (cx_u64 h, const cx_u8* name, cx_usize len));
 CX_FN(cx_usize, cx_net_poll, (cx_u64 h, cx_i64 timeout_ms));
 CX_FN(cx_u32, cx_net_event_kind, (cx_u64 h, cx_usize i));
 CX_FN(cx_u32, cx_net_event_conn, (cx_u64 h, cx_usize i));

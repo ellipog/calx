@@ -41,8 +41,14 @@
 #include <mswsock.h>
 #include <iphlpapi.h>
 #include <windows.h>
+#include <sddl.h>
+#include <userenv.h>
+#include <wchar.h>
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "iphlpapi.lib")
+#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "userenv.lib")
+#undef small /* rpcndr.h's, which these bring in */
 #else
 #define _GNU_SOURCE
 #include <errno.h>
@@ -55,6 +61,8 @@
 #include <pthread.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 #ifdef __APPLE__
@@ -70,7 +78,9 @@
 #include <sys/sendfile.h>
 #endif
 #endif
+#include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -209,6 +219,12 @@ struct net_slot {
     int tf_turn;  /* its TransmitFile in flight counts in tf_busy */
     ULONGLONG tf_since;  /* when that TransmitFile started, in GetTickCount64's milliseconds */
     SOCKET accept_s;
+    /* A local connection or listener (CLX-480): a named pipe, whose handle is in `s`, and for a
+     * listener in `accept_s` the instance waiting for the next client, its name and the security
+     * each instance is made with. */
+    int pipe;
+    wchar_t* pname;
+    PSECURITY_DESCRIPTOR psd;
     int family;
     cx_u8 abuf[2 * (sizeof(SOCKADDR_STORAGE) + 16)];
     cx_u8 rbuf[NET_RECV];
@@ -387,6 +403,10 @@ static void release_slot(net* n, net_slot* s) {
     free(s->ubuf);
     s->ubuf = NULL;
     tf_release(s);
+    free(s->pname);
+    s->pname = NULL;
+    if (s->psd) LocalFree(s->psd);
+    s->psd = NULL;
 #endif
     s->kind = SLOT_FREE;
     n->free_ids = net_grow(n->free_ids, &n->free_cap, n->nfree + 1, sizeof(cx_u32));
@@ -747,6 +767,27 @@ static void op_reset(net_op* op, net_slot* s, int kind) {
     op->op = kind;
 }
 
+/* A connection's handle closed: a socket's, or a named pipe's. */
+static void close_h(const net_slot* s, SOCKET h) {
+    if (s->pipe) CloseHandle((HANDLE)h);
+    else closesocket(h);
+}
+
+/* Starts a receive into `p`, or a send of it: WSARecv and WSASend on a socket, ReadFile and
+ * WriteFile on a pipe. 1 if it's on its way; it completes on the port either way. */
+static int recv_into(const net_slot* s, cx_u8* p, DWORD n, OVERLAPPED* ov) {
+    if (s->pipe) return ReadFile((HANDLE)s->s, p, n, NULL, ov) || GetLastError() == ERROR_IO_PENDING;
+    WSABUF b = {n, (char*)p};
+    DWORD flags = 0;
+    return WSARecv(s->s, &b, 1, NULL, &flags, ov, NULL) == 0 || WSAGetLastError() == WSA_IO_PENDING;
+}
+
+static int send_from(const net_slot* s, const cx_u8* p, DWORD n, OVERLAPPED* ov) {
+    if (s->pipe) return WriteFile((HANDLE)s->s, p, n, NULL, ov) || GetLastError() == ERROR_IO_PENDING;
+    WSABUF b = {n, (char*)p};
+    return WSASend(s->s, &b, 1, NULL, 0, ov, NULL) == 0 || WSAGetLastError() == WSA_IO_PENDING;
+}
+
 /* Whether the next part goes by TransmitFile: if one of NET_TF_TURNS is free, or the calls are
  * going quickly. The turn is given back when the call finishes, with tf_release. */
 static int tf_take(net_slot* s) {
@@ -788,7 +829,7 @@ static void lost(net* n, net_slot* s) {
     if (s->state == CONN_CLOSED) return;
     s->state = CONN_CLOSED;
     if (s->s != INVALID_SOCKET) {
-        closesocket(s->s); /* what the system holds comes back aborted */
+        close_h(s, s->s); /* what the system holds comes back aborted */
         s->s = INVALID_SOCKET;
     }
     emit(n, EV_CLOSED, s);
@@ -808,10 +849,8 @@ static void finish(net* n, net_slot* s) {
 }
 
 static void post_recv(net* n, net_slot* s) {
-    WSABUF b = {NET_RECV, (char*)s->rbuf};
-    DWORD flags = 0;
     op_reset(&s->rop, s, OP_RECV);
-    if (WSARecv(s->s, &b, 1, NULL, &flags, &s->rop.ov, NULL) == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+    if (!recv_into(s, s->rbuf, NET_RECV, &s->rop.ov)) {
         lost(n, s);
         return;
     }
@@ -825,11 +864,11 @@ static void post_recv(net* n, net_slot* s) {
  * bytes, into `fbuf`. The file stays the one being sent until its last part has gone, so what's
  * written after it still waits. */
 static void post_file(net* n, net_slot* s) {
-    if (transmit_limited && (s->fbuf_at < s->fbuf_len || !tf_take(s))) {
+    /* A pipe has no TransmitFile, so its file goes in parts. */
+    if ((transmit_limited || s->pipe) && (s->fbuf_at < s->fbuf_len || s->pipe || !tf_take(s))) {
         if (s->fbuf_at < s->fbuf_len) {
-            WSABUF b = {s->fbuf_len - s->fbuf_at, (char*)s->fbuf + s->fbuf_at};
             op_reset(&s->sop, s, OP_FSEND);
-            if (WSASend(s->s, &b, 1, NULL, 0, &s->sop.ov, NULL) == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+            if (!send_from(s, s->fbuf + s->fbuf_at, s->fbuf_len - s->fbuf_at, &s->sop.ov)) {
                 lost(n, s);
                 return;
             }
@@ -877,9 +916,8 @@ static void post_send(net* n, net_slot* s) {
         s->out = t;
         s->out.len = s->out.at = 0;
     }
-    WSABUF b = {(ULONG)buf_live(&s->fly), (char*)s->fly.p + s->fly.at};
     op_reset(&s->sop, s, OP_SEND);
-    if (WSASend(s->s, &b, 1, NULL, 0, &s->sop.ov, NULL) == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+    if (!send_from(s, s->fly.p + s->fly.at, (DWORD)buf_live(&s->fly), &s->sop.ov)) {
         lost(n, s);
         return;
     }
@@ -888,16 +926,56 @@ static void post_send(net* n, net_slot* s) {
 }
 
 static void opened(net* n, net_slot* s) {
-    BOOL yes = TRUE;
-    setsockopt(s->s, IPPROTO_TCP, TCP_NODELAY, (const char*)&yes, sizeof yes);
-    int len = (int)sizeof s->peer;
-    s->has_peer = getpeername(s->s, (struct sockaddr*)&s->peer, &len) == 0;
+    if (!s->pipe) {
+        BOOL yes = TRUE;
+        setsockopt(s->s, IPPROTO_TCP, TCP_NODELAY, (const char*)&yes, sizeof yes);
+        int len = (int)sizeof s->peer;
+        s->has_peer = getpeername(s->s, (struct sockaddr*)&s->peer, &len) == 0;
+    }
     s->state = CONN_OPEN;
     post_recv(n, s);
     post_send(n, s);
 }
 
+/* A new instance of the listener's pipe, for its next client, on the poller's port, or
+ * INVALID_HANDLE_VALUE. The first is made alone, so a pipe someone else made already isn't joined. */
+static HANDLE pipe_instance(net* n, net_slot* l, int first) {
+    SECURITY_ATTRIBUTES sa = {sizeof sa, l->psd, FALSE};
+    DWORD mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | (first ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0);
+    HANDLE h = CreateNamedPipeW(l->pname, mode, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                                PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, &sa);
+    if (h != INVALID_HANDLE_VALUE && !CreateIoCompletionPort(h, n->iocp, 0, 0)) {
+        CloseHandle(h);
+        h = INVALID_HANDLE_VALUE;
+    }
+    return h;
+}
+
+/* Waits for the next client on the pipe's instance `h`, or a new one. */
+static void accept_pipe(net* n, net_slot* l, HANDLE h) {
+    if (h == INVALID_HANDLE_VALUE) h = pipe_instance(n, l, 0);
+    if (h == INVALID_HANDLE_VALUE) return;
+    l->accept_s = (SOCKET)h;
+    op_reset(&l->cop, l, OP_ACCEPT);
+    if (!ConnectNamedPipe(h, &l->cop.ov)) {
+        DWORD e = GetLastError();
+        if (e == ERROR_PIPE_CONNECTED) {
+            /* A client came before the wait, which then queues nothing: say so as it would. */
+            PostQueuedCompletionStatus(n->iocp, 0, 0, &l->cop.ov);
+        } else if (e != ERROR_IO_PENDING) {
+            CloseHandle(h);
+            l->accept_s = INVALID_SOCKET;
+            return;
+        }
+    }
+    l->pending++;
+}
+
 static void post_accept(net* n, net_slot* l) {
+    if (l->pipe) {
+        accept_pipe(n, l, INVALID_HANDLE_VALUE);
+        return;
+    }
     l->accept_s = WSASocketW(l->family, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
     if (l->accept_s == INVALID_SOCKET) return;
     op_reset(&l->cop, l, OP_ACCEPT);
@@ -963,6 +1041,20 @@ static void completed(net* n, OVERLAPPED_ENTRY* e) {
         case OP_ACCEPT: {
             SOCKET a = s->accept_s;
             s->accept_s = INVALID_SOCKET;
+            if (s->pipe) {
+                /* The instance is on the port already, and is the connection now. */
+                net_slot* c = ok ? new_slot(n, SLOT_CONN) : NULL;
+                if (!c) {
+                    CloseHandle((HANDLE)a);
+                } else {
+                    c->pipe = 1;
+                    c->s = a;
+                    emit(n, EV_ACCEPTED, c);
+                    opened(n, c);
+                }
+                post_accept(n, s);
+                break;
+            }
             if (!ok) {
                 closesocket(a);
             } else {
@@ -994,8 +1086,8 @@ static void completed(net* n, OVERLAPPED_ENTRY* e) {
             if (s->state == CONN_CLOSED) {
                 /* The receive `finish` cancelled: now the socket closes gracefully. */
                 if (s->s != INVALID_SOCKET) {
-                    shutdown(s->s, SD_SEND);
-                    closesocket(s->s);
+                    if (!s->pipe) shutdown(s->s, SD_SEND);
+                    close_h(s, s->s);
                     s->s = INVALID_SOCKET;
                 }
                 break;
@@ -1219,10 +1311,148 @@ static cx_u32 net_connect(net* n, const cx_u8* host, cx_usize len, cx_u16 port) 
     return slot_id(c);
 }
 
+/* --- Local sockets on Windows: named pipes (CLX-480) --------------------------------------- *
+ *
+ * A local listener is the pipe \\.\pipe\NAME, an instance of it waiting for each next client, and
+ * a connection is a connected instance, read and written as a socket is, overlapped on the
+ * poller's port. Only this user and the system may open it, and each confinement it allows: its
+ * AppContainer's SID may read and write it, but not make instances of it, so it can't stand in
+ * for this program, and the pipe's integrity label is low, an AppContainer's. */
+
+/* What a client asks for and an allowed confinement may have: reading, writing and their
+ * attributes, without FILE_CREATE_PIPE_INSTANCE, which GENERIC_WRITE would bring. */
+#define PIPE_CLIENT (FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE)
+
+static wchar_t* pipe_path(const char* name) {
+    int k = MultiByteToWideChar(CP_UTF8, 0, name, -1, NULL, 0);
+    wchar_t* w = malloc((size_t)(k + 10) * sizeof(wchar_t));
+    if (!w) net_out_of_memory();
+    wcscpy(w, L"\\\\.\\pipe\\");
+    MultiByteToWideChar(CP_UTF8, 0, name, -1, w + 9, k);
+    return w;
+}
+
+/* `s` added to the wide text `b`, of `cap`, from `*len`. */
+static void w_cat(wchar_t** b, size_t* len, size_t* cap, const wchar_t* s) {
+    size_t k = wcslen(s);
+    *b = net_grow(*b, cap, *len + k + 1, sizeof(wchar_t));
+    memcpy(*b + *len, s, (k + 1) * sizeof(wchar_t));
+    *len += k;
+}
+
+/* The pipe's security: this user and the system, and each confinement in `allow`, names one to a
+ * line. NULL, having said why, if it can't be made. */
+static PSECURITY_DESCRIPTOR pipe_security(const char* allow) {
+    HANDLE tok;
+    BYTE ub[SECURITY_MAX_SID_SIZE + sizeof(TOKEN_USER)];
+    DWORD ul = 0;
+    wchar_t* user = NULL;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) return NULL;
+    BOOL got = GetTokenInformation(tok, TokenUser, ub, sizeof ub, &ul);
+    CloseHandle(tok);
+    if (!got || !ConvertSidToStringSidW(((TOKEN_USER*)ub)->User.Sid, &user)) return NULL;
+    wchar_t* sddl = NULL;
+    size_t len = 0, cap = 0;
+    w_cat(&sddl, &len, &cap, L"D:P(A;;GA;;;SY)(A;;GA;;;");
+    w_cat(&sddl, &len, &cap, user);
+    w_cat(&sddl, &len, &cap, L")");
+    LocalFree(user);
+    int any = 0, ok = 1;
+    for (const char* a = allow; *a && ok;) {
+        const char* e = strchr(a, '\n');
+        size_t k = e ? (size_t)(e - a) : strlen(a);
+        if (k) {
+            wchar_t name[80];
+            int m = k < 70 ? MultiByteToWideChar(CP_UTF8, 0, a, (int)k, name, 79) : 0;
+            PSID sid = NULL;
+            wchar_t* s = NULL;
+            if (m <= 0) {
+                ok = 0;
+            } else {
+                name[m] = 0;
+                ok = SUCCEEDED(DeriveAppContainerSidFromAppContainerName(name, &sid)) && ConvertSidToStringSidW(sid, &s);
+            }
+            if (ok) {
+                wchar_t ace[40];
+                swprintf(ace, 40, L"(A;;0x%lx;;;", (unsigned long)PIPE_CLIENT);
+                w_cat(&sddl, &len, &cap, ace);
+                w_cat(&sddl, &len, &cap, s);
+                w_cat(&sddl, &len, &cap, L")");
+                any = 1;
+            }
+            if (s) LocalFree(s);
+            if (sid) FreeSid(sid);
+        }
+        a += k + (e ? 1 : 0);
+    }
+    if (any) w_cat(&sddl, &len, &cap, L"S:(ML;;NW;;;LW)");
+    PSECURITY_DESCRIPTOR sd = NULL;
+    if (ok && !ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, NULL)) sd = NULL;
+    free(sddl);
+    return sd;
+}
+
+static cx_i32 listen_local_os(net* n, const char* name, const char* allow) {
+    net_slot* l = new_slot(n, SLOT_LISTENER);
+    if (!l) {
+        net_fail(ERR_OTHER, 0);
+        return -1;
+    }
+    l->pipe = 1;
+    l->pname = pipe_path(name);
+    l->psd = pipe_security(allow);
+    if (!l->psd) {
+        net_fail(ERR_OTHER, (cx_i32)GetLastError());
+        release_slot(n, l);
+        return -1;
+    }
+    HANDLE h = pipe_instance(n, l, 1);
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD e = GetLastError();
+        net_fail(e == ERROR_ACCESS_DENIED || e == ERROR_PIPE_BUSY ? ERR_IN_USE : ERR_OTHER, (cx_i32)e);
+        release_slot(n, l);
+        return -1;
+    }
+    accept_pipe(n, l, h);
+    return 0;
+}
+
+static cx_u32 connect_local_os(net* n, const char* name) {
+    wchar_t* path = pipe_path(name);
+    HANDLE h = INVALID_HANDLE_VALUE;
+    DWORD e = 0;
+    /* Every instance may be busy for a moment, between one client and the next instance. */
+    for (int tries = 0; tries < 50; tries++) {
+        h = CreateFileW(path, PIPE_CLIENT, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                        NULL);
+        if (h != INVALID_HANDLE_VALUE) break;
+        e = GetLastError();
+        if (e != ERROR_PIPE_BUSY) break;
+        WaitNamedPipeW(path, 100);
+    }
+    free(path);
+    if (h == INVALID_HANDLE_VALUE) {
+        net_fail(e == ERROR_FILE_NOT_FOUND || e == ERROR_PIPE_BUSY ? ERR_REFUSED : ERR_OTHER, (cx_i32)e);
+        return NET_NONE;
+    }
+    net_slot* c = new_slot(n, SLOT_CONN);
+    if (!c || !CreateIoCompletionPort(h, n->iocp, 0, 0)) {
+        net_fail(ERR_OTHER, c ? (cx_i32)GetLastError() : 0);
+        CloseHandle(h);
+        if (c) release_slot(n, c);
+        return NET_NONE;
+    }
+    c->pipe = 1;
+    c->s = (SOCKET)h;
+    emit(n, EV_CONNECTED, c);
+    opened(n, c);
+    return slot_id(c);
+}
+
 static void close_now(net_slot* s) {
-    if (s->s != INVALID_SOCKET) closesocket(s->s);
+    if (s->s != INVALID_SOCKET) close_h(s, s->s);
     s->s = INVALID_SOCKET;
-    if (s->accept_s != INVALID_SOCKET) closesocket(s->accept_s);
+    if (s->accept_s != INVALID_SOCKET) close_h(s, s->accept_s);
     s->accept_s = INVALID_SOCKET;
 }
 
@@ -1681,6 +1911,112 @@ static cx_u32 net_connect(net* n, const cx_u8* host, cx_usize len, cx_u16 port) 
     return slot_id(c);
 }
 
+/* --- Local sockets on Linux and macOS: Unix sockets (CLX-480) ------------------------------ *
+ *
+ * A name is a socket in /tmp/calx-local-UID, a folder only this user may use, which a confined
+ * program may connect to (std.process's Seatbelt profile allows it on macOS, and Landlock doesn't
+ * stop it on Linux); a name with a '/' in it is the socket's own path. */
+
+static int local_addr(const char* name, struct sockaddr_un* a, socklen_t* len, int make) {
+    memset(a, 0, sizeof *a);
+    a->sun_family = AF_UNIX;
+    char path[sizeof a->sun_path + 64];
+    if (strchr(name, '/')) {
+        snprintf(path, sizeof path, "%s", name);
+    } else {
+        char dir[64];
+        snprintf(dir, sizeof dir, "/tmp/calx-local-%u", (unsigned)getuid());
+        if (make && mkdir(dir, 0700) != 0 && errno != EEXIST) {
+            fail_os();
+            return 0;
+        }
+        struct stat st;
+        if (make && (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 077))) {
+            /* Another user's, or open to others: no socket of this one's goes there. */
+            net_fail(ERR_OTHER, EACCES);
+            return 0;
+        }
+        snprintf(path, sizeof path, "%s/%s", dir, name);
+    }
+    if (strlen(path) >= sizeof a->sun_path) {
+        net_fail(ERR_ADDRESS, ENAMETOOLONG);
+        return 0;
+    }
+    memcpy(a->sun_path, path, strlen(path) + 1);
+    *len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + strlen(path) + 1);
+    return 1;
+}
+
+static int unix_socket(void) {
+#ifdef __APPLE__
+    return own_socket(socket(AF_UNIX, SOCK_STREAM, 0));
+#else
+    return socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+#endif
+}
+
+static cx_i32 listen_local_os(net* n, const char* name, const char* allow) {
+    (void)allow; /* any program of this user's may connect, confined or not */
+    struct sockaddr_un a;
+    socklen_t len;
+    if (!local_addr(name, &a, &len, 1)) return -1;
+    /* A socket left by a program that has ended is taken over; one that's listening isn't. */
+    struct stat st;
+    if (lstat(a.sun_path, &st) == 0 && S_ISSOCK(st.st_mode)) {
+        int probe = socket(AF_UNIX, SOCK_STREAM, 0);
+        int live = probe >= 0 && connect(probe, (struct sockaddr*)&a, len) == 0;
+        if (probe >= 0) close(probe);
+        if (live) {
+            net_fail(ERR_IN_USE, EADDRINUSE);
+            return -1;
+        }
+        unlink(a.sun_path);
+    }
+    int fd = unix_socket();
+    if (fd < 0 || bind(fd, (struct sockaddr*)&a, len) != 0 || listen(fd, SOMAXCONN) != 0) {
+        fail_os();
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    net_slot* l = new_slot(n, SLOT_LISTENER);
+    if (!l || watch(n, l, fd, 0) != 0) {
+        fail_os();
+        close(fd);
+        if (l) release_slot(n, l);
+        return -1;
+    }
+    l->fd = fd;
+    return 0;
+}
+
+static cx_u32 connect_local_os(net* n, const char* name) {
+    struct sockaddr_un a;
+    socklen_t len;
+    if (!local_addr(name, &a, &len, 0)) return NET_NONE;
+    int fd = unix_socket();
+    if (fd < 0) {
+        fail_os();
+        return NET_NONE;
+    }
+    int r = connect(fd, (struct sockaddr*)&a, len);
+    if (r != 0 && errno != EINPROGRESS && errno != EAGAIN) {
+        int e = errno;
+        net_fail(e == ENOENT || e == ECONNREFUSED ? ERR_REFUSED : ERR_OTHER, e);
+        close(fd);
+        return NET_NONE;
+    }
+    net_slot* c = new_slot(n, SLOT_CONN);
+    if (!c) {
+        net_fail(ERR_OTHER, 0);
+        close(fd);
+        return NET_NONE;
+    }
+    c->fd = fd;
+    c->state = CONN_CONNECTING;
+    if (watch(n, c, fd, 1) != 0) lost(n, c);
+    return slot_id(c);
+}
+
 static void close_all(net* n) {
     for (size_t i = 0; i < n->nslots; i++) {
         if (n->slots[i]->fd >= 0) close(n->slots[i]->fd);
@@ -2108,6 +2444,64 @@ cx_i32 cx_net_listen(cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port) {
 cx_u32 cx_net_connect(cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port) {
     net* n = net_enter(h);
     cx_u32 id = net_connect(n, host, len, port);
+    net_leave(n);
+    return id;
+}
+
+/* A local socket's name, as a NUL-terminated copy, or NULL if it can't be one: 1 to 100 letters,
+ * digits, '.', '-' and '_', or on Linux and macOS a path with a '/' in it. */
+static char* local_name(const cx_u8* p, cx_usize n) {
+    if (n == 0 || n > 200) return NULL;
+    int path = 0;
+    for (cx_usize i = 0; i < n; i++) {
+        if (p[i] == '/') path = 1;
+        if (p[i] == 0) return NULL;
+    }
+#ifdef _WIN32
+    if (path) return NULL;
+#endif
+    for (cx_usize i = 0; i < n && !path; i++) {
+        cx_u8 c = p[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_')) return NULL;
+    }
+    if (!path && n > 100) return NULL;
+    char* s = malloc(n + 1);
+    if (!s) net_out_of_memory();
+    memcpy(s, p, n);
+    s[n] = 0;
+    return s;
+}
+
+/* Listens on the local socket `name` (CLX-480), letting the confinements named in `allow`, one to
+ * a line, connect. 0, or -1 with the error set. */
+cx_i32 cx_net_listen_local(cx_u64 h, const cx_u8* name, cx_usize len, const cx_u8* allow, cx_usize allow_len) {
+    net* n = net_enter(h);
+    char* nm = local_name(name, len);
+    char* al = malloc(allow_len + 1);
+    if (!al) net_out_of_memory();
+    memcpy(al, allow, allow_len);
+    al[allow_len] = 0;
+    cx_i32 r = -1;
+    if (!nm) net_fail(ERR_ADDRESS, 0);
+#ifdef _WIN32
+    else if (!net_start()) net_fail(ERR_OTHER, WSAGetLastError());
+#endif
+    else r = listen_local_os(n, nm, al);
+    free(nm);
+    free(al);
+    net_leave(n);
+    return r;
+}
+
+/* Connects to the local socket `name`: a poll reports Connected, as for TCP. NET_NONE, with the
+ * error set, if nothing listens there. */
+cx_u32 cx_net_connect_local(cx_u64 h, const cx_u8* name, cx_usize len) {
+    net* n = net_enter(h);
+    char* nm = local_name(name, len);
+    cx_u32 id = NET_NONE;
+    if (!nm) net_fail(ERR_ADDRESS, 0);
+    else id = connect_local_os(n, nm);
+    free(nm);
     net_leave(n);
     return id;
 }

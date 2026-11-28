@@ -32,6 +32,7 @@
  * Linux and macOS, on Network.framework's on iOS, and on Winsock and Schannel on Windows. */
 #include "calx_rt.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -52,6 +53,9 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stddef.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 #ifndef __APPLE__
@@ -121,6 +125,10 @@ static int add(bytes* b, const void* p, size_t n) {
 typedef struct request {
     cx_u32 state; /* 0 running, 1 finished */
     int post, https;
+    /* A request over a local socket, local://NAME/... (CLX-480), whose name is in `host`, and the
+     * pipe's handle or the socket while it runs, under `mu` for a stream, for closing it. */
+    int local;
+    intptr_t lh;
     char *url, *host, *target, *head;
     cx_u8* body;
     size_t body_len, limit;
@@ -387,6 +395,55 @@ static char* dup_text(const char* s, size_t n) {
     return p;
 }
 
+static int hex(int c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+
+/* "local://", a local socket's name, percent-encoded, and the path, as std.net names them: 1 to
+ * 100 letters, digits, '.', '-' and '_', or on Linux and macOS a path, "local://%2Frun%2Fx.sock/". */
+static int parse_local(request* r, const char* u, size_t n) {
+    size_t end = 0;
+    while (end < n && u[end] != '#') end++;
+    size_t i = 8, s = i;
+    while (i < end && u[i] != '/' && u[i] != '?') i++;
+    char name[256];
+    size_t k = 0;
+    int path = 0;
+    for (size_t j = s; j < i; j++) {
+        int c = (unsigned char)u[j];
+        if (c == '%' && j + 2 < i + 1 && hex(u[j + 1]) >= 0 && hex(u[j + 2]) >= 0) {
+            c = hex(u[j + 1]) * 16 + hex(u[j + 2]);
+            j += 2;
+        }
+        if (c == 0 || k + 1 >= sizeof name) return 0;
+        if (c == '/') path = 1;
+        name[k++] = (char)c;
+    }
+    name[k] = 0;
+    if (k == 0) return 0;
+#ifdef _WIN32
+    if (path) return 0;
+#endif
+    for (size_t j = 0; j < k && !path; j++) {
+        int c = (unsigned char)name[j];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_')) return 0;
+    }
+    if (!path && k > 100) return 0;
+    r->local = 1;
+    r->https = 0;
+    r->port = 0;
+    r->host = dup_text(name, k);
+    if (i == end || u[i] == '?') {
+        r->target = malloc(end - i + 2);
+        if (!r->target) cx_panic_capacity();
+        r->target[0] = '/';
+        memcpy(r->target + 1, u + i, end - i);
+        r->target[end - i + 1] = 0;
+    } else {
+        r->target = dup_text(u + i, end - i);
+    }
+    r->url = dup_text(u, end);
+    return 1;
+}
+
 /* "http://" or "https://", a host, a port if it isn't the scheme's, and the rest. Only printable
  * ASCII, so the caller encodes anything else; no user and password before the host; and the
  * fragment, after '#', isn't sent, as browsers and Java don't send it. */
@@ -395,6 +452,7 @@ static int parse_url(request* r, const char* u, size_t n) {
         if ((unsigned char)u[k] <= 0x20 || (unsigned char)u[k] >= 0x7f) return 0;
     }
     size_t i;
+    if (starts_ci(u, n, "local://")) return parse_local(r, u, n);
     if (starts_ci(u, n, "https://")) r->https = 1, i = 8;
     else if (starts_ci(u, n, "http://")) r->https = 0, i = 7;
     else return 0;
@@ -1760,10 +1818,407 @@ static int transfer(request* r) {
 
 #endif
 
+/* --- Requests over a local socket (CLX-480) ------------------------------------------------ *
+ *
+ * A request to local://NAME/ goes over std.net's local socket NAME: a named pipe on Windows, a
+ * Unix socket elsewhere, which neither WinHTTP nor every libcurl can use, so it's HTTP/1.1 written
+ * here, on a thread of its own, one connection a request, which ends with it ("Connection:
+ * close"). Its body comes by Content-Length, chunked, or until the connection ends, and a stream's
+ * as it comes, as a remote request's does. */
+
+#ifndef CX_IOS
+
+typedef struct {
+#ifdef _WIN32
+    HANDLE h, ev;
+    const cx_u32* cancel; /* the request's, which a wait looks at, as a close may come between two */
+#else
+    int fd;
+#endif
+} lconn;
+
+#ifdef MSG_NOSIGNAL
+#define L_NOSIGNAL MSG_NOSIGNAL
+#else
+#define L_NOSIGNAL 0 /* macOS: SO_NOSIGPIPE, on the socket */
+#endif
+
+/* Where `t` starts in the `n` bytes at `p`, or NULL. */
+static char* find_in(char* p, size_t n, const char* t) {
+    size_t k = strlen(t);
+    for (size_t i = 0; i + k <= n; i++) {
+        if (memcmp(p + i, t, k) == 0) return p + i;
+    }
+    return NULL;
+}
+
+/* Opens the connection: 0, or the error. */
+static int l_open(request* r, lconn* c, cx_u64 deadline) {
+#ifdef _WIN32
+    int k = MultiByteToWideChar(CP_UTF8, 0, r->host, -1, NULL, 0);
+    wchar_t* path = malloc((size_t)(k + 10) * sizeof(wchar_t));
+    if (!path) cx_panic_capacity();
+    wcscpy(path, L"\\\\.\\pipe\\");
+    MultiByteToWideChar(CP_UTF8, 0, r->host, -1, path + 9, k);
+    DWORD access = FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE;
+    c->h = INVALID_HANDLE_VALUE;
+    DWORD e = 0;
+    while (now_ms() < deadline) {
+        c->h = CreateFileW(path, access, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL);
+        if (c->h != INVALID_HANDLE_VALUE) break;
+        e = GetLastError();
+        if (e != ERROR_PIPE_BUSY) break;
+        WaitNamedPipeW(path, 100);
+    }
+    free(path);
+    if (c->h == INVALID_HANDLE_VALUE) {
+        r->code = (cx_i32)e;
+        return e == ERROR_FILE_NOT_FOUND || e == ERROR_PIPE_BUSY ? E_CONNECT : e ? E_OS : E_TIMEOUT;
+    }
+    c->ev = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!c->ev) {
+        CloseHandle(c->h);
+        c->h = INVALID_HANDLE_VALUE;
+        return E_OS;
+    }
+    return 0;
+#else
+    struct sockaddr_un a;
+    memset(&a, 0, sizeof a);
+    a.sun_family = AF_UNIX;
+    char p[sizeof a.sun_path + 64];
+    if (strchr(r->host, '/')) snprintf(p, sizeof p, "%s", r->host);
+    else snprintf(p, sizeof p, "/tmp/calx-local-%u/%s", (unsigned)getuid(), r->host);
+    if (strlen(p) >= sizeof a.sun_path) return E_BAD_URL;
+    memcpy(a.sun_path, p, strlen(p) + 1);
+    c->fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (c->fd < 0) {
+        r->code = errno;
+        return E_OS;
+    }
+    fcntl(c->fd, F_SETFD, FD_CLOEXEC);
+#ifdef __APPLE__
+    int yes = 1;
+    setsockopt(c->fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof yes);
+#endif
+    if (connect(c->fd, (struct sockaddr*)&a, (socklen_t)(offsetof(struct sockaddr_un, sun_path) + strlen(p) + 1)) != 0) {
+        r->code = errno;
+        close(c->fd);
+        c->fd = -1;
+        return E_CONNECT;
+    }
+    return 0;
+#endif
+}
+
+static void l_close(lconn* c) {
+#ifdef _WIN32
+    if (c->h != INVALID_HANDLE_VALUE) CloseHandle(c->h);
+    if (c->ev) CloseHandle(c->ev);
+    c->h = INVALID_HANDLE_VALUE;
+    c->ev = NULL;
+#else
+    if (c->fd >= 0) close(c->fd);
+    c->fd = -1;
+#endif
+}
+
+/* Reads or writes some of `n` bytes, waiting until `deadline` at most: how many, 0 at the end of
+ * what comes, -1 when the time's up, or -2 if it failed or was closed from the program's thread. */
+static long l_io(lconn* c, void* p, size_t n, int write, cx_u64 deadline) {
+    if (n > 65536) n = 65536;
+#ifdef _WIN32
+    OVERLAPPED ov;
+    memset(&ov, 0, sizeof ov);
+    ov.hEvent = c->ev;
+    ResetEvent(c->ev);
+    DWORD got = 0;
+    BOOL ok = write ? WriteFile(c->h, p, (DWORD)n, NULL, &ov) : ReadFile(c->h, p, (DWORD)n, NULL, &ov);
+    DWORD e = ok ? 0 : GetLastError();
+    if (!ok && e != ERROR_IO_PENDING) return e == ERROR_BROKEN_PIPE || e == ERROR_PIPE_NOT_CONNECTED ? 0 : -2;
+    /* In slices, so a close from the program's thread that came before this began is seen. */
+    for (;;) {
+        cx_u64 now = now_ms();
+        DWORD ms = deadline == FOREVER ? 200 : now >= deadline ? 0 : deadline - now > 200 ? 200 : (DWORD)(deadline - now);
+        if (WaitForSingleObject(c->ev, ms) == WAIT_OBJECT_0) break;
+        int closed = c->cancel && __atomic_load_n(c->cancel, __ATOMIC_ACQUIRE);
+        if (closed || (deadline != FOREVER && now_ms() >= deadline)) {
+            CancelIoEx(c->h, &ov);
+            GetOverlappedResult(c->h, &ov, &got, TRUE);
+            return closed ? -2 : -1;
+        }
+    }
+    if (!GetOverlappedResult(c->h, &ov, &got, FALSE)) {
+        e = GetLastError();
+        return e == ERROR_BROKEN_PIPE || e == ERROR_PIPE_NOT_CONNECTED ? 0 : -2;
+    }
+    return (long)got;
+#else
+    for (;;) {
+        struct pollfd pf = {c->fd, (short)(write ? POLLOUT : POLLIN), 0};
+        int ms = deadline == FOREVER ? -1 : now_ms() >= deadline ? 0 : (int)(deadline - now_ms() > 0x7FFFFFFF ? 0x7FFFFFFF : deadline - now_ms());
+        int k = poll(&pf, 1, ms);
+        if (k < 0 && errno == EINTR) continue;
+        if (k == 0) return -1;
+        if (k < 0) return -2;
+        ssize_t got = write ? send(c->fd, p, n, L_NOSIGNAL) : recv(c->fd, p, n, 0);
+        if (got < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+        if (got < 0) return write ? -2 : 0;
+        return (long)got;
+    }
+#endif
+}
+
+/* Writes all `n` bytes: 0, or the error. */
+static int l_write_all(lconn* c, const char* p, size_t n, cx_u64 deadline) {
+    while (n) {
+        long k = l_io(c, (void*)p, n, 1, deadline);
+        if (k == -1) return E_TIMEOUT;
+        if (k <= 0) return E_PROTOCOL;
+        p += k, n -= (size_t)k;
+    }
+    return 0;
+}
+
+/* What's been read and not yet taken, from `at`. */
+typedef struct {
+    char buf[65536];
+    size_t at, len;
+} lread;
+
+/* Reads more into `b`: 1, 0 at the end, or -1 or -2 as l_io gives them. */
+static int l_more(lconn* c, lread* b, cx_u64 deadline) {
+    if (b->at == b->len) b->at = b->len = 0;
+    if (b->len == sizeof b->buf) {
+        memmove(b->buf, b->buf + b->at, b->len - b->at);
+        b->len -= b->at;
+        b->at = 0;
+    }
+    long k = l_io(c, b->buf + b->len, sizeof b->buf - b->len, 0, deadline);
+    if (k > 0) b->len += (size_t)k;
+    return k > 0 ? 1 : (int)k;
+}
+
+/* Some of the body: kept whole, or for a stream given as it comes. 0, or the error. */
+static int l_body(request* r, const char* p, size_t n) {
+    if (!n) return 0;
+    if (r->stream) {
+        stream_lock(r);
+        while (r->data.len >= STREAM_KEEP && !__atomic_load_n(&r->cancel, __ATOMIC_ACQUIRE)) stream_sleep(r, FOREVER);
+        stream_unlock(r);
+        if (__atomic_load_n(&r->cancel, __ATOMIC_ACQUIRE)) return E_OS;
+        stream_add(r, p, n);
+        return 0;
+    }
+    if (r->data.len + n > r->limit) return E_TOO_LONG;
+    if (!add(&r->data, p, n)) cx_panic_capacity();
+    note_progress(r);
+    return 0;
+}
+
+/* The value of the header `name` in the head `raw`, or NULL, and its length in `*len`. */
+static const char* head_value(const bytes* raw, const char* name, size_t* len) {
+    size_t k = strlen(name), i = 0;
+    while (i < raw->len) {
+        size_t s = i;
+        while (i < raw->len && raw->p[i] != '\n') i++;
+        if (i - s > k && starts_ci(raw->p + s, i - s, name) && raw->p[s + k] == ':') {
+            size_t v = s + k + 1, e = i;
+            while (v < e && (raw->p[v] == ' ' || raw->p[v] == '\t')) v++;
+            while (e > v && (raw->p[e - 1] == '\r' || raw->p[e - 1] == ' ' || raw->p[e - 1] == '\t')) e--;
+            *len = e - v;
+            return raw->p + v;
+        }
+        i++;
+    }
+    return NULL;
+}
+
+static int run_local_on(request* r, lconn* c, cx_u64 deadline, cx_u64 t0) {
+    r->times[T_CONNECT] = (now_ms() - t0) * 1000000;
+    /* The request. */
+    bytes q = {0};
+    const char* method = r->post ? "POST " : "GET ";
+    int ok = add(&q, method, strlen(method)) && add(&q, r->target, strlen(r->target)) && add(&q, " HTTP/1.1\r\n", 11);
+    if (!has_header(r->head, "host")) ok = ok && add(&q, "Host: localhost\r\n", 17);
+    if (!has_header(r->head, "user-agent")) ok = ok && add(&q, "User-Agent: Calx\r\n", 18);
+    ok = ok && add(&q, r->head, strlen(r->head));
+    if (r->post && !has_header(r->head, "content-length")) {
+        char cl[48];
+        snprintf(cl, sizeof cl, "Content-Length: %llu\r\n", (unsigned long long)r->body_len);
+        ok = ok && add(&q, cl, strlen(cl));
+    }
+    ok = ok && add(&q, "Connection: close\r\n\r\n", 21);
+    if (!ok) cx_panic_capacity();
+    int e = l_write_all(c, q.p, q.len, deadline);
+    free(q.p);
+    if (!e && r->body_len) e = l_write_all(c, (const char*)r->body, r->body_len, deadline);
+    if (e) return e;
+    /* The head, after any 1xx ones. */
+    lread* b = malloc(sizeof *b);
+    if (!b) cx_panic_capacity();
+    b->at = b->len = 0;
+    for (;;) {
+        char* end = NULL;
+        while (!(end = b->len > b->at ? find_in(b->buf + b->at, b->len - b->at, "\r\n\r\n") : NULL)) {
+            if (b->len - b->at >= sizeof b->buf - 1) {
+                free(b);
+                return E_PROTOCOL;
+            }
+            int m = l_more(c, b, deadline);
+            if (m != 1) {
+                free(b);
+                return m == -1 ? E_TIMEOUT : E_PROTOCOL;
+            }
+        }
+        size_t hn = (size_t)(end - (b->buf + b->at)) + 4;
+        r->raw.len = 0;
+        if (!add(&r->raw, b->buf + b->at, hn)) cx_panic_capacity();
+        b->at += hn;
+        r->used = line_version(r->raw.p, r->raw.len);
+        if (!r->used || r->raw.len < 12) {
+            free(b);
+            return E_PROTOCOL;
+        }
+        r->status = (cx_u32)((r->raw.p[9] - '0') * 100 + (r->raw.p[10] - '0') * 10 + (r->raw.p[11] - '0'));
+        if (r->status >= 200 || r->status == 101) break;
+    }
+    r->lines.len = 0;
+    if (!tidy_headers(r, 1)) cx_panic_capacity();
+    r->times[T_FIRST_BYTE] = (now_ms() - t0) * 1000000;
+    note_progress(r);
+    if (r->stream) {
+        stream_head(r);
+        deadline = FOREVER;
+    }
+    /* The body. */
+    size_t vn = 0;
+    const char* te = head_value(&r->raw, "transfer-encoding", &vn);
+    int chunked = te && vn >= 7 && starts_ci(te + vn - 7, 7, "chunked");
+    cx_u64 sized = content_length(&r->raw);
+    int none = r->status == 204 || r->status == 304 || (r->status >= 100 && r->status < 200);
+    e = 0;
+    if (none) {
+        /* no body */
+    } else if (chunked) {
+        for (;;) {
+            char* nl;
+            while (!(nl = b->len > b->at ? memchr(b->buf + b->at, '\n', b->len - b->at) : NULL)) {
+                int m = l_more(c, b, deadline);
+                if (m != 1) {
+                    e = m == -1 ? E_TIMEOUT : E_PROTOCOL;
+                    goto out;
+                }
+            }
+            cx_u64 size = 0;
+            int digits = 0;
+            for (char* p = b->buf + b->at; p < nl && hex(*p) >= 0 && digits < 16; p++, digits++) size = size * 16 + (cx_u64)hex(*p);
+            if (!digits) {
+                e = E_PROTOCOL;
+                goto out;
+            }
+            b->at = (size_t)(nl - b->buf) + 1;
+            if (size == 0) break;
+            while (size) {
+                if (b->at == b->len) {
+                    int m = l_more(c, b, deadline);
+                    if (m != 1) {
+                        e = m == -1 ? E_TIMEOUT : E_PROTOCOL;
+                        goto out;
+                    }
+                }
+                size_t take = b->len - b->at < size ? b->len - b->at : (size_t)size;
+                if ((e = l_body(r, b->buf + b->at, take)) != 0) goto out;
+                b->at += take;
+                size -= take;
+            }
+            /* The chunk's CRLF. */
+            while (b->len - b->at < 2) {
+                int m = l_more(c, b, deadline);
+                if (m != 1) {
+                    e = m == -1 ? E_TIMEOUT : E_PROTOCOL;
+                    goto out;
+                }
+            }
+            b->at += 2;
+        }
+    } else {
+        cx_u64 left = sized ? sized - 1 : (cx_u64)-1;
+        for (;;) {
+            size_t here = b->len - b->at;
+            if (here > left) here = (size_t)left;
+            if ((e = l_body(r, b->buf + b->at, here)) != 0) goto out;
+            b->at += here;
+            left -= here;
+            if (!left) break;
+            int m = l_more(c, b, deadline);
+            if (m == 0 && !sized) break;
+            if (m != 1) {
+                e = m == -1 ? E_TIMEOUT : E_PROTOCOL;
+                goto out;
+            }
+        }
+    }
+out:
+    free(b);
+    r->times[T_TOTAL] = (now_ms() - t0) * 1000000;
+    if (e == E_PROTOCOL && __atomic_load_n(&r->cancel, __ATOMIC_ACQUIRE)) e = E_OS;
+    return e;
+}
+
+static void run_local(request* r) {
+    cx_u64 t0 = now_ms();
+    cx_u64 deadline = t0 + r->timeout_ms;
+    lconn c;
+    memset(&c, 0, sizeof c);
+#ifdef _WIN32
+    c.cancel = &r->cancel;
+#else
+    c.fd = -1;
+#endif
+    int e = l_open(r, &c, deadline);
+    if (!e) {
+        /* The program's thread closes a stream through it. */
+        if (r->stream) stream_lock(r);
+        int closed = __atomic_load_n(&r->cancel, __ATOMIC_ACQUIRE);
+#ifdef _WIN32
+        r->lh = (intptr_t)c.h;
+#else
+        r->lh = c.fd;
+#endif
+        if (r->stream) stream_unlock(r);
+        e = closed ? E_OS : run_local_on(r, &c, deadline, t0);
+        if (r->stream) stream_lock(r);
+        r->lh = -1;
+        if (r->stream) stream_unlock(r);
+    }
+    l_close(&c);
+    if (e) r->error = e;
+}
+
+/* Ends a local stream's transfer from the program's thread, which then waits for it. */
+static void local_cancel(request* r) {
+    stream_lock(r);
+    intptr_t h = r->lh;
+    stream_signal(r);
+#ifdef _WIN32
+    if (h != -1) CancelIoEx((HANDLE)h, NULL);
+#else
+    if (h >= 0) shutdown((int)h, SHUT_RDWR);
+#endif
+    stream_unlock(r);
+}
+
+#endif
+
 /* --- the calls std.http makes -------------------------------------------------------------- */
 
 static void finish(request* r) {
-    run(r);
+#ifndef CX_IOS
+    if (r->local) run_local(r);
+    else
+#endif
+        run(r);
     __atomic_store_n(&r->state, 1, __ATOMIC_SEQ_CST);
     if (r->stream) stream_tell(r);
     else request_tell(r);
@@ -1787,6 +2242,7 @@ static cx_u64 begin(int stream, cx_bool post, const cx_u8* url, cx_usize url_len
                     const cx_u8* body, cx_usize body_len, cx_u32 timeout_ms, cx_usize limit, cx_u32 version) {
     request* r = calloc(1, sizeof(request));
     if (!r) cx_panic_capacity();
+    r->lh = -1;
     r->stream = stream;
     if (stream) stream_init(r);
     r->post = post;
@@ -1802,6 +2258,21 @@ static cx_u64 begin(int stream, cx_bool post, const cx_u8* url, cx_usize url_len
     r->body_len = body_len;
     if (!parse_url(r, (const char*)url, url_len)) {
         r->error = E_BAD_URL;
+    } else if (r->local) {
+        /* HTTP/1.1, on a thread of its own, written here; iOS has no local sockets to reach. */
+#ifdef CX_IOS
+        r->error = E_UNAVAILABLE;
+#else
+        if (r->version == V_HTTP2_ONLY) r->error = E_UNAVAILABLE;
+#endif
+        if (r->error) {
+            r->state = 1;
+            return table_add(&requests, r);
+        }
+        int e = cx_os_thread(&r->thread, thread_main, r);
+        if (e == 0) r->started = 1;
+        else r->error = E_OS, r->code = (cx_i32)e, r->state = 1;
+        return table_add(&requests, r);
     }
 #if defined(_WIN32) || defined(CX_IOS)
     /* WinHTTP and URLSession speak HTTP/2 over TLS alone, not h2c. */
@@ -1923,6 +2394,23 @@ void cx_http_stream_close(cx_u64 h) {
     request* r = request_of(h);
     if (!r) return;
     __atomic_store_n(&r->cancel, 1, __ATOMIC_RELEASE);
+#ifndef CX_IOS
+    if (r->local) {
+        local_cancel(r);
+        if (r->started) {
+#ifdef _WIN32
+            WaitForSingleObject(r->thread, INFINITE);
+            CloseHandle(r->thread);
+#else
+            pthread_join(r->thread, NULL);
+#endif
+            r->started = 0;
+        }
+        table_remove(&requests, h);
+        request_free(r);
+        return;
+    }
+#endif
 #ifdef _WIN32
     stream_lock(r);
     HINTERNET q = r->live;

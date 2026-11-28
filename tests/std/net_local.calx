@@ -1,0 +1,98 @@
+// std.net: local sockets (CLX-480). A listener and a client on one `Net` echo bytes; a second
+// listener on the same name, a name nothing listens on, and a name that can't be one fail as they
+// should; and on Windows a program confined under a name the listener doesn't allow can't connect,
+// while one it allows can.
+import std.env.{args, os}
+import std.fs.{remove_dir_all, temp_dir}
+import std.net.{Event, Net, NetError}
+import std.path.{parent_dir}
+import std.process.{Command, Confine, confine_supported, current_exe}
+import std.uuid.{Uuid}
+
+// Connects to `name` and says whether bytes come back.
+fn echo(net: Net, name: String) -> String {
+    let c = match net.connect_local(name) {
+        ok(c) => c,
+        err(e) => return "can't connect: {e}",
+    }
+    net.write(c, "ping".to_bytes())
+    var events = List<Event>()
+    var got = List<u8>()
+    for _ in 0..100 {
+        net.poll(50, mut events)
+        for e in events {
+            match e {
+                Received(x) => {
+                    var buf = List<u8>()
+                    _ = net.read(x, mut buf)
+                    if x == c {
+                        got.extend(buf)
+                    } else {
+                        net.write(x, buf)
+                    }
+                },
+                _ => {},
+            }
+        }
+        if got.len() >= 4 {
+            net.close(c)
+            return String.from_utf8(got) ?? String("?")
+        }
+    }
+    return String("nothing came back")
+}
+
+fn child(name: String) {
+    let net = Net.new()!
+    println(match net.connect_local(name) {
+        ok(_) => "connected",
+        err(_) => "kept out",
+    })
+}
+
+fn main() {
+    let a = args()
+    if a.len() > 0 {
+        child(a[0])
+        return
+    }
+    let id = Uuid.random().simple()
+    let name = "calx-net-{id}"
+    let net = Net.new()!
+    net.listen_local(name, ["calx-allowed-{id}"])!
+    println("echo: {echo(net, name)}")                                  // out: echo: ping
+    let again = Net.new()!
+    println(match again.listen_local(name) {
+        ok => String("listened twice"),
+        err(e) => "twice: {e == NetError.AddressInUse}",                // out: twice: true
+    })
+    println(match net.connect_local("calx-nothing-{id}") {
+        ok(_) => String("connected to nothing"),
+        err(e) => "nothing: {e == NetError.Refused}",                   // out: nothing: true
+    })
+    println(match net.connect_local("no spaces") {
+        ok(_) => String("connected"),
+        err(e) => "bad name: {e == NetError.BadAddress}",               // out: bad name: true
+    })
+    if not confine_supported() {
+        println("allowed: connected")
+        println("not allowed: true")
+        return
+    }
+    // A confined program is let in only by name, on Windows; elsewhere any of this user's is.
+    let home = temp_dir()!
+    let exe_dir = parent_dir(current_exe()) ?? String(".")
+    let allowed = Confine.new("calx-allowed-{id}").write(home).read(exe_dir)
+    let other = Confine.new("calx-other-{id}").write(home).read(exe_dir)
+    var said = List<String>()
+    for c in [allowed, other] {
+        let kid = Command.new(current_exe()).arg(name.copy()).confine(c).output()!
+        said.push(kid.text().trim())
+    }
+    println("allowed: {said[0]}")                                       // out: allowed: connected
+    let kept = if os() == "windows" { said[1] == "kept out" } else { said[1] == "connected" }
+    println("not allowed: {kept}")                                      // out: not allowed: true
+    Confine.remove("calx-allowed-{id}")!
+    Confine.remove("calx-other-{id}")!
+    remove_dir_all(home)!
+}

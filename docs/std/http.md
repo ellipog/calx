@@ -233,6 +233,19 @@ A connection a request opens is kept, and the next request to the same host and 
 
 Requests that ask for HTTP/2 never go over a kept HTTP/1.1 connection that an `Http1` request opened, so a server that takes HTTP/2 always gets it from them.
 
+## Local sockets
+
+A URL `local://NAME/path` sends the request over the [local socket](net.md#local-sockets) `NAME` rather than TCP, to a server such as [`Server.listen_local`](http-server.md#items) gives, as curl's `--unix-socket` does. A program [confined](process.md#confining-it) by `std.process` reaches its parent this way, where it can't reach `127.0.0.1` on Windows (CLX-480).
+
+```
+let r = get("local://tool-a_1/status?x=1", [], 5000, 1 << 20)
+```
+
+- The name may be percent-encoded, and the request's `Host` is `localhost`.
+- It's HTTP/1.1 on a connection of its own, which isn't kept; `Http2Only` gives `Unavailable`, as does iOS.
+- `Connect` means nothing listens on the name, or this program isn't let in.
+- `timings` has `connect_ns`, `first_byte_ns` and `total_ns`, and `reused` is false.
+
 ## Timings
 
 `resp.timings` is how long each step of the request took, as curl's `-w '%{time_connect}'` and the like give them: each in nanoseconds from the request's start to the end of the step. A step the request didn't take is 0, as resolving, connecting and TLS are on a kept connection, and TLS is over `http://`.
@@ -283,9 +296,9 @@ Why a request got no response, as `Error`:
 
 | Error | When | `{e}` |
 | --- | --- | --- |
-| `BadUrl` | The URL isn't `http://` or `https://`, then a host, then an optional port and path. It must be printable ASCII, with anything else percent-encoded, and have no user name before the host | not a valid URL |
+| `BadUrl` | The URL isn't `http://`, `https://` or `local://`, then a host or socket name, then an optional port and path. It must be printable ASCII, with anything else percent-encoded, and have no user name before the host | not a valid URL |
 | `Resolve` | No name server knows the host | can't find the host |
-| `Connect` | Nothing answered at the host and port | can't connect: nothing answered at the host and port |
+| `Connect` | Nothing answered at the host and port, or on the local socket | can't connect: nothing answered at the host and port |
 | `Tls` | The TLS handshake failed, or the system doesn't trust the server's certificate | the TLS handshake failed |
 | `Timeout` | The response didn't come within the time | timed out |
 | `Protocol` | The server closed the connection early, or what it sent isn't HTTP/1.1 or HTTP/2: an HTTP/2-only server's answer to HTTP/1.1, or something that isn't HTTP at all, such as an SSH server on the port. With `Http2Only`, a server that doesn't take HTTP/2 | the response ended early, or the server didn't answer in HTTP/1.1 or HTTP/2 |
