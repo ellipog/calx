@@ -7,7 +7,7 @@ import std.env.{args, os, variable}
 import std.fs.{exists, is_dir, list, make_dir_all, read_text, remove_dir_all, separator, temp_dir, write_text}
 import std.http.{fetch}
 import std.path.{parent_dir}
-import std.process.{Command, Confine, Stdio, confine_supported, current_exe}
+import std.process.{Command, Confine, confine_supported, current_exe}
 import std.uuid.{Uuid}
 
 // What a confined program sees, each a word: what it tried, and whether it could.
@@ -37,8 +37,8 @@ fn child(a: List<String>) {
             err(_) => "denied",
         })
     } else if what == "git" {
-        println(match Command.new("git").arg("--version").stderr(Stdio.Null).read() {
-            ok(v) => String(if v.starts_with("git version") { "ok" } else { "wrong" }),
+        println(match Command.new("git").arg("--version").output() {
+            ok(o) => if o.text().starts_with("git version") { String("ok") } else { "failed: {o.error_text().trim()}" },
             err(e) => "failed: {e}",
         })
     } else if what == "get" {

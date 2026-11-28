@@ -1475,6 +1475,8 @@ CX_FN(cx_i32, cx_fs_write, (cx_i64 h, const cx_u8* from, cx_usize n));
 CX_FN(cx_usize, cx_proc_available, (cx_i64 h, cx_u32 i));
 CX_FN(void, cx_proc_close_input, (cx_i64 h));
 CX_FN(cx_i32, cx_proc_code, (cx_i64 h));
+CX_FN(cx_bool, cx_proc_confine_remove, (const cx_u8* name, cx_usize n));
+CX_FN(cx_bool, cx_proc_confine_supported, (void));
 CX_FN(cx_i32, cx_proc_error_code, (void));
 CX_FN(cx_u32, cx_proc_error_kind, (void));
 CX_FN(cx_i32, cx_proc_exe, (void));
