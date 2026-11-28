@@ -850,7 +850,7 @@ private:
                     if (t->table == TableKind::java) {
                         // The runtime's table, with its nodes' type (D105).
                         out_ += "struct " + ctype(t) + " { union { cx_jtable t; struct { cx_i32* heads; " + jnode(t) +
-                                "* nodes; cx_jtnode* tree; cx_usize len; cx_u32 cap, thr, used, room, spare; }; }; };\n";
+                                "* nodes; cx_jtnode* tree; cx_i32* order; cx_u32 len, cap, thr, used, room, spare; }; }; };\n";
                         break;
                     }
                     // The control bytes, with the slots before them, the slot count less one, the
@@ -1247,6 +1247,21 @@ private:
     }
     // `body` for each slot `i` of the table `tab` that holds a value. A Java table goes bin by bin,
     // in Java's order (D105).
+    // Each node of a Java table in the order a loop goes: along the order its keys went in where
+    // it's kept, else as `each_slot` does. Freeing, copying and comparing don't need the order.
+    static std::string each_java_ordered(const Type* t, const std::string& tab, const std::string& indent, const std::string& body) {
+        std::string s = indent + "if (" + tab + "order) {\n" + indent + "    for (cx_i32 o = 0; o < " + tab + "order[0]; o++) {\n" + indent +
+                        "        cx_i32 i = " + tab + "order[2 + o];\n";
+        for (std::size_t at = 0; at < body.size();) {
+            std::size_t end = body.find('\n', at);
+            s += "    " + body.substr(at, end - at + 1);
+            at = end + 1;
+        }
+        s += indent + "    }\n" + indent + "} else {\n";
+        std::string bins = each_slot(t, tab, indent + "    ", body);
+        return s + bins + indent + "}\n";
+    }
+
     static std::string each_slot(const Type* t, const std::string& tab, const std::string& indent, const std::string& body) {
         if (t->table == TableKind::linked) {
             // Along the list, in the order the keys went in (D109). An empty table has no list.
@@ -2017,6 +2032,7 @@ $replace            return;
         m->nodes[x] = ($N){ h, -1, $new };
         cx_jt_tree_put(&m->t, sizeof($N), $ORD, b, x);
     }
+    if (__builtin_expect(m->order != 0, 0)) cx_jt_order_add(&m->t, x);
     if (++m->len > m->thr) cx_jt_resize(&m->t, sizeof($N), $ORD);
 }
 )";
@@ -2044,6 +2060,7 @@ $dropboth                return 0;
         m->heads[b] = x + 1;
         if (__builtin_expect(n >= 7, 0)) cx_jt_treeify_bin(&m->t, sizeof($N), $ORD, h);
     }
+    if (__builtin_expect(m->order != 0, 0)) cx_jt_order_add(&m->t, x);
     m->len++;
     return 1;
 }
@@ -2056,6 +2073,7 @@ $dropboth                return 0;
         cx_i32 z = $tfind(m, -head - 1, h, k);
         if (z >= 0) {
             cx_jt_tree_remove(&m->t, sizeof($N), b, z);
+            if (__builtin_expect(m->order != 0, 0)) cx_jt_order_drop(&m->t, z);
             m->len--;
         }
         return z;
@@ -2064,6 +2082,7 @@ $dropboth                return 0;
         if (m->nodes[i].hash == h && $eqi) {
             if (before < 0) m->heads[b] = m->nodes[i].next + 1;
             else m->nodes[before].next = m->nodes[i].next;
+            if (__builtin_expect(m->order != 0, 0)) cx_jt_order_drop(&m->t, i);
             m->len--;
             return i;
         }
@@ -2118,6 +2137,9 @@ $dropall    cx_jt_clear(&m->t);
                        release + "} " + r + "; })";
             }
             case BMethod::clear: return table_fn("clear", t) + "(" + address(recv) + ")";
+            case BMethod::keep_order: return "cx_jt_keep_order(&(" + address(recv) + ")->t, sizeof(" + jnode(t) + "))";
+            case BMethod::forget_order: return "cx_jt_forget_order(&(" + address(recv) + ")->t)";
+            case BMethod::keeps_order: return "((" + expr(recv) + ").order != 0)";
             case BMethod::reserve:
                 return head + "cx_usize " + key + " = " + value(e->args[0].value, e->args[0].value->type) + "; cx_jt_reserve(&" + p +
                        "->t, sizeof(" + jnode(t) + "), " + java_order(t) + ", " + key + "); })";
@@ -2829,7 +2851,8 @@ $dropall    m->len = 0;
                 if (t->kind == TypeKind::map) {
                     body += "        cx_print_str(" + str_const(": ") + ");\n        " + show_value(t->elem, at + ".f1") + "\n";
                 }
-                return print("{") + "    cx_bool first = 1;\n" + each_slot(t, "v.", "    ", body) + print("}");
+                return print("{") + "    cx_bool first = 1;\n" + (t->table == TableKind::java ? each_java_ordered(t, "v.", "    ", body) : each_slot(t, "v.", "    ", body)) +
+                       print("}");
             }
             case TypeKind::array:
             case TypeKind::list: {
@@ -4218,13 +4241,15 @@ $dropall    m->len = 0;
                     line("if (!" + arr + "->hash[" + i + "]) continue;");
                 }
             } else if (is_table(at) && at->table == TableKind::java) {
-                // In Java's order (D105).
-                std::string b = tmp();
+                // In Java's order (D105), or along the order the keys went in where it's kept,
+                // as one bin.
+                std::string b = tmp(), o = tmp();
                 elem_at = arr + "->nodes[" + i + "].v";
-                line("for (cx_u32 " + b + " = 0; " + b + " < " + arr + "->cap; " + b + "++) {");
+                line("for (cx_u32 " + b + " = 0; " + b + " < (" + arr + "->order ? 1u : " + arr + "->cap); " + b + "++) {");
                 indent_++;
-                line("for (cx_i32 " + i + " = cx_jt_first(" + arr + "->heads[" + b + "]); " + i + " >= 0; " + i + " = " + arr +
-                     "->nodes[" + i + "].next) {");
+                line("for (cx_i32 " + o + " = 0, " + i + " = " + arr + "->order ? (" + arr + "->order[0] ? " + arr + "->order[2] : -1) : cx_jt_first(" +
+                     arr + "->heads[" + b + "]); " + i + " >= 0; " + i + " = " + arr + "->order ? (++" + o + " < " + arr + "->order[0] ? " + arr +
+                     "->order[2 + " + o + "] : -1) : " + arr + "->nodes[" + i + "].next) {");
                 indent_++;
                 bins = true;
             } else if (is_table(at) && at->table == TableKind::sorted) {

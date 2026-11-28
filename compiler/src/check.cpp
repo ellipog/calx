@@ -11878,6 +11878,9 @@ private:
             else if (m == "capacity" && (recv->table == TableKind::native || recv->table == TableKind::linked)) {
                 b = BMethod::capacity, result = T.usize;
             }
+            else if (m == "keep_order" && recv->table == TableKind::java) b = BMethod::keep_order, changes = true;
+            else if (m == "forget_order" && recv->table == TableKind::java) b = BMethod::forget_order, changes = true;
+            else if (m == "keeps_order" && recv->table == TableKind::java) b = BMethod::keeps_order, result = T.bool_;
             else if (m == "compute_if_absent" && map && recv->table == TableKind::java) {
                 b = BMethod::compute_if_absent, changes = true, params = {recv->key, recv->elem}, result = T.bool_;
             }

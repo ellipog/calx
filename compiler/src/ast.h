@@ -185,6 +185,9 @@ enum class BMethod : std::uint8_t {
     java_hash,  // Java's `hashCode`, on anything with `JavaHash` and on floats (D105)
     utf16_len,  // on text, as Java's `length()`
     compute_if_absent,  // on a `JavaHashMap`, as Java's `computeIfAbsent` adds a key
+    // On a `JavaHashMap` or a `JavaHashSet`: loops in the order the keys went in from now on, Java's
+    // order again, and which it has.
+    keep_order, forget_order, keeps_order,
     trim,  // on an `OpenHashMap` or an `OpenHashSet`, as fastutil's `trim()`
     // On a `LinkedMap` or a `LinkedSet`, at the ends of the order its keys are in (D109).
     first, last, pop_first, pop_last, move_to_first, move_to_last, insert_first, insert_last,

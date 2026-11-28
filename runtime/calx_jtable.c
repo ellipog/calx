@@ -428,6 +428,7 @@ void cx_jt_reserve(cx_jtable* m, cx_usize size, cx_jt_order order, cx_usize n) {
 /* --- the whole table ------------------------------------------------------------------------ */
 
 void cx_jt_free(cx_jtable* m, cx_usize size) {
+    cx_jt_forget_order(m);
     cx_free(m->heads, (cx_usize)m->cap * sizeof(cx_i32));
     cx_free(m->nodes, (cx_usize)m->room * size);
     cx_free(m->tree, (cx_usize)m->room * sizeof(cx_jtnode));
@@ -450,6 +451,11 @@ cx_jtable cx_jt_copy(const cx_jtable* m, cx_usize size) {
             __builtin_memcpy(r.tree, m->tree, (cx_usize)m->used * sizeof(cx_jtnode));
         }
     }
+    if (m->order) {
+        cx_usize bytes = (cx_usize)(m->order[1] + 2) * sizeof(cx_i32);
+        r.order = cx_alloc(bytes);
+        __builtin_memcpy(r.order, m->order, bytes);
+    }
     return r;
 }
 
@@ -459,6 +465,51 @@ void cx_jt_clear(cx_jtable* m) {
     m->len = 0;
     m->used = 0;
     m->spare = 0;
+    if (m->order) m->order[0] = 0;
+}
+
+/* --- the order keys went in ---------------------------------------------------------------
+ *
+ * For a table whose loops show the order its keys went in, as a Java map that keeps its entries
+ * in an array does, such as fastutil's array maps. It's for small tables: taking a key out finds
+ * its node in the list. */
+
+void cx_jt_keep_order(cx_jtable* m, cx_usize size) {
+    if (m->order) return;
+    cx_u32 room = m->len < 4 ? 4 : m->len;
+    m->order = cx_alloc((cx_usize)(room + 2) * sizeof(cx_i32));
+    m->order[0] = 0;
+    m->order[1] = (cx_i32)room;
+    for (cx_u32 b = 0; b < m->cap; b++) {
+        for (cx_i32 i = cx_jt_first(m->heads[b]); i >= 0; i = NEXT(i)) m->order[2 + m->order[0]++] = i;
+    }
+}
+
+void cx_jt_forget_order(cx_jtable* m) {
+    if (!m->order) return;
+    cx_free(m->order, (cx_usize)(m->order[1] + 2) * sizeof(cx_i32));
+    m->order = 0;
+}
+
+void cx_jt_order_add(cx_jtable* m, cx_i32 x) {
+    cx_i32 n = m->order[0], room = m->order[1];
+    if (n == room) {
+        m->order = cx_realloc(m->order, (cx_usize)(room + 2) * sizeof(cx_i32), (cx_usize)(room * 2 + 2) * sizeof(cx_i32));
+        m->order[1] = room * 2;
+    }
+    m->order[2 + n] = x;
+    m->order[0] = n + 1;
+}
+
+void cx_jt_order_drop(cx_jtable* m, cx_i32 x) {
+    cx_i32 n = m->order[0];
+    for (cx_i32 k = n - 1; k >= 0; k--) {
+        if (m->order[2 + k] == x) {
+            __builtin_memmove(m->order + 2 + k, m->order + 3 + k, (cx_usize)(n - 1 - k) * sizeof(cx_i32));
+            m->order[0] = n - 1;
+            return;
+        }
+    }
 }
 
 int cx_jt_str_order(cx_str a, cx_str b) {
