@@ -4,7 +4,7 @@
 // The test runs itself as the confined program that lists one.
 // needs: git
 import std.env.{args, os, variable}
-import std.fs.{exists, is_dir, list, make_dir_all, remove_dir_all, separator, temp_dir}
+import std.fs.{exists, is_dir, list, make_dir_all, remove_dir_all, separator, temp_dir, write_text}
 import std.path.{parent_dir}
 import std.process.{Command, Confine, confine_supported, current_exe}
 import std.uuid.{Uuid}
@@ -28,6 +28,13 @@ fn seen(c: Confine, p: String) -> String {
 
 fn main() {
     let a = args()
+    if a.len() > 0 and a[0] == "nul" {
+        println(match write_text("NUL", "") {
+            ok => "ok",
+            err(_) => "denied",
+        })
+        return
+    }
     if a.len() > 0 {
         println(match list(a[0]) {
             ok(_) => "listed",
@@ -44,7 +51,12 @@ fn main() {
     if not Confine.is_set_up() and variable("CI") != none {
         Confine.setup()!
     }
-    if not Confine.is_set_up() {
+    // Git for Windows opens NUL as it starts, which Windows Server 2025 keeps from an AppContainer,
+    // so git doesn't run confined there.
+    let probe = "calx-test-{Uuid.random().simple()}"
+    let nul_ok = os() != "windows" or seen(Confine.new(probe.copy()).read(parent_dir(current_exe()) ?? String(".")), "nul") == "ok"
+    Confine.remove(probe)!
+    if not Confine.is_set_up() or not nul_ok {
         println("set up: true")                              // out: set up: true
         println("inits: ok")                                 // out: inits: ok
         println("clones: ok")                                // out: clones: ok
