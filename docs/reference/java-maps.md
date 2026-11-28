@@ -70,6 +70,32 @@ fn main() {
 }
 ```
 
+## Keeping the order keys went in
+
+Some Java code keeps a few entries in an array map, such as fastutil's `Reference2ObjectArrayMap`, so they go out in the order they were put in, and then hands them on as a `HashMap`, which has its own order. `m.keep_order()` turns a table into the first kind, and `m.forget_order()` turns it back into the second:
+
+- After `keep_order`, a loop and printing go over the keys there, in Java's order, then each new key in the order it was added. `insert` of a key that's there keeps its place, and `remove` takes a key out of the order.
+- `forget_order` goes back to Java's order, which the table kept all along. `keeps_order()` says which order the table has.
+- `copy()` and `clear` keep the order. `==` doesn't compare it.
+- A parallel loop goes in Java's order.
+
+Taking a key out goes along the kept order to find it, so `keep_order` is for small tables.
+
+```calx
+fn main() {
+    var patch = JavaHashMap<String, i32>()
+    patch.insert(String("stone"), 1)
+    patch.insert(String("dirt"), 2)
+    println("{patch}")    // out: {dirt: 2, stone: 1}
+    patch.keep_order()
+    patch.insert(String("grass"), 3)
+    patch.insert(String("dirt"), 4)
+    println("{patch} {patch.keeps_order()}")    // out: {dirt: 4, stone: 1, grass: 3} true
+    patch.forget_order()
+    println("{patch}")    // out: {grass: 3, dirt: 4, stone: 1}
+}
+```
+
 ## `JavaHash`
 
 A key's bin comes from its `JavaHash`, which is Java's `hashCode`, and so does the slot of a key of an [`OpenHashMap`](fastutil-maps.md) that isn't an integer. `x.java_hash()` gives it, as an `i32`.
@@ -149,4 +175,5 @@ Where Java orders two keys by their addresses, which change from run to run, whi
 - The table is the runtime's `cx_jtable` with its nodes' type, named for its types, such as `cx_jmap_String_i32` and `cx_jset_i32`. It has an array of bins, the nodes in one array, a length and Java's threshold; an empty table allocates nothing.
 - A node is the key's spread hash, the index of the next node in its bin, and the key, or the key and value, in place. A bin holds the index of its first node, negative for a tree. A removed node waits for the next insert.
 - A tree's links are in an array beside the nodes, made with the first tree, so a table without one pays nothing for them.
+- A table that keeps its order has one more array, of its nodes in the order their keys went in, which a loop goes along instead of the bins. Without `keep_order` it's null.
 - Finding, inserting and removing compile to C specialized for the key and value types, as `Map`'s do, comparing a key only where the hash matches. Growing, and building, changing and splitting trees, don't depend on the key's type, so they're the runtime's, in `calx_jtable.c`, linked into a program only when it uses these tables. A tree orders its keys through a function the compiler writes for the key type.

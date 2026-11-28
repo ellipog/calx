@@ -1919,7 +1919,9 @@ CX_COLD CX_FN(void, cx_panic_table_size, (const char* at));
  * node plus one for a list, and minus that for a red-black tree. The nodes are in one array, each
  * starting with its key's spread hash and the next node in its bin, or -1; the compiler's node
  * type follows them with the key, or the key and value. A node that's removed waits in `spare`
- * for the next key. Tree bins keep their links in `tree`, beside the nodes, made with the first. */
+ * for the next key. Tree bins keep their links in `tree`, beside the nodes, made with the first.
+ * A table that keeps its order, `keep_order`, has `order`: its count of nodes, its room, then the
+ * nodes in the order their keys went in, which a loop goes in instead. */
 typedef struct {
     cx_i32 prev, parent, left, right;
     cx_bool red;
@@ -1928,7 +1930,8 @@ typedef struct {
     cx_i32* heads;    /* `cap` bins, or null before the first key */
     void* nodes;      /* room for `room` nodes, `used` of them handed out */
     cx_jtnode* tree;  /* the tree links, for `room` nodes, or null */
-    cx_usize len;     /* the keys */
+    cx_i32* order;    /* the count, the room and the nodes in the order they went in, or null */
+    cx_u32 len;       /* the keys */
     cx_u32 cap;       /* the bins */
     cx_u32 thr;       /* Java's threshold: the table doubles when `len` passes it. Before the first
                        * table, the bins Java's `new HashMap<>(n)` asked for, or 0 for 16 */
@@ -1976,6 +1979,13 @@ CX_FN(void, cx_jt_reserve, (cx_jtable* m, cx_usize size, cx_jt_order order, cx_u
 CX_FN(void, cx_jt_free, (cx_jtable* m, cx_usize size));
 CX_FN(cx_jtable, cx_jt_copy, (const cx_jtable* m, cx_usize size));
 CX_FN(void, cx_jt_clear, (cx_jtable* m));
+/* From now on, the order the keys go in: those there, in Java's order, then each new one last. */
+CX_FN(void, cx_jt_keep_order, (cx_jtable* m, cx_usize size));
+/* Java's order again. */
+CX_FN(void, cx_jt_forget_order, (cx_jtable* m));
+/* The node `x`, of a new key, last in the kept order, and the node `x` taken out of it. */
+CX_FN(void, cx_jt_order_add, (cx_jtable* m, cx_i32 x));
+CX_FN(void, cx_jt_order_drop, (cx_jtable* m, cx_i32 x));
 /* Java's `String.compareTo`, by UTF-16 unit: -1, 0 or 1. */
 CX_FN(int, cx_jt_str_order, (cx_str a, cx_str b));
 
