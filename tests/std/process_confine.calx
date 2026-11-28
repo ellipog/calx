@@ -41,6 +41,11 @@ fn child(a: List<String>) {
             ok(o) => if o.text().starts_with("git version") { String("ok") } else { "failed: {o.error_text().trim()}" },
             err(e) => "failed: {e}",
         })
+    } else if what == "nul" {
+        println(match write_text("NUL", "") {
+            ok => "ok",
+            err(_) => "denied",
+        })
     } else if what == "get" {
         println(match fetch(a[1], 20000) {
             ok(r) => if r.status == 200 { String("ok") } else { "status {r.status}" },
@@ -115,7 +120,14 @@ fn main() {
     }
     println("lists another drive: {other}")                            // out: lists another drive: denied
     println("its programs: {run(c, "nest", home())}")                  // out: its programs: denied
-    println("runs git: {run(c, "git", "")}")                           // out: runs git: ok
+    // Git for Windows opens NUL as it starts, which Windows Server 2025 keeps from an AppContainer.
+    let git = if os() == "windows" and run(c, "nul", "") == "denied" {
+        eprintln("process_confine: this Windows keeps NUL from an AppContainer, so git can't start")
+        String("ok")
+    } else {
+        run(c, "git", "")
+    }
+    println("runs git: {git}")                                         // out: runs git: ok
     println("offline: {run(c, "get", "https://example.com/")}")        // out: offline: failed
     let online = c.internet(true)
     println("online: {run(online, "get", "https://example.com/")}")    // out: online: ok

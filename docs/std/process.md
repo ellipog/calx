@@ -438,6 +438,7 @@ A folder given must be there when the program starts, and the program itself mus
 
 - Each folder given gets an ACE for the container, which what's in it inherits. Each folder above it gets an ACE of its own, which nothing inherits, that lets the container read the folder's attributes and pass through it, but not list it, as `git` needs to look at every folder above its own. What was given is kept in the registry, under `HKCU\Software\Calx\Confine`, where the container can't write, and `Confine.remove` takes each ACE back off and deletes the container's profile, with what Windows kept for it there.
 - Windows doesn't let a user change `C:\` or `C:\Users`, and they let a container pass through but not look at them, so a program that looks at every folder above its own fails for a folder under `C:\Users`: `git clone` does. A folder outside it, such as one in `C:\` or on another drive, works.
+- Windows Server 2025 doesn't let a container open `NUL`, and Git for Windows opens it each time it starts, so git doesn't run confined there. Windows 11 lets it.
 - With the internet it has the `internetClient` capability. It never reaches this machine's own addresses, `127.0.0.1` among them.
 - Its temporary folder is its own, in its profile, as Windows gives every AppContainer, and its `USERPROFILE` is the user's, which it can't read: `git` takes that as no config.
 
