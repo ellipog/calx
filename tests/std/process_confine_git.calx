@@ -57,7 +57,8 @@ fn main() {
     println("set up: {Confine.is_set_up()}")
     let s = separator()
     // On Windows the temporary folder is in the home: C:\Users\NAME\AppData\Local\Temp.
-    let base = "{temp_dir()!}{s}calx-git-{Uuid.random().simple()}"
+    let tmp = temp_dir()!
+    let base = "{tmp}{s}calx-git-{Uuid.random().simple()}"
     make_dir_all(base)!
     let name = "calx-test-{Uuid.random().simple()}"
     let exe_dir = parent_dir(current_exe()) ?? String(".")
@@ -76,5 +77,6 @@ fn main() {
         ok => println("removed"),
         err(e) => println("remove: {e}"),
     }
-    remove_dir_all(base)!
+    // The test's own temporary folder, which the suite gives it, with what's in it.
+    remove_dir_all(tmp)!
 }
