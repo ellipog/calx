@@ -2330,7 +2330,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         link_flags.push_back("-Wl,--gc-sections");
         // The system libraries the runtime's parts use, which Visual Studio's linker takes from the
         // `#pragma comment(lib)` in each. A program imports from one only what it calls.
-        for (const char* lib : {"-lws2_32", "-liphlpapi", "-lwinhttp", "-lbcrypt", "-lsynchronization", "-ladvapi32"}) link_flags.push_back(lib);
+        for (const char* lib : {"-lws2_32", "-liphlpapi", "-lwinhttp", "-lbcrypt", "-lsynchronization", "-ladvapi32", "-luserenv"}) link_flags.push_back(lib);
     } else {
         // The PDB makes lld-link keep every section by default; a section nothing reads, such as
         // an `embed` table a program never looks at, is dropped as it would be without one.
