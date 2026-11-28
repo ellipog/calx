@@ -47,6 +47,17 @@
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "userenv.lib")
 #undef small /* rpcndr.h's, which these bring in */
+#if WINVER < 0x0602
+/* mingw-w64's headers aim at Windows 7 unless told otherwise, and declare AppContainers only from
+ * 8 on. Calx programs need Windows 10, which has them. */
+HRESULT WINAPI CreateAppContainerProfile(PCWSTR name, PCWSTR display, PCWSTR description, PSID_AND_ATTRIBUTES caps,
+                                         DWORD ncaps, PSID* sid);
+HRESULT WINAPI DeleteAppContainerProfile(PCWSTR name);
+HRESULT WINAPI DeriveAppContainerSidFromAppContainerName(PCWSTR name, PSID* sid);
+#endif
+#ifndef PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES
+#define PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES 0x00020009 /* ProcThreadAttributeValue(9, FALSE, TRUE, FALSE) */
+#endif
 #else
 #define _GNU_SOURCE
 #include <dirent.h>
