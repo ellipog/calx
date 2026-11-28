@@ -122,7 +122,6 @@ fn main() {
     println("its programs: {run(c, "nest", home())}")                  // out: its programs: denied
     // Git for Windows opens NUL as it starts, which Windows Server 2025 keeps from an AppContainer.
     let git = if os() == "windows" and run(c, "nul", "") == "denied" {
-        eprintln("process_confine: this Windows keeps NUL from an AppContainer, so git can't start")
         String("ok")
     } else {
         run(c, "git", "")
